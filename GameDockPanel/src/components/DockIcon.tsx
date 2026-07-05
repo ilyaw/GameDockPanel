@@ -24,7 +24,7 @@ export function DockIcon({ app, onToggle, registerRef }: DockIconProps) {
     >
       {/* Tooltip sits just above the icon — less vertical overflow than -top-9 */}
       <div className="relative shrink-0">
-        <span className="pointer-events-none absolute bottom-full left-1/2 mb-1 -translate-x-1/2 scale-90 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 opacity-0 shadow-lg shadow-black/40 transition-all duration-300 ease-out group-hover:scale-100 group-hover:opacity-100">
+        <span className="pointer-events-none absolute bottom-full left-1/2 mb-0.5 -translate-x-1/2 scale-90 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 opacity-0 shadow-lg shadow-black/40 transition-all duration-300 ease-out group-hover:scale-100 group-hover:opacity-100">
           {app.name}
         </span>
 

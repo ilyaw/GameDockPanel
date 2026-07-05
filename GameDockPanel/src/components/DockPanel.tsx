@@ -25,8 +25,8 @@ export function DockPanel() {
     // uses a Rust cursor poller (platform/macos.rs) that toggles
     // setIgnoreCursorEvents so transparent bands above the pill never steal
     // focus from apps underneath — CSS alone is not enough on WKWebView.
-    <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-hidden pb-5">
-      <div className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-4 rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3.5 backdrop-blur-xl">
+    <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-hidden pb-2">
+      <div className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-4 rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3 backdrop-blur-xl">
         {apps.map((app) => (
           <DockIcon
             key={app.id}

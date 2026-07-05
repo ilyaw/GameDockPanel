@@ -2,10 +2,10 @@ use tauri::{App, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 // Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
 const WINDOW_WIDTH_DIP: f64 = 511.0;
-const WINDOW_HEIGHT_DIP: f64 = 127.0;
+const WINDOW_HEIGHT_DIP: f64 = 111.0;
 const PILL_WIDTH_DIP: f64 = 456.0;
-const PILL_HEIGHT_DIP: f64 = 95.0;
-const DOCK_BOTTOM_INSET_DIP: f64 = 20.0;
+const PILL_HEIGHT_DIP: f64 = 91.0;
+const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
 const CLICK_POLL_MS: u64 = 50;
 
 /// Positions, sizes and reveals the main window: a compact, always-on-top

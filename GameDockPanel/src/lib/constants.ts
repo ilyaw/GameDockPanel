@@ -12,11 +12,11 @@ export const DOCK_GAP_PX = 16;
 /** Mirrors `px-5` on the dock pill. */
 export const DOCK_PADDING_X_PX = 20;
 
-/** Mirrors `py-3.5` on the dock pill. */
-export const DOCK_PADDING_Y_PX = 14;
+/** Mirrors `py-3` on the dock pill. */
+export const DOCK_PADDING_Y_PX = 12;
 
-/** Mirrors `pb-5` — gap between pill and the window bottom edge. */
-export const DOCK_BOTTOM_INSET_PX = 20;
+/** Mirrors `pb-2` — gap between pill and the window bottom edge. */
+export const DOCK_BOTTOM_INSET_PX = 8;
 
 /** Mirrors `gap-2` between icon and LED. */
 export const ICON_LED_GAP_PX = 8;
@@ -24,8 +24,8 @@ export const ICON_LED_GAP_PX = 8;
 /** LED bar height (`h-[3px]`). */
 export const LED_HEIGHT_PX = 3;
 
-/** Mirrors `mb-1` gap between tooltip and icon top. */
-export const TOOLTIP_GAP_PX = 4;
+/** Mirrors `mb-0.5` gap between tooltip and icon top. */
+export const TOOLTIP_GAP_PX = 2;
 
 /** Approximate rendered height of the hover name tooltip. */
 export const TOOLTIP_HEIGHT_PX = 22;
