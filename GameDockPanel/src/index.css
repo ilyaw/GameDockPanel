@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Tauri WebView on macOS: default Tailwind v4 hover is @media-gated and
+   does not fire until the window receives a click — use plain :hover. */
+@custom-variant hover (&:hover);
+@custom-variant group-hover (&:is(:where(.group):hover *));
+
 /*
   The window is fully transparent (see src-tauri/tauri.conf.json +
   platform/macos.rs) — without this, Tailwind's preflight leaves an opaque

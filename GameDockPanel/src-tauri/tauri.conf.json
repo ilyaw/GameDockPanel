@@ -23,6 +23,9 @@
         "resizable": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
+        "acceptFirstMouse": true,
+        "focus": false,
+        "focusable": true,
         "visible": false
       }
     ],

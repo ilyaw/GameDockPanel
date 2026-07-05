@@ -1,4 +1,13 @@
-use tauri::{App, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use serde::Serialize;
+use tauri::{App, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+
+/// Cursor position in webview logical (DIP) coords — emitted while the pointer
+/// is over the dock pill so React can hit-test icons without CSS :hover.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+struct DockCursorPayload {
+    x: f64,
+    y: f64,
+}
 
 // Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
 const WINDOW_WIDTH_DIP: f64 = 511.0;
@@ -49,8 +58,56 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
 
     window.show().map_err(|e| e.to_string())?;
 
+    enable_inactive_mouse_tracking(&window)?;
+
     start_click_through_poller(window);
 
+    Ok(())
+}
+
+/// Installs an `NSTrackingActiveAlways` area on the window content view so
+/// mouse-enter/move events reach the WebView even when another app is key.
+/// Does not call `makeKeyWindow` — the dock must not steal focus on hover.
+#[cfg(target_os = "macos")]
+fn enable_inactive_mouse_tracking(window: &WebviewWindow) -> Result<(), String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSWindow, NSTrackingArea, NSTrackingAreaOptions};
+
+    let ns_window_ptr = window
+        .ns_window()
+        .map_err(|e| e.to_string())? as *mut NSWindow;
+    let ns_window = unsafe { &*ns_window_ptr };
+
+    ns_window.setAcceptsMouseMovedEvents(true);
+
+    let content_view = ns_window
+        .contentView()
+        .ok_or_else(|| "no content view".to_string())?;
+
+    let bounds = content_view.bounds();
+    let options = NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::ActiveAlways
+        | NSTrackingAreaOptions::InVisibleRect;
+
+    let mtm = MainThreadMarker::new().ok_or("not on main thread")?;
+    let tracking_area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            mtm.alloc::<NSTrackingArea>(),
+            bounds,
+            options,
+            Some(content_view.as_ref()),
+            None,
+        )
+    };
+
+    content_view.addTrackingArea(&tracking_area);
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn enable_inactive_mouse_tracking(_window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
@@ -61,6 +118,8 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
 fn start_click_through_poller(window: WebviewWindow) {
     std::thread::spawn(move || {
         let mut ignoring = true;
+        let mut dock_hovered = false;
+        let mut last_cursor: Option<DockCursorPayload> = None;
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(CLICK_POLL_MS));
@@ -91,6 +150,25 @@ fn start_click_through_poller(window: WebviewWindow) {
                 && cursor_x <= pill_right
                 && cursor_y >= pill_top
                 && cursor_y <= pill_bottom;
+
+            if in_pill != dock_hovered {
+                dock_hovered = in_pill;
+                let _ = window.emit("dock-hover", dock_hovered);
+                if !dock_hovered {
+                    last_cursor = None;
+                }
+            }
+
+            if in_pill {
+                let cursor = DockCursorPayload {
+                    x: (cursor_x - outer_pos.x) as f64 / scale,
+                    y: (cursor_y - outer_pos.y) as f64 / scale,
+                };
+                if last_cursor != Some(cursor) {
+                    last_cursor = Some(cursor);
+                    let _ = window.emit("dock-cursor", cursor);
+                }
+            }
 
             let should_ignore = !in_pill;
             if should_ignore != ignoring {
