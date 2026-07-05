@@ -1,0 +1,69 @@
+---
+description: GameDockPanel — стек, структура и конвенции dock-приложения на Tauri
+alwaysApply: true
+---
+
+# GameDockPanel
+
+Десктопный dock в игровом стиле (macOS Dock + Razer Chroma) на Tauri: без рамок, прозрачное, always-on-top, закреплено внизу по центру.
+
+Корень приложения: `GameDockPanel/`. Для dock-специфики (vibrancy, RGB-рамка, LED, magnify) — skill `tauri-glass-dock`.
+
+## Стек (не менять без явного запроса)
+
+| Слой | Технология |
+|---|---|
+| Backend | Rust 2021, Tauri v2, `macos-private-api` |
+| Сериализация | serde / serde_json |
+| Плагины (подключены) | `tauri-plugin-opener` |
+| Плагины (разрешены, не подключать заранее) | `dialog`, `global-shortcut`, `autostart` |
+| Frontend | React 19, TypeScript ~5.8, Vite 7 (порт 1420) |
+| Стили | Tailwind v4 через `@tailwindcss/vite`, тема только в `src/index.css` |
+| Анимации | Framer Motion |
+| UI-иконки (не логотипы приложений) | lucide-react |
+
+Не добавлять npm/cargo-зависимости без явного запроса — особенно UI-библиотеки и CSS-in-JS.
+
+## Структура
+
+```
+GameDockPanel/
+  src-tauri/src/
+    main.rs, lib.rs
+    commands/     # по домену: apps.rs, window.rs, ...
+    platform/     # cfg(target_os): macos.rs, windows.rs
+  src/
+    components/   # PascalCase
+    hooks/        # camelCase, префикс use
+    lib/types.ts  # DockApp и общие типы
+    index.css     # ЕДИНСТВЕННОЕ место для @theme и @keyframes
+```
+
+## Frontend
+
+- Функциональные компоненты + хуки. TypeScript strict; `any` только с комментарием.
+- Стили — Tailwind в JSX. Никакого CSS-in-JS и лишних `.css` (кроме `src/index.css`).
+- Анимации — `@theme { --animate-<name>: ... }` в `index.css`, не инлайн `style={{ animation }}`.
+- Framer Motion — физика/жесты (magnify, drag, layout). Простые `transition-*` — Tailwind.
+- lucide-react — только служебные UI-иконки; логотипы приложений — отдельно.
+- `DockApp` в `src/lib/types.ts` — единый контракт с будущими Rust-командами.
+
+Задел под hover-magnify: иконки в массиве с `ref`/`useMotionValue`; размеры в constants (`ICON_SIZE`, `DOCK_GAP`), не magic numbers в JSX.
+
+## Rust / Tauri
+
+- Команды по домену в `commands/`. Без `unwrap()`/`expect()` в handlers — `Result<T, String>` или `thiserror`.
+- Platform-specific код — только в `platform/`, не в `main.rs`.
+- `dialog` / `global-shortcut` / `autostart` — только когда нужна конкретная фича.
+
+## Окно и прозрачность
+
+- `tauri.conf.json`: `transparent`, `decorations: false`, `shadow: false`, `skipTaskbar`, always-on-top через API.
+- `index.css`: `html, body, #root { background: transparent !important; }`
+- Click-through: обёртка `pointer-events-none`, pill `pointer-events-auto`; при необходимости `setIgnoreCursorEvents()` по hover над pill.
+- `backdrop-filter: blur()` **не** блюрит рабочий стол — только DOM позади. Настоящее стекло — `window-vibrancy` / `apply_vibrancy()` (macOS: `HudWindow` / `Sidebar`). `bg-zinc-950/80` — тонировка поверх vibrancy, не замена.
+
+## Прочее
+
+- Conventional Commits. Компоненты PascalCase, хуки `use*`.
+- Тестовый фреймворк не вводить на этапе основы.
