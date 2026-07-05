@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "gamedockpanel",
-        "width": 720,
-        "height": 240,
+        "width": 511,
+        "height": 127,
         "transparent": true,
         "decorations": false,
         "shadow": false,

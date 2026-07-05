@@ -1,12 +1,12 @@
-use tauri::{App, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{App, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-/// Logical (DIP) footprint of the dock's host window: the pill itself plus
-/// headroom for the hover-name tooltip and the future hover-magnify scale-up
-/// (see `MAGNIFY_MAX_SCALE` in `src/lib/constants.ts`). Sized once, generously,
-/// so the magnify pass won't need a dynamic window resize later — see the
-/// "Размер окна" decision in the dock foundation plan.
-const WINDOW_WIDTH_DIP: f64 = 720.0;
-const WINDOW_HEIGHT_DIP: f64 = 240.0;
+// Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
+const WINDOW_WIDTH_DIP: f64 = 511.0;
+const WINDOW_HEIGHT_DIP: f64 = 127.0;
+const PILL_WIDTH_DIP: f64 = 456.0;
+const PILL_HEIGHT_DIP: f64 = 95.0;
+const DOCK_BOTTOM_INSET_DIP: f64 = 20.0;
+const CLICK_POLL_MS: u64 = 50;
 
 /// Positions, sizes and reveals the main window: a compact, always-on-top
 /// strip anchored to the bottom-center of the primary display, with the
@@ -16,8 +16,6 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
 
-    // `skipTaskbar` in tauri.conf.json is a no-op on macOS (there's no
-    // taskbar concept) — this is the actual way to hide the Dock icon.
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
     let monitor = window
@@ -44,15 +42,76 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         .set_always_on_top(true)
         .map_err(|e| e.to_string())?;
 
-    // Real frosted glass (window_vibrancy::apply_vibrancy) is intentionally
-    // deferred — see the plan's "Vibrancy vs CSS-тонирование" decision: this
-    // window carries headroom around the pill for the tooltip and future
-    // magnify, so a plain apply_vibrancy call would frost that whole
-    // rectangle instead of just the pill. Revisit once a masked
-    // NSVisualEffectView (or a tightly-fit window) makes sense — CSS
-    // `bg-zinc-950/80` + `backdrop-blur-xl` carries the glass look for now.
+    // Pass clicks through everywhere except the pill hitbox (poller toggles).
+    window
+        .set_ignore_cursor_events(true)
+        .map_err(|e| e.to_string())?;
 
     window.show().map_err(|e| e.to_string())?;
 
+    start_click_through_poller(window);
+
     Ok(())
+}
+
+/// Polls the global cursor and toggles `set_ignore_cursor_events` so only the
+/// dock pill captures input — transparent bands above it stay click-through
+/// at the OS level (WKWebView `pointer-events-none` is not sufficient alone).
+#[cfg(target_os = "macos")]
+fn start_click_through_poller(window: WebviewWindow) {
+    std::thread::spawn(move || {
+        let mut ignoring = true;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(CLICK_POLL_MS));
+
+            let Ok(scale) = window.scale_factor() else {
+                continue;
+            };
+            let Ok(outer_pos) = window.outer_position() else {
+                continue;
+            };
+            let Ok(outer_size) = window.outer_size() else {
+                continue;
+            };
+            let Some((cursor_x, cursor_y)) = global_cursor_position() else {
+                continue;
+            };
+
+            let pill_w = (PILL_WIDTH_DIP * scale).round() as i32;
+            let pill_h = (PILL_HEIGHT_DIP * scale).round() as i32;
+            let inset = (DOCK_BOTTOM_INSET_DIP * scale).round() as i32;
+
+            let pill_left = outer_pos.x + (outer_size.width as i32 - pill_w) / 2;
+            let pill_top = outer_pos.y + outer_size.height as i32 - inset - pill_h;
+            let pill_right = pill_left + pill_w;
+            let pill_bottom = pill_top + pill_h;
+
+            let in_pill = cursor_x >= pill_left
+                && cursor_x <= pill_right
+                && cursor_y >= pill_top
+                && cursor_y <= pill_bottom;
+
+            let should_ignore = !in_pill;
+            if should_ignore != ignoring {
+                if window.set_ignore_cursor_events(should_ignore).is_ok() {
+                    ignoring = should_ignore;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_click_through_poller(_window: WebviewWindow) {}
+
+#[cfg(target_os = "macos")]
+fn global_cursor_position() -> Option<(i32, i32)> {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+    let event = CGEvent::new(source).ok()?;
+    let loc = event.location();
+    Some((loc.x.round() as i32, loc.y.round() as i32))
 }
