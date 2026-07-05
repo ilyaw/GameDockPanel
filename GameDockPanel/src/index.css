@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+/*
+  The window is fully transparent (see src-tauri/tauri.conf.json +
+  platform/macos.rs) — without this, Tailwind's preflight leaves an opaque
+  webview background and the "glass" dock renders on a solid rectangle.
+*/
+html,
+body,
+#root {
+  background: transparent !important;
+}
+
+/*
+  Tailwind v4 config-as-CSS: anything declared in @theme becomes a real
+  utility class. --animate-* keys generate `animate-<name>` the same way
+  --color-* generates `bg-<name>`/`text-<name>`. @keyframes stay outside
+  @theme, as usual.
+*/
+@theme {
+  --animate-rgb-glow: rgb-glow 6s linear infinite;
+  --animate-led-pulse: led-pulse 1.8s ease-in-out infinite;
+}
+
+/*
+  Razer-Chroma-style perimeter light. Cycles border-color AND a matching
+  soft glow through the spectrum. Applied to the dock pill via
+  `animate-rgb-glow`.
+*/
+@keyframes rgb-glow {
+  0% {
+    border-color: #ff3b6b;
+    box-shadow: 0 0 14px 0 rgb(255 59 107 / 40%);
+  }
+  16.6% {
+    border-color: #ff9d3b;
+    box-shadow: 0 0 14px 0 rgb(255 157 59 / 40%);
+  }
+  33.3% {
+    border-color: #e9ff3b;
+    box-shadow: 0 0 14px 0 rgb(233 255 59 / 40%);
+  }
+  50% {
+    border-color: #3bffb0;
+    box-shadow: 0 0 14px 0 rgb(59 255 176 / 40%);
+  }
+  66.6% {
+    border-color: #3bb0ff;
+    box-shadow: 0 0 14px 0 rgb(59 176 255 / 40%);
+  }
+  83.3% {
+    border-color: #b03bff;
+    box-shadow: 0 0 14px 0 rgb(176 59 255 / 40%);
+  }
+  100% {
+    border-color: #ff3b6b;
+    box-shadow: 0 0 14px 0 rgb(255 59 107 / 40%);
+  }
+}
+
+/*
+  "Breathing" LED indicator for running apps. Relies on `currentColor`, so
+  each app tints its own indicator just by putting a text-<color> class next
+  to `animate-led-pulse` (see the `color` field on DockApp).
+*/
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    box-shadow: 0 0 4px 0 currentColor;
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 10px 2px currentColor;
+  }
+}
