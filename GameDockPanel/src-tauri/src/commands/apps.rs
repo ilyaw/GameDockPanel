@@ -5,10 +5,8 @@ use tauri::{AppHandle, State};
 
 use crate::platform;
 
-/// Fixed dock roster — same 6 apps, order and colors as the original
-/// frontend mock (`mockApps.ts`), now carrying a bundle ID for real
-/// `NSWorkspace` matching. Not user-configurable in this pass (see
-/// PROMPT_04_PROCESS_MONITORING.md — only the data source changes).
+/// Fixed dock roster — carries a bundle ID per entry for real `NSWorkspace`
+/// matching. Not user-configurable in this pass.
 pub struct AppConfig {
     pub id: &'static str,
     pub name: &'static str,
@@ -36,28 +34,10 @@ pub const APPS: &[AppConfig] = &[
         color: "text-green-400",
     },
     AppConfig {
-        id: "minecraft",
-        name: "Minecraft",
-        // `mdls -name kMDItemCFBundleIdentifier` confirmed on a real install
-        // (Homebrew cask `minecraft`) during the stabilization pass —
-        // matches the value already here.
-        bundle_id: "com.mojang.minecraftlauncher",
-        color: "text-lime-400",
-    },
-    AppConfig {
         id: "obs-studio",
         name: "OBS Studio",
         bundle_id: "com.obsproject.obs-studio",
         color: "text-red-400",
-    },
-    AppConfig {
-        id: "epic-games",
-        name: "Epic Games",
-        // `mdls -name kMDItemCFBundleIdentifier` confirmed on a real install
-        // (Homebrew cask `epic-games`) during the stabilization pass —
-        // matches the value already here.
-        bundle_id: "com.epicgames.EpicGamesLauncher",
-        color: "text-fuchsia-400",
     },
 ];
 
@@ -72,6 +52,24 @@ pub struct DockAppPayload {
     pub icon_url: Option<String>,
     pub is_active: bool,
     pub color: String,
+}
+
+/// Lightweight running-state update — emitted on launch/terminate without
+/// re-sending base64 icon payloads over IPC.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRunningPayload {
+    pub id: String,
+    pub is_active: bool,
+}
+
+/// Icon-only update — emitted at startup and when a late-installed app
+/// resolves its native icon.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppIconUpdatePayload {
+    pub id: String,
+    pub icon_url: Option<String>,
 }
 
 /// Running state + icon cache, keyed by bundle ID. Deliberately plain data
@@ -107,11 +105,53 @@ impl AppsState {
             })
             .collect()
     }
+
+    pub fn running_snapshot(&self) -> Vec<AppRunningPayload> {
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        APPS.iter()
+            .map(|app| AppRunningPayload {
+                id: app.id.to_string(),
+                is_active: running.get(app.bundle_id).copied().unwrap_or(false),
+            })
+            .collect()
+    }
+
+    pub fn icons_snapshot(&self) -> Vec<AppIconUpdatePayload> {
+        let icons = self
+            .icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        APPS.iter()
+            .map(|app| AppIconUpdatePayload {
+                id: app.id.to_string(),
+                icon_url: icons.get(app.bundle_id).cloned().flatten(),
+            })
+            .collect()
+    }
+
+    pub fn icon_update_for(&self, bundle_id: &str) -> Option<AppIconUpdatePayload> {
+        let config = APPS.iter().find(|app| app.bundle_id == bundle_id)?;
+        let icons = self
+            .icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        Some(AppIconUpdatePayload {
+            id: config.id.to_string(),
+            icon_url: icons.get(config.bundle_id).cloned().flatten(),
+        })
+    }
 }
 
-/// One-time pull for the initial render — avoids the race where
-/// `apps-state-changed` fires before the frontend has subscribed to it.
-/// Subsequent updates arrive only via that event (see `platform::macos`).
+/// One-time pull for the initial render — avoids the race where push events
+/// fire before the frontend has subscribed. Running updates arrive via
+/// `apps-running-changed`; icon updates via `apps-icons-updated` (see
+/// `platform::macos`).
 #[tauri::command]
 pub fn get_apps_snapshot(state: State<AppsState>) -> Vec<DockAppPayload> {
     state.snapshot()

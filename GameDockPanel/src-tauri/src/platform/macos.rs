@@ -13,9 +13,9 @@ struct DockCursorPayload {
 }
 
 // Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
-const WINDOW_WIDTH_DIP: f64 = 531.0;
+const WINDOW_WIDTH_DIP: f64 = 379.0;
 const WINDOW_HEIGHT_DIP: f64 = 154.0;
-const PILL_WIDTH_DIP: f64 = 476.0;
+const PILL_WIDTH_DIP: f64 = 324.0;
 const PILL_HEIGHT_REST_DIP: f64 = 91.0;
 const PILL_HEIGHT_HOVER_DIP: f64 = 114.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
@@ -24,6 +24,11 @@ const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
 /// visible shape if this stays in sync with that class.
 const PILL_CORNER_RADIUS_DIP: f64 = 28.0;
 const CLICK_POLL_MS: u64 = 50;
+
+/// Raster size for native icon export — `NSWorkspace.iconForFile` defaults to
+/// 32×32; upscaling that in the dock looks blocky. Keep ≥ `ICON_SIZE_PX *
+/// MAGNIFY_MAX_SCALE * 2` from `src/lib/constants.ts` (56 × 1.4 × 2 ≈ 157).
+const ICON_EXPORT_PX: f64 = 256.0;
 
 /// Positions, sizes and reveals the main window: a compact, always-on-top
 /// strip anchored to the bottom-center of the primary display, with the
@@ -430,7 +435,7 @@ fn in_rounded_rect(
 // `NSRunningApplication` handles.
 
 /// Snapshots current state, subscribes to launch/terminate notifications,
-/// and resolves+caches icons for the fixed 6-app roster. Runs on the main
+/// and resolves+caches icons for the dock roster. Runs on the main
 /// thread (guaranteed by Tauri's `.setup()`), same as `setup_dock_window`.
 #[cfg(target_os = "macos")]
 pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
@@ -502,7 +507,8 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
     };
     std::mem::forget(terminate_token);
 
-    emit_apps_state(&app_handle);
+    emit_apps_icons_updated(&app_handle, app.state::<AppsState>().icons_snapshot());
+    emit_apps_running_changed(&app_handle);
 
     Ok(())
 }
@@ -533,7 +539,7 @@ fn handle_workspace_notification(
     let bundle_id = bundle_id.to_string();
 
     let Some(config) = APPS.iter().find(|config| config.bundle_id == bundle_id) else {
-        // Not one of our 6 tracked apps — ignore.
+        // Not one of our tracked apps — ignore.
         return;
     };
 
@@ -547,10 +553,11 @@ fn handle_workspace_notification(
     }
 
     // Icons are normally resolved once at startup (see `start_apps_monitoring`).
-    // If the user installs one of the 6 tracked apps after the dock is already
+    // If the user installs a tracked app after the dock is already
     // running, its cache entry stays `None` forever without this: retry only
     // on the (rare) launch path, and only if still unresolved — not a hot path,
     // no new polling/infrastructure.
+    let mut icon_resolved = false;
     if is_launch {
         let needs_resolve = {
             let icons = state
@@ -566,18 +573,29 @@ fn handle_workspace_notification(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 icons.insert(config.bundle_id, Some(icon_url));
+                icon_resolved = true;
             }
         }
     }
 
-    emit_apps_state(app);
+    emit_apps_running_changed(app);
+    if icon_resolved {
+        if let Some(update) = state.icon_update_for(config.bundle_id) {
+            emit_apps_icons_updated(app, vec![update]);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn emit_apps_state(app: &AppHandle) {
+fn emit_apps_running_changed(app: &AppHandle) {
     let state = app.state::<AppsState>();
-    let snapshot = state.snapshot();
-    let _ = app.emit("apps-state-changed", snapshot);
+    let payload = state.running_snapshot();
+    let _ = app.emit("apps-running-changed", payload);
+}
+
+#[cfg(target_os = "macos")]
+fn emit_apps_icons_updated(app: &AppHandle, updates: Vec<crate::commands::apps::AppIconUpdatePayload>) {
+    let _ = app.emit("apps-icons-updated", updates);
 }
 
 /// Resolves a bundle ID to its installed `.app`'s icon and renders it as a
@@ -606,10 +624,12 @@ fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage) -> Option<String> {
     use base64::Engine as _;
     use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
-    use objc2_foundation::{NSDictionary, NSPoint, NSRect};
+    use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize};
 
-    let size = icon.size();
-    let mut proposed_rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    // Pick the best embedded representation (512/256/128…) for dock display.
+    let export_size = NSSize::new(ICON_EXPORT_PX, ICON_EXPORT_PX);
+    icon.setSize(export_size);
+    let mut proposed_rect = NSRect::new(NSPoint::new(0.0, 0.0), export_size);
     let cg_image =
         unsafe { icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None) }?;
 

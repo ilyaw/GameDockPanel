@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   motion,
   useMotionValue,
@@ -37,6 +37,10 @@ export function DockIcon({
   const [broken, setBroken] = useState(false);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const centerX = useMotionValue(0);
+
+  useEffect(() => {
+    setBroken(false);
+  }, [app.iconUrl]);
 
   // Rest-layout center X for the magnify distance curve — re-measured on layout
   // shifts (DPI, icon count), not on every mousemove frame.

@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { DockIcon } from "./DockIcon";
 import { PILL_HEIGHT_PX } from "../lib/constants";
-import type { DockApp } from "../lib/types";
+import type { AppIconUpdate, AppRunningUpdate, DockApp } from "../lib/types";
 
 interface DockCursorPayload {
   x: number;
@@ -33,6 +33,25 @@ function hitTestIcon(
     }
   }
   return bestId;
+}
+
+function mergeRunningUpdates(
+  apps: DockApp[],
+  updates: AppRunningUpdate[],
+): DockApp[] {
+  const byId = new Map(updates.map((update) => [update.id, update.isActive]));
+  return apps.map((app) => {
+    const isActive = byId.get(app.id);
+    return isActive === undefined ? app : { ...app, isActive };
+  });
+}
+
+function mergeIconUpdates(apps: DockApp[], updates: AppIconUpdate[]): DockApp[] {
+  const byId = new Map(updates.map((update) => [update.id, update.iconUrl]));
+  return apps.map((app) => {
+    const iconUrl = byId.get(app.id);
+    return iconUrl === undefined ? app : { ...app, iconUrl };
+  });
 }
 
 export function DockPanel() {
@@ -74,7 +93,11 @@ export function DockPanel() {
   const activateApp = useCallback((id: string) => {
     const app = appsRef.current.find((candidate) => candidate.id === id);
     if (!app) return;
-    void invoke("launch_or_activate_app", { bundleId: app.bundleId });
+    invoke("launch_or_activate_app", { bundleId: app.bundleId }).catch(
+      (error: unknown) => {
+        console.error(`Failed to launch or activate ${app.name}:`, error);
+      },
+    );
   }, []);
 
   useEffect(() => {
@@ -87,8 +110,21 @@ export function DockPanel() {
       setApps(snapshot);
 
       unlisteners.push(
-        await listen<DockApp[]>("apps-state-changed", (event) => {
-          setApps(event.payload);
+        await listen<AppRunningUpdate[]>("apps-running-changed", (event) => {
+          setApps((prev) => mergeRunningUpdates(prev, event.payload));
+        }),
+      );
+
+      if (cancelled) {
+        for (const unlisten of unlisteners) {
+          unlisten();
+        }
+        return;
+      }
+
+      unlisteners.push(
+        await listen<AppIconUpdate[]>("apps-icons-updated", (event) => {
+          setApps((prev) => mergeIconUpdates(prev, event.payload));
         }),
       );
 

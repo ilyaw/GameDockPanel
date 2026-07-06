@@ -1,8 +1,7 @@
 /**
  * A single dock entry. This is the shared contract between the frontend and
- * the Rust process-monitoring commands (`get_apps_snapshot` /
- * `apps-state-changed`) that own this data — keep both sides of that
- * boundary compatible with this shape.
+ * the Rust process-monitoring commands (`get_apps_snapshot`) that own this
+ * data — keep both sides of that boundary compatible with this shape.
  */
 export interface DockApp {
   id: string;
@@ -23,4 +22,16 @@ export interface DockApp {
    * `led-pulse` keyframes) — one field to keep both in sync.
    */
   color: string;
+}
+
+/** Running-state push from Rust — no icon payloads. */
+export interface AppRunningUpdate {
+  id: string;
+  isActive: boolean;
+}
+
+/** Icon-only push from Rust — startup batch or late install resolve. */
+export interface AppIconUpdate {
+  id: string;
+  iconUrl: string | null;
 }
