@@ -12,7 +12,7 @@ interface DockCursorPayload {
 }
 
 function hitTestIcon(
-  refs: Map<string, HTMLButtonElement>,
+  refs: Map<string, HTMLElement>,
   x: number,
   y: number,
 ): string | null {
@@ -43,8 +43,8 @@ export function DockPanel() {
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
 
-  const iconRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
-  const registerIconRef = (id: string, el: HTMLButtonElement | null) => {
+  const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
   };

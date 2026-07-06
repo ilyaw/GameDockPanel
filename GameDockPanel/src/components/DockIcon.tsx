@@ -13,7 +13,8 @@ const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
 
 interface DockIconProps {
   app: DockApp;
-  registerRef?: (id: string, el: HTMLButtonElement | null) => void;
+  /** Scaled visual node — hit-test uses its transformed bounding box at click time. */
+  registerRef?: (id: string, el: HTMLElement | null) => void;
   mouseX: MotionValue<number>;
   isHovered?: boolean;
 }
@@ -25,17 +26,24 @@ export function DockIcon({
   isHovered = false,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
-  const ref = useRef<HTMLButtonElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
   const centerX = useMotionValue(0);
 
-  // Measure center X once per layout change — not on every mousemove frame.
-  // Reading getBoundingClientRect inside useTransform caused jitter when the
-  // native window was resized mid-hover.
+  // Rest-layout center X for the magnify distance curve — re-measured on layout
+  // shifts (DPI, icon count), not on every mousemove frame.
   useLayoutEffect(() => {
-    const el = ref.current;
+    const el = buttonRef.current;
     if (!el) return;
-    const rect = el.getBoundingClientRect();
-    centerX.set(rect.left + rect.width / 2);
+
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      centerX.set(rect.left + rect.width / 2);
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [centerX]);
 
   const distance = useTransform([mouseX, centerX], ([mx, cx]: number[]) => {
@@ -55,10 +63,7 @@ export function DockIcon({
   return (
     <button
       type="button"
-      ref={(el) => {
-        ref.current = el;
-        registerRef?.(app.id, el);
-      }}
+      ref={buttonRef}
       aria-pressed={app.isActive}
       aria-label={`${app.name}${app.isActive ? " (running)" : ""}`}
       className={`relative flex flex-col items-center gap-2 outline-none ${
@@ -79,6 +84,7 @@ export function DockIcon({
 
         {broken ? (
           <motion.div
+            ref={(el) => registerRef?.(app.id, el)}
             style={{ scale }}
             className={`flex items-center justify-center bg-zinc-800 text-lg font-semibold ${iconVisualClass} ${app.color}`}
           >
@@ -86,6 +92,7 @@ export function DockIcon({
           </motion.div>
         ) : (
           <motion.img
+            ref={(el) => registerRef?.(app.id, el)}
             style={{ scale }}
             src={app.iconUrl}
             alt={app.name}
