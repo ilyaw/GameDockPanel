@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMotionValue } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 import { DockIcon } from "./DockIcon";
-import { DOCK_PADDING_TOP_HOVER_PX } from "../lib/constants";
+import { PILL_HEIGHT_PX } from "../lib/constants";
 import { initialApps } from "../lib/mockApps";
 import type { DockApp } from "../lib/types";
 
@@ -38,10 +38,10 @@ function hitTestIcon(
 export function DockPanel() {
   const [apps, setApps] = useState<DockApp[]>(initialApps);
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
-  const [isDockHovered, setIsDockHovered] = useState(false);
 
   const mouseX = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
+  const dockHoveredRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const registerIconRef = (id: string, el: HTMLButtonElement | null) => {
@@ -55,7 +55,7 @@ export function DockPanel() {
   }, [mouseX]);
 
   const leaveDock = useCallback(() => {
-    setIsDockHovered(false);
+    dockHoveredRef.current = false;
     mouseX.set(Infinity);
     setHoveredIconId(null);
   }, [mouseX]);
@@ -75,7 +75,7 @@ export function DockPanel() {
     void (async () => {
       unlisteners.push(
         await listen<boolean>("dock-hover", (event) => {
-          setIsDockHovered(event.payload);
+          dockHoveredRef.current = event.payload;
           if (!event.payload) {
             mouseX.set(Infinity);
             setHoveredIconId(null);
@@ -133,21 +133,20 @@ export function DockPanel() {
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
       <div
-        onMouseEnter={() => setIsDockHovered(true)}
+        onMouseEnter={() => {
+          dockHoveredRef.current = true;
+        }}
         onMouseMove={(event) => {
           lastNativeMoveAt.current = performance.now();
+          dockHoveredRef.current = true;
           applyCursor(event.clientX, event.clientY);
         }}
         onMouseLeave={() => {
           lastNativeMoveAt.current = 0;
           leaveDock();
         }}
-        style={{
-          paddingTop: isDockHovered
-            ? DOCK_PADDING_TOP_HOVER_PX
-            : undefined,
-        }}
-        className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-5 overflow-visible rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3 transition-[padding] duration-200 ease-out"
+        style={{ height: PILL_HEIGHT_PX }}
+        className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-5 overflow-visible rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3"
       >
         {apps.map((app) => (
           <DockIcon
@@ -156,7 +155,6 @@ export function DockPanel() {
             registerRef={registerIconRef}
             mouseX={mouseX}
             isHovered={hoveredIconId === app.id}
-            remeasureKey={isDockHovered}
           />
         ))}
       </div>

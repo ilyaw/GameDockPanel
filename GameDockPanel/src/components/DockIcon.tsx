@@ -16,8 +16,6 @@ interface DockIconProps {
   registerRef?: (id: string, el: HTMLButtonElement | null) => void;
   mouseX: MotionValue<number>;
   isHovered?: boolean;
-  /** Bumps when pill top-padding changes so icon center X is re-measured once. */
-  remeasureKey?: boolean;
 }
 
 export function DockIcon({
@@ -25,7 +23,6 @@ export function DockIcon({
   registerRef,
   mouseX,
   isHovered = false,
-  remeasureKey = false,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
   const ref = useRef<HTMLButtonElement | null>(null);
@@ -39,7 +36,7 @@ export function DockIcon({
     if (!el) return;
     const rect = el.getBoundingClientRect();
     centerX.set(rect.left + rect.width / 2);
-  }, [centerX, remeasureKey]);
+  }, [centerX]);
 
   const distance = useTransform([mouseX, centerX], ([mx, cx]: number[]) => {
     if (!Number.isFinite(mx)) return Infinity;

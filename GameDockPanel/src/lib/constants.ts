@@ -15,9 +15,13 @@ export const DOCK_PADDING_X_PX = 20;
 /** Mirrors `py-3` on the dock pill (rest vertical padding). */
 export const DOCK_PADDING_Y_PX = 12;
 
-/** Extra top padding on the pill while hovered — grows the dark background
- * upward into the transparent window band (CSS only, no native resize). */
-export const DOCK_PADDING_TOP_HOVER_PX = 20;
+/** Upper bound for hover-magnify scale (`origin-bottom` on the icon). */
+export const MAGNIFY_MAX_SCALE = 1.4;
+
+/** How far a peak-magnified icon grows above its rest top (`origin-bottom`). */
+export const MAGNIFY_HEIGHT_OVERFLOW_PX = Math.ceil(
+  ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1),
+);
 
 /** Mirrors `pb-2` — gap between pill and the window bottom edge. */
 export const DOCK_BOTTOM_INSET_PX = 8;
@@ -34,9 +38,6 @@ export const TOOLTIP_GAP_PX = 16;
 /** Approximate rendered height of the hover name tooltip (`text-xs` + `py-1`). */
 export const TOOLTIP_HEIGHT_PX = 28;
 
-/** Upper bound for hover-magnify scale (`origin-bottom` on the icon). */
-export const MAGNIFY_MAX_SCALE = 1.4;
-
 /**
  * Cursor-to-icon-center distance (px, viewport coords) beyond which magnify
  * falls back to rest scale (1). Spans roughly two neighboring icons on each
@@ -46,9 +47,13 @@ export const MAGNIFY_INFLUENCE_RADIUS_PX = (ICON_SIZE_PX + DOCK_GAP_PX) * 2;
 
 export const MOCK_APP_COUNT = 6;
 
-/** Pill outer height at rest: py + icon + gap + LED. */
+/** Pill outer height at rest: py + icon + gap + LED — fixed; magnify overflows above. */
 export const PILL_HEIGHT_PX =
   DOCK_PADDING_Y_PX * 2 + ICON_SIZE_PX + ICON_LED_GAP_PX + LED_HEIGHT_PX;
+
+/** Native hit-test band above the fixed pill (magnify overflow, not CSS pill height). */
+export const PILL_HEIGHT_HOVER_PX =
+  PILL_HEIGHT_PX + MAGNIFY_HEIGHT_OVERFLOW_PX;
 
 /** Pill outer width at rest (padding + icons + gaps). */
 export const PILL_WIDTH_PX =
@@ -57,17 +62,14 @@ export const PILL_WIDTH_PX =
   (MOCK_APP_COUNT - 1) * DOCK_GAP_PX;
 
 /**
- * Transparent band above the pill top edge inside the window — room for
- * hover top-padding, tooltip, and magnify overflow. OS click-through still
- * uses only the static pill footprint in Rust (see tauri-glass-dock skill).
+ * Transparent band above the fixed pill inside the window — magnify overflow
+ * plus any tooltip that sticks out above enlarged icons.
  */
-export const PILL_TOP_RESERVE_PX = Math.max(
-  Math.ceil(ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1)) - DOCK_PADDING_Y_PX,
-  DOCK_PADDING_TOP_HOVER_PX +
-    TOOLTIP_HEIGHT_PX +
-    TOOLTIP_GAP_PX -
-    DOCK_PADDING_Y_PX,
-);
+export const PILL_TOP_RESERVE_PX =
+  MAGNIFY_HEIGHT_OVERFLOW_PX +
+  TOOLTIP_GAP_PX +
+  TOOLTIP_HEIGHT_PX -
+  DOCK_PADDING_Y_PX;
 
 /**
  * Tauri window logical size — keep in sync with `WINDOW_*_DIP` in

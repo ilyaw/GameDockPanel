@@ -12,9 +12,10 @@ struct DockCursorPayload {
 
 // Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
 const WINDOW_WIDTH_DIP: f64 = 531.0;
-const WINDOW_HEIGHT_DIP: f64 = 151.0;
+const WINDOW_HEIGHT_DIP: f64 = 154.0;
 const PILL_WIDTH_DIP: f64 = 476.0;
-const PILL_HEIGHT_DIP: f64 = 91.0;
+const PILL_HEIGHT_REST_DIP: f64 = 91.0;
+const PILL_HEIGHT_HOVER_DIP: f64 = 114.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
 /// Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx) —
 /// CSS and the native vibrancy/hit-test masks below only agree with the
@@ -91,7 +92,6 @@ const VIBRANCY_VIEW_TAG: isize = 91_376_254;
 /// `radius` argument then rounds that smaller rect correctly.
 #[cfg(target_os = "macos")]
 fn apply_dock_vibrancy(window: &WebviewWindow) -> Result<(), String> {
-    use objc2_app_kit::NSWindow;
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
     // HudWindow stays dark unconditionally (a fixed-style material, not a
@@ -107,6 +107,15 @@ fn apply_dock_vibrancy(window: &WebviewWindow) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
+    set_vibrancy_pill_height(window, PILL_HEIGHT_REST_DIP)
+}
+
+/// Resizes the masked vibrancy blur view to match the fixed CSS pill height,
+/// anchored to the bottom inset. Magnified icons overflow above this rect.
+#[cfg(target_os = "macos")]
+pub fn set_vibrancy_pill_height(window: &WebviewWindow, height_dip: f64) -> Result<(), String> {
+    use objc2_app_kit::NSWindow;
+
     let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())? as *mut NSWindow;
     let ns_window = unsafe { &*ns_window_ptr };
     let content_view = ns_window
@@ -114,11 +123,9 @@ fn apply_dock_vibrancy(window: &WebviewWindow) -> Result<(), String> {
         .ok_or_else(|| "no content view".to_string())?;
 
     let Some(blur_view) = content_view.viewWithTag(VIBRANCY_VIEW_TAG) else {
-        return Ok(()); // best-effort — vibrancy still shows, just unmasked
+        return Ok(());
     };
 
-    // Frame must be in the blur view's superview coords (the WKWebView), not
-    // the window content view — apply_vibrancy attaches it there.
     let parent = unsafe {
         blur_view
             .superview()
@@ -127,10 +134,10 @@ fn apply_dock_vibrancy(window: &WebviewWindow) -> Result<(), String> {
     let bounds = parent.bounds();
     let mut pill_frame = bounds;
     pill_frame.size.width = PILL_WIDTH_DIP;
-    pill_frame.size.height = PILL_HEIGHT_DIP;
+    pill_frame.size.height = height_dip;
     pill_frame.origin.x = (bounds.size.width - PILL_WIDTH_DIP) / 2.0;
     pill_frame.origin.y = if parent.isFlipped() {
-        bounds.size.height - DOCK_BOTTOM_INSET_DIP - PILL_HEIGHT_DIP
+        bounds.size.height - DOCK_BOTTOM_INSET_DIP - height_dip
     } else {
         DOCK_BOTTOM_INSET_DIP
     };
@@ -192,13 +199,14 @@ fn pill_cursor_at_screen(
     window: &WebviewWindow,
     screen_x: i32,
     screen_y: i32,
+    pill_height_dip: f64,
 ) -> Option<DockCursorPayload> {
     let scale = window.scale_factor().ok()?;
     let outer_pos = window.outer_position().ok()?;
     let outer_size = window.outer_size().ok()?;
 
     let pill_w = (PILL_WIDTH_DIP * scale).round() as i32;
-    let pill_h = (PILL_HEIGHT_DIP * scale).round() as i32;
+    let pill_h = (pill_height_dip * scale).round() as i32;
     let inset = (DOCK_BOTTOM_INSET_DIP * scale).round() as i32;
     let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
 
@@ -259,9 +267,12 @@ fn start_dock_click_tap(window: WebviewWindow) {
                         if let Ok(cursor) = window.cursor_position() {
                             let cursor_x = cursor.x.round() as i32;
                             let cursor_y = cursor.y.round() as i32;
-                            if let Some(payload) =
-                                pill_cursor_at_screen(&window, cursor_x, cursor_y)
-                            {
+                            if let Some(payload) = pill_cursor_at_screen(
+                                &window,
+                                cursor_x,
+                                cursor_y,
+                                PILL_HEIGHT_HOVER_DIP,
+                            ) {
                                 let _ = window.emit("dock-click", payload);
                             }
                         }
@@ -334,7 +345,12 @@ fn start_click_through_poller(window: WebviewWindow) {
             let cursor_x = cursor.x.round() as i32;
             let cursor_y = cursor.y.round() as i32;
 
-            let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y);
+            let pill_h_dip = if dock_hovered {
+                PILL_HEIGHT_HOVER_DIP
+            } else {
+                PILL_HEIGHT_REST_DIP
+            };
+            let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y, pill_h_dip);
             let in_pill = pill_cursor.is_some();
 
             if in_pill != dock_hovered {
