@@ -49,3 +49,9 @@ objc2-foundation = { version = "0.3", features = [
 objc2-core-graphics = { version = "0.3", features = ["CGImage"] }
 block2 = "0.6"
 window-vibrancy = "0.7"
+# Explicit, justified exception to "no new deps without a reason" (see
+# CLAUDE.md): the icon pipeline needs byte->base64 for data URLs, and a
+# hand-rolled encoder's padding-boundary logic (remainder 1/2 bytes) is
+# exactly the kind of bug that silently corrupts specific icons instead of
+# failing loudly. `base64` is a zero-transitive-dep, de-facto-standard crate.
+base64 = "0.22"

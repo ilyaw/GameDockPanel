@@ -318,21 +318,27 @@ bool>>` (running) и `Mutex<HashMap<bundleId, Option<String>>>` (кэш икон
 `CGImage`: `NSImage.CGImageForProposedRect_context_hints(...)` →
 `NSBitmapImageRep::initWithCGImage(...)` →
 `representationUsingType_properties(NSBitmapImageFileType::PNG, ..)` → байты
-`NSData` (`.to_vec()`). Из байт собирается `data:image/png;base64,...` —
-base64 закодирован рукописным RFC 4648 энкодером в
-`platform/macos.rs::base64_encode` (десяток строк), без новой crate-
-зависимости под точечную задачу. Результат кэшируется в `AppsState.icons` по
-bundle ID один раз при старте — не резолвится заново на каждый рендер или
-уведомление. `None` (не установлено / не резолвилось) — фронт показывает
-тот же fallback-бейдж, что и при `onError` на `<img>`.
+`NSData` (`.to_vec()`). Из байт собирается `data:image/png;base64,...` через
+крейт `base64` (`Engine::encode` на `base64::engine::general_purpose::STANDARD`).
+Изначально здесь стоял рукописный RFC 4648 энкодер (десяток строк) — заменён
+на стабилизационном проходе: баг на границе паддинга (хвост данных, не
+кратный 3 байтам) не роняет сборку и не кидает ошибку, а тихо портит
+конкретные иконки конкретного размера — риск, который не стоит точечной
+экономии одной cargo-зависимости (см. явное исключение в `CLAUDE.md`).
+Результат кэшируется в `AppsState.icons` по bundle ID один раз при старте —
+не резолвится заново на каждый рендер или уведомление (кроме повторной
+попытки при позднем `didLaunch`, см. ниже). `None` (не установлено / не
+резолвилось) — фронт показывает тот же fallback-бейдж, что и при `onError`
+на `<img>`.
 
 Новые cargo-зависимости под `cfg(target_os = "macos")`: `objc2-foundation`
 (была только транзитивной — теперь явная, для `NSNotification`/`NSString`/
 `NSURL`/`NSArray`/`NSData`/`NSDictionary`), `block2` (была транзитивной через
 `objc2-app-kit` — теперь явная), `objc2-core-graphics` (новая, только ради
-типа `CGImage` — фича `CGImage`). На `objc2-app-kit` добавлены фичи
-`NSWorkspace`, `NSRunningApplication`, `NSApplication`, `NSImage`,
-`NSImageRep`, `NSBitmapImageRep`.
+типа `CGImage` — фича `CGImage`), `base64` (новая, добавлена на
+стабилизационном проходе — см. явное исключение в `CLAUDE.md`). На
+`objc2-app-kit` добавлены фичи `NSWorkspace`, `NSRunningApplication`,
+`NSApplication`, `NSImage`, `NSImageRep`, `NSBitmapImageRep`.
 
 ### Разрешения
 

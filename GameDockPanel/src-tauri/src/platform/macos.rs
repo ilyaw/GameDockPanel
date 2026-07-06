@@ -603,6 +603,7 @@ fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
 /// `NSImage` → `CGImage` → `NSBitmapImageRep` → PNG `NSData`.
 #[cfg(target_os = "macos")]
 fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage) -> Option<String> {
+    use base64::Engine as _;
     use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
     use objc2_foundation::{NSDictionary, NSPoint, NSRect};
@@ -620,38 +621,8 @@ fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage) -> Option<String> {
 
     Some(format!(
         "data:image/png;base64,{}",
-        base64_encode(&png_data.to_vec())
+        base64::engine::general_purpose::STANDARD.encode(png_data.to_vec())
     ))
-}
-
-/// Minimal RFC 4648 base64 encoder — the only byte-to-text step we need for
-/// icon data URLs, not worth a new crate dependency for.
-#[cfg(target_os = "macos")]
-fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
-
-        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[((n >> 6) & 0x3F) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[(n & 0x3F) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// Activates the bundle's running instance if one exists (brings its

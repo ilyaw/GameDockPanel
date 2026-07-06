@@ -1119,6 +1119,7 @@ dependencies = [
 name = "gamedockpanel"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "block2",
  "core-foundation",
  "core-graphics 0.24.0",
