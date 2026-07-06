@@ -546,6 +546,30 @@ fn handle_workspace_notification(
         running.insert(config.bundle_id, is_launch);
     }
 
+    // Icons are normally resolved once at startup (see `start_apps_monitoring`).
+    // If the user installs one of the 6 tracked apps after the dock is already
+    // running, its cache entry stays `None` forever without this: retry only
+    // on the (rare) launch path, and only if still unresolved — not a hot path,
+    // no new polling/infrastructure.
+    if is_launch {
+        let needs_resolve = {
+            let icons = state
+                .icons
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            icons.get(config.bundle_id).cloned().flatten().is_none()
+        };
+        if needs_resolve {
+            if let Some(icon_url) = resolve_icon_data_url(config.bundle_id) {
+                let mut icons = state
+                    .icons
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                icons.insert(config.bundle_id, Some(icon_url));
+            }
+        }
+    }
+
     emit_apps_state(app);
 }
 
