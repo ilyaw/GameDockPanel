@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 use tauri::{App, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
@@ -65,6 +66,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     enable_inactive_mouse_tracking(&window)?;
     apply_dock_vibrancy(&window)?;
 
+    start_dock_click_tap(window.clone());
     start_click_through_poller(window);
 
     Ok(())
@@ -188,6 +190,136 @@ fn enable_inactive_mouse_tracking(_window: &WebviewWindow) -> Result<(), String>
     Ok(())
 }
 
+/// Maps a screen-space cursor position to DIP coords inside the window when
+/// the point lies on the rounded pill footprint; `None` otherwise.
+#[cfg(target_os = "macos")]
+fn pill_cursor_at_screen(
+    window: &WebviewWindow,
+    screen_x: i32,
+    screen_y: i32,
+) -> Option<DockCursorPayload> {
+    let scale = window.scale_factor().ok()?;
+    let outer_pos = window.outer_position().ok()?;
+    let outer_size = window.outer_size().ok()?;
+
+    let pill_w = (PILL_WIDTH_DIP * scale).round() as i32;
+    let pill_h = (PILL_HEIGHT_DIP * scale).round() as i32;
+    let inset = (DOCK_BOTTOM_INSET_DIP * scale).round() as i32;
+    let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
+
+    let pill_left = outer_pos.x + (outer_size.width as i32 - pill_w) / 2;
+    let pill_top = outer_pos.y + outer_size.height as i32 - inset - pill_h;
+    let pill_right = pill_left + pill_w;
+    let pill_bottom = pill_top + pill_h;
+
+    if !in_rounded_rect(
+        screen_x,
+        screen_y,
+        pill_left,
+        pill_top,
+        pill_right,
+        pill_bottom,
+        radius,
+    ) {
+        return None;
+    }
+
+    Some(DockCursorPayload {
+        x: (screen_x - outer_pos.x) as f64 / scale,
+        y: (screen_y - outer_pos.y) as f64 / scale,
+    })
+}
+
+/// Event-driven `LeftMouseDown` capture at the HID layer — reliable for short
+/// trackpad taps and for clicks swallowed by the vibrancy `NSVisualEffectView`
+/// before they reach WKWebView / React.
+#[cfg(target_os = "macos")]
+fn start_dock_click_tap(window: WebviewWindow) {
+    use core_foundation::mach_port::CFMachPort;
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use core_graphics::event::{
+        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    };
+
+    std::thread::spawn(move || {
+        let mach_port: Arc<Mutex<Option<CFMachPort>>> = Arc::new(Mutex::new(None));
+        let mach_port_cb = Arc::clone(&mach_port);
+
+        let tap = match CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            vec![CGEventType::LeftMouseDown],
+            move |_proxy, event_type, event| {
+                match event_type {
+                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+                        if let Ok(guard) = mach_port_cb.lock() {
+                            if let Some(port) = guard.as_ref() {
+                                enable_event_tap(port);
+                            }
+                        }
+                        return None;
+                    }
+                    CGEventType::LeftMouseDown => {
+                        if let Ok(cursor) = window.cursor_position() {
+                            let cursor_x = cursor.x.round() as i32;
+                            let cursor_y = cursor.y.round() as i32;
+                            if let Some(payload) =
+                                pill_cursor_at_screen(&window, cursor_x, cursor_y)
+                            {
+                                let _ = window.emit("dock-click", payload);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Some(event.clone())
+            },
+        ) {
+            Ok(tap) => tap,
+            Err(()) => {
+                eprintln!(
+                    "GameDockPanel: failed to create CGEventTap for dock-click — \
+                     grant Accessibility or Input Monitoring in System Settings"
+                );
+                return;
+            }
+        };
+
+        if let Ok(mut guard) = mach_port.lock() {
+            *guard = Some(tap.mach_port.clone());
+        }
+
+        unsafe {
+            let loop_source = match tap.mach_port.create_runloop_source(0) {
+                Ok(source) => source,
+                Err(()) => {
+                    eprintln!("GameDockPanel: failed to create run loop source for dock-click tap");
+                    return;
+                }
+            };
+            CFRunLoop::get_current().add_source(&loop_source, kCFRunLoopCommonModes);
+            tap.enable();
+            CFRunLoop::run_current();
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_dock_click_tap(_window: WebviewWindow) {}
+
+#[cfg(target_os = "macos")]
+fn enable_event_tap(port: &core_foundation::mach_port::CFMachPort) {
+    use core_foundation::base::TCFType;
+
+    extern "C" {
+        fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
+    }
+    unsafe {
+        CGEventTapEnable(port.as_concrete_TypeRef(), true);
+    }
+}
+
 /// Polls the global cursor and toggles `set_ignore_cursor_events` so only the
 /// dock pill captures input — transparent bands above it stay click-through
 /// at the OS level (WKWebView `pointer-events-none` is not sufficient alone).
@@ -197,45 +329,18 @@ fn start_click_through_poller(window: WebviewWindow) {
         let mut ignoring = true;
         let mut dock_hovered = false;
         let mut last_cursor: Option<DockCursorPayload> = None;
-        let mut left_button_down = false;
 
         loop {
             std::thread::sleep(std::time::Duration::from_millis(CLICK_POLL_MS));
 
-            let Ok(scale) = window.scale_factor() else {
-                continue;
-            };
-            let Ok(outer_pos) = window.outer_position() else {
-                continue;
-            };
-            let Ok(outer_size) = window.outer_size() else {
-                continue;
-            };
             let Ok(cursor) = window.cursor_position() else {
                 continue;
             };
             let cursor_x = cursor.x.round() as i32;
             let cursor_y = cursor.y.round() as i32;
 
-            let pill_w = (PILL_WIDTH_DIP * scale).round() as i32;
-            let pill_h = (PILL_HEIGHT_DIP * scale).round() as i32;
-            let inset = (DOCK_BOTTOM_INSET_DIP * scale).round() as i32;
-            let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
-
-            let pill_left = outer_pos.x + (outer_size.width as i32 - pill_w) / 2;
-            let pill_top = outer_pos.y + outer_size.height as i32 - inset - pill_h;
-            let pill_right = pill_left + pill_w;
-            let pill_bottom = pill_top + pill_h;
-
-            let in_pill = in_rounded_rect(
-                cursor_x,
-                cursor_y,
-                pill_left,
-                pill_top,
-                pill_right,
-                pill_bottom,
-                radius,
-            );
+            let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y);
+            let in_pill = pill_cursor.is_some();
 
             if in_pill != dock_hovered {
                 dock_hovered = in_pill;
@@ -245,26 +350,11 @@ fn start_click_through_poller(window: WebviewWindow) {
                 }
             }
 
-            if in_pill {
-                let cursor = DockCursorPayload {
-                    x: (cursor_x - outer_pos.x) as f64 / scale,
-                    y: (cursor_y - outer_pos.y) as f64 / scale,
-                };
+            if let Some(cursor) = pill_cursor {
                 if last_cursor != Some(cursor) {
                     last_cursor = Some(cursor);
                     let _ = window.emit("dock-cursor", cursor);
                 }
-
-                // NSVisualEffectView (vibrancy) can swallow mouseDown inside the
-                // WKWebView before React onClick fires — same path as hover:
-                // detect the click in the poller and emit to the frontend.
-                let pressed = left_mouse_button_pressed();
-                if pressed && !left_button_down {
-                    let _ = window.emit("dock-click", cursor);
-                }
-                left_button_down = pressed;
-            } else {
-                left_button_down = left_mouse_button_pressed();
             }
 
             let should_ignore = !in_pill;
@@ -316,21 +406,4 @@ fn in_rounded_rect(
     let dx = x - corner_x;
     let dy = y - corner_y;
     dx * dx + dy * dy <= radius * radius
-}
-
-#[cfg(target_os = "macos")]
-fn left_mouse_button_pressed() -> bool {
-    use core_graphics::event::CGMouseButton;
-    use core_graphics::event_source::CGEventSourceStateID;
-
-    extern "C" {
-        fn CGEventSourceButtonState(
-            stateID: CGEventSourceStateID,
-            button: CGMouseButton,
-        ) -> bool;
-    }
-
-    unsafe {
-        CGEventSourceButtonState(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)
-    }
 }

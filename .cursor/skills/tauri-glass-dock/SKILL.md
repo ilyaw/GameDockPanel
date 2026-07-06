@@ -102,13 +102,27 @@ content view, как это обычно делают для frameless-окон 
 сразу `true`. `radius` скейлится так же, как `pill_w`/`pill_h`/`inset` (`* scale`), т.к.
 `outer_position()`/`outer_size()` у Tauri в физических пикселях, а DIP-константы — нет.
 
+### Клики по иконкам: CGEventTap, не сэмплирование в поллере
+
+Поллер (`start_click_through_poller`) отвечает только за непрерывное состояние:
+`set_ignore_cursor_events`, `dock-hover`, `dock-cursor`. Клики — отдельный
+`CGEventTap` на `LeftMouseDown` (`start_dock_click_tap`): event-driven перехват
+на HID-уровне, надёжен для коротких тапов трекпада и для случаев, когда
+`NSVisualEffectView` проглатывает `mouseDown` до WKWebView.
+
+На фронте единственный обработчик toggle — `listen("dock-click")` в
+`DockPanel.tsx`; у `DockIcon` нет собственного `onClick` (два источника давали
+double-toggle). Tap — pass-through, событие не блокируется. Требует
+Accessibility / Input Monitoring в System Settings; при неудачном создании tap
+клики по иконкам не работают, hover/click-through от поллера остаются.
+
 ### Частота поллинга: sleep-бюджет, не busy-loop
 
 `CLICK_POLL_MS` — это `std::thread::sleep` между итерациями, не busy-loop: поток спит,
-затем делает несколько дешёвых вызовов (пара геттеров Tauri + один `CGEvent` за позицией
-курсора) и снова засыпает. Поднято с 50ms (20 Гц) до 10ms (100 Гц) — верхняя половина
-запрошенного диапазона 60–120 Гц, задел под будущий hover-magnify (там пригодится частое
-обновление `dock-cursor`). Измерено на живом сборе (`ps -o pid,time` до/после,
+затем делает несколько дешёвых вызовов (пара геттеров Tauri + позиция курсора)
+и снова засыпает. Сейчас **50 ms** (20 Гц) — достаточно для границы click-through
+и hover/tooltip; поднятие до 10 ms (100 Гц) — отдельное решение под будущий
+hover-magnify (`dock-cursor`). Измерено на живом сборе (`ps -o pid,time` до/после,
 Δ CPU time / Δ wall time): весь процесс (WebView + непрерывные CSS-анимации RGB-glow и
 LED-pulse + vibrancy-композитинг + поллер) в простое — около 7% одного ядра; из них сам
 поллер на 100 Гц даёт всего ~2.5 п.п. сверх бейзлайна без поллера (~4.5%, чисто

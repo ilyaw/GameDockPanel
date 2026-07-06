@@ -3,7 +3,6 @@ import type { DockApp } from "../lib/types";
 
 interface DockIconProps {
   app: DockApp;
-  onToggle: (id: string) => void;
   registerRef?: (id: string, el: HTMLButtonElement | null) => void;
   /** Driven by Rust dock-cursor events — CSS :hover is blocked when unfocused. */
   isHovered?: boolean;
@@ -11,7 +10,6 @@ interface DockIconProps {
 
 export function DockIcon({
   app,
-  onToggle,
   registerRef,
   isHovered = false,
 }: DockIconProps) {
@@ -25,7 +23,6 @@ export function DockIcon({
     <button
       type="button"
       ref={(el) => registerRef?.(app.id, el)}
-      onClick={() => onToggle(app.id)}
       aria-pressed={app.isActive}
       aria-label={`${app.name}${app.isActive ? " (running)" : ""}`}
       className="relative flex flex-col items-center gap-2 outline-none"

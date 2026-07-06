@@ -1119,6 +1119,7 @@ dependencies = [
 name = "gamedockpanel"
 version = "0.1.0"
 dependencies = [
+ "core-foundation",
  "core-graphics 0.24.0",
  "objc2",
  "objc2-app-kit",

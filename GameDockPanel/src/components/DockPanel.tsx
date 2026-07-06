@@ -101,18 +101,16 @@ export function DockPanel() {
   }, [toggleApp]);
 
   return (
-    // Full-window pointer-events-none shell; pill is interactive. macOS also
-    // uses a Rust cursor poller (platform/macos.rs) that toggles
-    // setIgnoreCursorEvents and emits dock-hover / dock-cursor / dock-click —
-    // WKWebView blocks CSS :hover while the window is unfocused, and the
-    // vibrancy NSVisualEffectView can swallow onClick before it reaches React.
+    // Full-window pointer-events-none shell; pill is interactive. macOS uses a
+    // Rust cursor poller for setIgnoreCursorEvents + dock-hover / dock-cursor,
+    // and a CGEventTap for dock-click — WKWebView blocks CSS :hover while
+    // unfocused, and vibrancy NSVisualEffectView can swallow DOM clicks.
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-hidden pb-2">
       <div className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-4 rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3 backdrop-blur-xl">
         {apps.map((app) => (
           <DockIcon
             key={app.id}
             app={app}
-            onToggle={toggleApp}
             registerRef={registerIconRef}
             isHovered={isWindowHovered && hoveredIconId === app.id}
           />
