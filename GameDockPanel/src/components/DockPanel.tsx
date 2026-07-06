@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useMotionValue } from "framer-motion";
 import { listen } from "@tauri-apps/api/event";
 import { DockIcon } from "./DockIcon";
 import { initialApps } from "../lib/mockApps";
@@ -9,30 +10,59 @@ interface DockCursorPayload {
   y: number;
 }
 
+/**
+ * Picks the icon under (x, y) in viewport/client coordinates. Magnify can
+ * visually grow one icon's box into a neighbor's (no reflow — see
+ * tauri-glass-dock skill) — when both rects contain the point, the one whose
+ * center is closest wins, matching what's actually on top/what the user is
+ * aiming at, instead of an arbitrary Map-iteration-order pick.
+ */
 function hitTestIcon(
   refs: Map<string, HTMLButtonElement>,
   x: number,
   y: number,
 ): string | null {
+  let bestId: string | null = null;
+  let bestDistSq = Infinity;
+
   for (const [id, el] of refs) {
     const rect = el.getBoundingClientRect();
-    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
-      return id;
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+      continue;
+    }
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const distSq = (x - cx) ** 2 + (y - cy) ** 2;
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      bestId = id;
     }
   }
-  return null;
+  return bestId;
 }
 
 export function DockPanel() {
   const [apps, setApps] = useState<DockApp[]>(initialApps);
-  const [isWindowHovered, setIsWindowHovered] = useState(false);
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
+
+  // Hybrid cursor source: native onMouseMove when the WebView gets DOM events
+  // (focused window), plus Rust dock-cursor from the 50ms poller when it
+  // doesn't — WKWebView blocks mousemove while unfocused even after the
+  // poller clears ignoreCursorEvents. When both fire, onMouseMove wins on
+  // rate and keeps magnify smooth.
+  const mouseX = useMotionValue(Infinity);
+  const lastNativeMoveAt = useRef(0);
 
   const iconRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const registerIconRef = (id: string, el: HTMLButtonElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
   };
+
+  const applyCursor = useCallback((x: number, y: number) => {
+    mouseX.set(x);
+    setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
+  }, [mouseX]);
 
   const toggleApp = useCallback((id: string) => {
     setApps((prev) =>
@@ -49,8 +79,8 @@ export function DockPanel() {
     void (async () => {
       unlisteners.push(
         await listen<boolean>("dock-hover", (event) => {
-          setIsWindowHovered(event.payload);
           if (!event.payload) {
+            mouseX.set(Infinity);
             setHoveredIconId(null);
           }
         }),
@@ -63,10 +93,14 @@ export function DockPanel() {
         return;
       }
 
+      // Fallback path for unfocused window — DOM onMouseMove does not fire.
       unlisteners.push(
         await listen<DockCursorPayload>("dock-cursor", (event) => {
+          if (performance.now() - lastNativeMoveAt.current < 80) {
+            return;
+          }
           const { x, y } = event.payload;
-          setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
+          applyCursor(x, y);
         }),
       );
 
@@ -98,21 +132,31 @@ export function DockPanel() {
         unlisten();
       }
     };
-  }, [toggleApp]);
+  }, [toggleApp, mouseX, applyCursor]);
 
   return (
-    // Full-window pointer-events-none shell; pill is interactive. macOS uses a
-    // Rust cursor poller for setIgnoreCursorEvents + dock-hover / dock-cursor,
-    // and a CGEventTap for dock-click — WKWebView blocks CSS :hover while
-    // unfocused, and vibrancy NSVisualEffectView can swallow DOM clicks.
-    <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-hidden pb-2">
-      <div className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-4 rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3 backdrop-blur-xl">
+    // overflow-visible — tooltips and magnify bleed into the transparent band
+    // above the pill (PILL_TOP_RESERVE_PX); overflow-hidden clipped them.
+    <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
+      <div
+        onMouseMove={(event) => {
+          lastNativeMoveAt.current = performance.now();
+          applyCursor(event.clientX, event.clientY);
+        }}
+        onMouseLeave={() => {
+          lastNativeMoveAt.current = 0;
+          mouseX.set(Infinity);
+          setHoveredIconId(null);
+        }}
+        className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-5 overflow-visible rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3 backdrop-blur-xl"
+      >
         {apps.map((app) => (
           <DockIcon
             key={app.id}
             app={app}
             registerRef={registerIconRef}
-            isHovered={isWindowHovered && hoveredIconId === app.id}
+            mouseX={mouseX}
+            isHovered={hoveredIconId === app.id}
           />
         ))}
       </div>

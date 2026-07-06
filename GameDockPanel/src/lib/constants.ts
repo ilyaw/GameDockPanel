@@ -6,8 +6,8 @@
 /** Mirrors `h-14 w-14` on the icon image/fallback badge. */
 export const ICON_SIZE_PX = 56;
 
-/** Mirrors `gap-4` between icons in the dock pill. */
-export const DOCK_GAP_PX = 16;
+/** Mirrors `gap-5` between icons in the dock pill. */
+export const DOCK_GAP_PX = 20;
 
 /** Mirrors `px-5` on the dock pill. */
 export const DOCK_PADDING_X_PX = 20;
@@ -27,11 +27,18 @@ export const LED_HEIGHT_PX = 3;
 /** Mirrors `mb-0.5` gap between tooltip and icon top. */
 export const TOOLTIP_GAP_PX = 2;
 
-/** Approximate rendered height of the hover name tooltip. */
-export const TOOLTIP_HEIGHT_PX = 22;
+/** Approximate rendered height of the hover name tooltip (`text-xs` + `py-1`). */
+export const TOOLTIP_HEIGHT_PX = 28;
 
 /** Upper bound for hover-magnify scale (`origin-bottom` on the icon). */
 export const MAGNIFY_MAX_SCALE = 1.4;
+
+/**
+ * Cursor-to-icon-center distance (px, viewport coords) beyond which magnify
+ * falls back to rest scale (1). Spans roughly two neighboring icons on each
+ * side of the one closest to the cursor.
+ */
+export const MAGNIFY_INFLUENCE_RADIUS_PX = (ICON_SIZE_PX + DOCK_GAP_PX) * 2;
 
 export const MOCK_APP_COUNT = 6;
 

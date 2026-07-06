@@ -11,9 +11,9 @@ struct DockCursorPayload {
 }
 
 // Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
-const WINDOW_WIDTH_DIP: f64 = 511.0;
-const WINDOW_HEIGHT_DIP: f64 = 111.0;
-const PILL_WIDTH_DIP: f64 = 456.0;
+const WINDOW_WIDTH_DIP: f64 = 531.0;
+const WINDOW_HEIGHT_DIP: f64 = 117.0;
+const PILL_WIDTH_DIP: f64 = 476.0;
 const PILL_HEIGHT_DIP: f64 = 91.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
 /// Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx) —
