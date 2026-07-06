@@ -237,3 +237,120 @@ Framer Motion `useMotionValue` (позиция курсора) + `useTransform` 
   `bg-zinc-950/80`. Полный resize окна на hover тоже не делаем. Rust-поллер
   при `dock_hovered` расширяет hit-test до `PILL_HEIGHT_HOVER_DIP`, чтобы
   курсор над увеличенной иконкой не выпадал из click-capture.
+
+### `centerX` инвалидация по входу в hover-сессию, не только `ResizeObserver`
+
+`ResizeObserver` в `DockIcon` реагирует только на изменение размера
+наблюдаемого узла, не на его позицию — сценарий "геометрия сдвинулась (layout
+поменялся, например `PILL_TOP_RESERVE`), а размер иконки не изменился" им не
+покрывается. Добавлен второй, дешёвый источник инвалидации: `DockPanel`
+хранит `hoverSessionId` (счётчик), инкрементируемый в момент начала каждой
+hover-сессии — нативный `onMouseEnter` на пилюле и переход `dock-hover` →
+`true` от Rust-поллера (тот эмиттит это событие только на транзишене, то есть
+уже один раз на "вход", без дополнительных проверок на фронте). `DockIcon`
+получает `hoverSessionId` пропом и держит второй `useLayoutEffect`,
+пересчитывающий `centerX` при каждом его изменении — вызовов не больше одного
+на hover-сессию, `mousemove` не участвует.
+
+## Реальный process-monitoring и нативные иконки (четвёртый проход)
+
+Мокнутые `isActive` (React-стейт, тоггл по клику) и remote PNG-иконки
+(Dashboard Icons) заменены на данные `NSWorkspace` для того же
+фиксированного списка из 6 приложений — конфиг (`id`/`name`/`bundleId`/
+`color`) переехал в Rust (`commands/apps.rs::APPS`) как единственный
+источник правды; фронт больше ничего не мокает и не мутирует локально.
+
+### Event-driven, не поллинг
+
+`platform::macos::start_apps_monitoring` берёт один снимок
+`NSWorkspace.sharedWorkspace().runningApplications()` при старте для
+начального состояния, затем подписывается на
+`NSWorkspaceDidLaunchApplicationNotification` /
+`NSWorkspaceDidTerminateApplicationNotification` через
+`NSWorkspace.notificationCenter().addObserverForName_object_queue_usingBlock`
+(крейт `block2::RcBlock` для блока-замыкания; `queue: None` — блок
+выполняется синхронно на потоке, отправившем уведомление, то есть на главном
+потоке приложения, где и крутится Tauri/AppKit run loop). Из `userInfo`
+notification'а по ключу `NSWorkspaceApplicationKey` достаётся
+`NSRunningApplication`, её `bundleIdentifier()` сверяется с 6 отслеживаемыми
+ID — обновление состояния инкрементальное, полного пересканирования списка
+на каждое событие нет. После этого во фронт эмиттится `apps-state-changed` с
+полным снапшотом всех 6 приложений (проще, чем дельты, и снапшот всё равно
+маленький).
+
+Отдельная гонка "событие пришло раньше, чем фронт подписался" закрыта не
+буферизацией на Rust-стороне, а простым pull-командой при монтировании:
+`get_apps_snapshot` отдаёт текущее состояние по явному запросу, `listen`
+на `apps-state-changed` подписывается следом и ловит только последующие
+изменения.
+
+### Почему `NSRunningApplication` НЕ хранится живым в общем состоянии
+
+Ожидаемый по умолчанию подход — держать карту `bundleId -> NSRunningApplication`
+в Rust-стейте, обновляемую по тем же двум уведомлениям, чтобы клик по уже
+запущенному приложению активировал сохранённый инстанс напрямую. От этого
+осознанно отказались: AppKit-объекты в общем случае не `Send`/`Sync` между
+потоками, а `#[tauri::command]`-обработчики выполняются в пуле потоков
+Tauri, отдельном от главного потока, на котором живут `NSWorkspace`-
+уведомления и вообще все AppKit-вызовы. Хранить `Retained<NSRunningApplication>`
+в структуре, которую потом читают из другого потока — это либо не
+скомпилируется, либо небезопасно.
+
+Вместо этого `AppsState` хранит только простые данные: `Mutex<HashMap<bundleId,
+bool>>` (running) и `Mutex<HashMap<bundleId, Option<String>>>` (кэш иконок) —
+оба безопасно читаются/пишутся с любого потока. Активация по клику
+(`activate_or_launch_app`) синхронно и заново резолвит текущий
+`NSRunningApplication` через `NSRunningApplication::runningApplicationsWithBundleIdentifier`
+**на главном потоке** (диспетчеризация через `AppHandle::run_on_main_thread`
+— команда сама выполняется в threadpool, а любые AppKit-вызовы внутри неё
+обязаны уйти на главный поток). Функционально результат тот же — активируется
+существующий инстанс, второй не запускается — просто без переноса живого
+указателя между потоками. Клик — редкое, явное действие пользователя, а не
+поллинг, так что лишний lookup по bundle ID на клик не стоит того риска.
+
+### Нативные иконки: `NSImage` → `CGImage` → `NSBitmapImageRep` → PNG
+
+Путь до `.app` резолвится по bundle ID через
+`NSWorkspace.URLForApplicationWithBundleIdentifier`, иконка — через
+`NSWorkspace.iconForFile(path)` (не парсинг `.icns`/`Info.plist` вручную).
+`NSImage` в используемой версии `objc2-app-kit` (0.3.2) не даёт прямого
+`TIFFRepresentation`/PNG-метода — рабочий путь оказался через
+`CGImage`: `NSImage.CGImageForProposedRect_context_hints(...)` →
+`NSBitmapImageRep::initWithCGImage(...)` →
+`representationUsingType_properties(NSBitmapImageFileType::PNG, ..)` → байты
+`NSData` (`.to_vec()`). Из байт собирается `data:image/png;base64,...` —
+base64 закодирован рукописным RFC 4648 энкодером в
+`platform/macos.rs::base64_encode` (десяток строк), без новой crate-
+зависимости под точечную задачу. Результат кэшируется в `AppsState.icons` по
+bundle ID один раз при старте — не резолвится заново на каждый рендер или
+уведомление. `None` (не установлено / не резолвилось) — фронт показывает
+тот же fallback-бейдж, что и при `onError` на `<img>`.
+
+Новые cargo-зависимости под `cfg(target_os = "macos")`: `objc2-foundation`
+(была только транзитивной — теперь явная, для `NSNotification`/`NSString`/
+`NSURL`/`NSArray`/`NSData`/`NSDictionary`), `block2` (была транзитивной через
+`objc2-app-kit` — теперь явная), `objc2-core-graphics` (новая, только ради
+типа `CGImage` — фича `CGImage`). На `objc2-app-kit` добавлены фичи
+`NSWorkspace`, `NSRunningApplication`, `NSApplication`, `NSImage`,
+`NSImageRep`, `NSBitmapImageRep`.
+
+### Разрешения
+
+`runningApplications()` и подписка на `didLaunch`/`didTerminate` — полностью
+публичный API, не требующий privacy-разрешений (в отличие от предыдущего
+этапа с `CGEventTap`/Input Monitoring). Если по ходу дальнейшей работы
+всплывёт системный запрос нового разрешения на этом пути — это сигнал, что
+выбран не тот API, а не повод добавить разрешение молча.
+
+### Bundle ID: проверено, не угадано
+
+`com.hnc.Discord`, `com.valvesoftware.steam`, `com.spotify.client`,
+`com.obsproject.obs-studio` — сверены `mdls -name kMDItemCFBundleIdentifier`
+на установленных копиях. `com.mojang.minecraftlauncher` и
+`com.epicgames.EpicGamesLauncher` — оба лаунчера не были установлены на
+машине, где делался этот проход, поэтому сверены по нескольким независимым
+источникам (для Epic — живой вывод `codesign -dvvv` на официальном
+дистрибутиве), не проверены `mdls`-ом локально. Если когда-нибудь эти два
+приложения будут вести себя не так, как ожидается (не зажигается LED при
+запуске, не резолвится иконка) — первым делом перепроверить именно эти два
+ID через `mdls` на реально установленной копии.

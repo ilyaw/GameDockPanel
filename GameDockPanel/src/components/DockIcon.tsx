@@ -17,6 +17,14 @@ interface DockIconProps {
   registerRef?: (id: string, el: HTMLElement | null) => void;
   mouseX: MotionValue<number>;
   isHovered?: boolean;
+  /**
+   * Bumped by `DockPanel` at the start of every hover session (pill
+   * `mouseenter` / `dock-hover` → true). `ResizeObserver` alone only reacts
+   * to size changes, not position shifts (e.g. `PILL_TOP_RESERVE` moving
+   * while icon size stays the same) — re-measuring on hover-enter closes
+   * that gap cheaply, without adding a `mousemove`-frequency cost.
+   */
+  hoverSessionId?: number;
 }
 
 export function DockIcon({
@@ -24,6 +32,7 @@ export function DockIcon({
   registerRef,
   mouseX,
   isHovered = false,
+  hoverSessionId = 0,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -46,6 +55,13 @@ export function DockIcon({
     return () => observer.disconnect();
   }, [centerX]);
 
+  useLayoutEffect(() => {
+    const el = buttonRef.current;
+    if (!el || hoverSessionId === 0) return;
+    const rect = el.getBoundingClientRect();
+    centerX.set(rect.left + rect.width / 2);
+  }, [hoverSessionId, centerX]);
+
   const distance = useTransform([mouseX, centerX], ([mx, cx]: number[]) => {
     if (!Number.isFinite(mx)) return Infinity;
     return mx - cx;
@@ -59,6 +75,10 @@ export function DockIcon({
 
   const iconVisualClass =
     "h-14 w-14 origin-bottom rounded-2xl shadow-lg shadow-black/40";
+
+  // `null` means Rust couldn't resolve a native icon (app not installed) —
+  // same fallback badge as a broken/failed `<img>` load.
+  const showFallback = broken || !app.iconUrl;
 
   return (
     <button
@@ -82,7 +102,7 @@ export function DockIcon({
           {app.name}
         </span>
 
-        {broken ? (
+        {showFallback ? (
           <motion.div
             ref={(el) => registerRef?.(app.id, el)}
             style={{ scale }}
@@ -94,7 +114,7 @@ export function DockIcon({
           <motion.img
             ref={(el) => registerRef?.(app.id, el)}
             style={{ scale }}
-            src={app.iconUrl}
+            src={app.iconUrl ?? undefined}
             alt={app.name}
             draggable={false}
             onError={() => setBroken(true)}

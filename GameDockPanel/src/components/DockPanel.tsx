@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMotionValue } from "framer-motion";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { DockIcon } from "./DockIcon";
 import { PILL_HEIGHT_PX } from "../lib/constants";
-import { initialApps } from "../lib/mockApps";
 import type { DockApp } from "../lib/types";
 
 interface DockCursorPayload {
@@ -36,12 +36,18 @@ function hitTestIcon(
 }
 
 export function DockPanel() {
-  const [apps, setApps] = useState<DockApp[]>(initialApps);
+  const [apps, setApps] = useState<DockApp[]>([]);
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
+  const [hoverSessionId, setHoverSessionId] = useState(0);
 
   const mouseX = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
+  const appsRef = useRef<DockApp[]>([]);
+
+  useEffect(() => {
+    appsRef.current = apps;
+  }, [apps]);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const registerIconRef = (id: string, el: HTMLElement | null) => {
@@ -60,12 +66,15 @@ export function DockPanel() {
     setHoveredIconId(null);
   }, [mouseX]);
 
-  const toggleApp = useCallback((id: string) => {
-    setApps((prev) =>
-      prev.map((app) =>
-        app.id === id ? { ...app, isActive: !app.isActive } : app,
-      ),
-    );
+  const enterDock = useCallback(() => {
+    dockHoveredRef.current = true;
+    setHoverSessionId((id) => id + 1);
+  }, []);
+
+  const activateApp = useCallback((id: string) => {
+    const app = appsRef.current.find((candidate) => candidate.id === id);
+    if (!app) return;
+    void invoke("launch_or_activate_app", { bundleId: app.bundleId });
   }, []);
 
   useEffect(() => {
@@ -73,10 +82,29 @@ export function DockPanel() {
     const unlisteners: Array<() => void> = [];
 
     void (async () => {
+      const snapshot = await invoke<DockApp[]>("get_apps_snapshot");
+      if (cancelled) return;
+      setApps(snapshot);
+
+      unlisteners.push(
+        await listen<DockApp[]>("apps-state-changed", (event) => {
+          setApps(event.payload);
+        }),
+      );
+
+      if (cancelled) {
+        for (const unlisten of unlisteners) {
+          unlisten();
+        }
+        return;
+      }
+
       unlisteners.push(
         await listen<boolean>("dock-hover", (event) => {
-          dockHoveredRef.current = event.payload;
-          if (!event.payload) {
+          if (event.payload) {
+            enterDock();
+          } else {
+            dockHoveredRef.current = false;
             mouseX.set(Infinity);
             setHoveredIconId(null);
           }
@@ -111,7 +139,7 @@ export function DockPanel() {
         await listen<DockCursorPayload>("dock-click", (event) => {
           const { x, y } = event.payload;
           const id = hitTestIcon(iconRefs.current, x, y);
-          if (id) toggleApp(id);
+          if (id) activateApp(id);
         }),
       );
 
@@ -128,14 +156,12 @@ export function DockPanel() {
         unlisten();
       }
     };
-  }, [toggleApp, mouseX, applyCursor]);
+  }, [activateApp, mouseX, applyCursor, enterDock]);
 
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
       <div
-        onMouseEnter={() => {
-          dockHoveredRef.current = true;
-        }}
+        onMouseEnter={enterDock}
         onMouseMove={(event) => {
           lastNativeMoveAt.current = performance.now();
           dockHoveredRef.current = true;
@@ -155,6 +181,7 @@ export function DockPanel() {
             registerRef={registerIconRef}
             mouseX={mouseX}
             isHovered={hoveredIconId === app.id}
+            hoverSessionId={hoverSessionId}
           />
         ))}
       </div>

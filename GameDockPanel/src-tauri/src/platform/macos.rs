@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
-use tauri::{App, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+
+use crate::commands::apps::{AppsState, APPS};
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
 /// is over the dock pill so React can hit-test icons without CSS :hover.
@@ -417,4 +419,253 @@ fn in_rounded_rect(
     let dx = x - corner_x;
     let dy = y - corner_y;
     dx * dx + dy * dy <= radius * radius
+}
+
+// --- Real process monitoring (PROMPT_04_PROCESS_MONITORING.md) ---
+//
+// Event-driven, not polled: one `runningApplications()` snapshot at startup,
+// then only incremental updates from `NSWorkspace`'s launch/terminate
+// notifications. See the `tauri-glass-dock` skill for the thread-safety
+// rationale behind keeping `AppsState` as plain data instead of live
+// `NSRunningApplication` handles.
+
+/// Snapshots current state, subscribes to launch/terminate notifications,
+/// and resolves+caches icons for the fixed 6-app roster. Runs on the main
+/// thread (guaranteed by Tauri's `.setup()`), same as `setup_dock_window`.
+#[cfg(target_os = "macos")]
+pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
+    use objc2_app_kit::{
+        NSWorkspace, NSWorkspaceDidLaunchApplicationNotification,
+        NSWorkspaceDidTerminateApplicationNotification,
+    };
+
+    let app_handle = app.handle().clone();
+    let state = app.state::<AppsState>();
+    let workspace = NSWorkspace::sharedWorkspace();
+
+    {
+        let running_apps = workspace.runningApplications();
+        let mut running = state
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for config in APPS {
+            let is_running = running_apps.iter().any(|running_app| {
+                running_app
+                    .bundleIdentifier()
+                    .map(|bundle_id| bundle_id.to_string() == config.bundle_id)
+                    .unwrap_or(false)
+            });
+            running.insert(config.bundle_id, is_running);
+        }
+    }
+
+    {
+        let mut icons = state
+            .icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for config in APPS {
+            icons.insert(config.bundle_id, resolve_icon_data_url(config.bundle_id));
+        }
+    }
+
+    let notification_center = workspace.notificationCenter();
+
+    let launch_handle = app_handle.clone();
+    let launch_token = unsafe {
+        notification_center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceDidLaunchApplicationNotification),
+            None,
+            None,
+            &block2::RcBlock::new(move |notification| {
+                handle_workspace_notification(&launch_handle, notification, true);
+            }),
+        )
+    };
+    // Intentional permanent leak: these observers must outlive this function
+    // and live for the whole process — dropping the token would let ARC
+    // deallocate it and silently stop delivery. There is no natural point
+    // in this app's lifecycle to ever unregister them.
+    std::mem::forget(launch_token);
+
+    let terminate_handle = app_handle.clone();
+    let terminate_token = unsafe {
+        notification_center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceDidTerminateApplicationNotification),
+            None,
+            None,
+            &block2::RcBlock::new(move |notification| {
+                handle_workspace_notification(&terminate_handle, notification, false);
+            }),
+        )
+    };
+    std::mem::forget(terminate_token);
+
+    emit_apps_state(&app_handle);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn handle_workspace_notification(
+    app: &AppHandle,
+    notification: std::ptr::NonNull<objc2_foundation::NSNotification>,
+    is_launch: bool,
+) {
+    use objc2_app_kit::{NSRunningApplication, NSWorkspaceApplicationKey};
+
+    let notification = unsafe { notification.as_ref() };
+    let Some(user_info) = notification.userInfo() else {
+        return;
+    };
+    let Some(running_app_obj) =
+        (unsafe { user_info.objectForKey(NSWorkspaceApplicationKey) })
+    else {
+        return;
+    };
+    let Some(running_app) = running_app_obj.downcast_ref::<NSRunningApplication>() else {
+        return;
+    };
+    let Some(bundle_id) = running_app.bundleIdentifier() else {
+        return;
+    };
+    let bundle_id = bundle_id.to_string();
+
+    let Some(config) = APPS.iter().find(|config| config.bundle_id == bundle_id) else {
+        // Not one of our 6 tracked apps — ignore.
+        return;
+    };
+
+    let state = app.state::<AppsState>();
+    {
+        let mut running = state
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        running.insert(config.bundle_id, is_launch);
+    }
+
+    emit_apps_state(app);
+}
+
+#[cfg(target_os = "macos")]
+fn emit_apps_state(app: &AppHandle) {
+    let state = app.state::<AppsState>();
+    let snapshot = state.snapshot();
+    let _ = app.emit("apps-state-changed", snapshot);
+}
+
+/// Resolves a bundle ID to its installed `.app`'s icon and renders it as a
+/// `data:image/png;base64,...` URL. Returns `None` if the app isn't
+/// installed or the icon can't be encoded — the frontend falls back to an
+/// initials badge either way, same as a failed remote image load.
+#[cfg(target_os = "macos")]
+fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    let app_url = workspace.URLForApplicationWithBundleIdentifier(&ns_bundle_id)?;
+    let path = app_url.path()?;
+    let icon = workspace.iconForFile(&path);
+    icon_to_png_data_url(&icon)
+}
+
+/// `NSImage` → PNG bytes via `CGImage`, not manual `.icns`/`Info.plist`
+/// parsing (see PROMPT_04_PROCESS_MONITORING.md point 6). `NSImage` doesn't
+/// expose a modern direct-to-PNG method, so the standard AppKit route is
+/// `NSImage` → `CGImage` → `NSBitmapImageRep` → PNG `NSData`.
+#[cfg(target_os = "macos")]
+fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage) -> Option<String> {
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+    use objc2_foundation::{NSDictionary, NSPoint, NSRect};
+
+    let size = icon.size();
+    let mut proposed_rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    let cg_image =
+        unsafe { icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None) }?;
+
+    let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
+    let properties = NSDictionary::new();
+    let png_data = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+    }?;
+
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64_encode(&png_data.to_vec())
+    ))
+}
+
+/// Minimal RFC 4648 base64 encoder — the only byte-to-text step we need for
+/// icon data URLs, not worth a new crate dependency for.
+#[cfg(target_os = "macos")]
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Activates the bundle's running instance if one exists (brings its
+/// windows forward without spawning a second copy); otherwise launches it.
+/// Dispatched onto the main thread — `NSRunningApplication`/`NSWorkspace`
+/// calls aren't safe from the Tauri command threadpool.
+#[cfg(target_os = "macos")]
+pub fn activate_or_launch_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = tx.send(activate_or_launch_app_on_main_thread(&bundle_id));
+    })
+    .map_err(|e| e.to_string())?;
+
+    rx.recv()
+        .map_err(|_| "activate_or_launch_app did not complete".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn activate_or_launch_app_on_main_thread(bundle_id: &str) -> Result<(), String> {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
+    use objc2_foundation::NSString;
+
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id);
+
+    if let Some(instance) = running.iter().next() {
+        if instance.activateWithOptions(NSApplicationActivationOptions::empty()) {
+            return Ok(());
+        }
+        // Instance was listed as running but activation failed (e.g. quit race) — launch below.
+    }
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let app_url = workspace
+        .URLForApplicationWithBundleIdentifier(&ns_bundle_id)
+        .ok_or_else(|| format!("{bundle_id} is not installed"))?;
+    let path = app_url.path().ok_or_else(|| "app URL has no path".to_string())?;
+
+    tauri_plugin_opener::open_path(path.to_string(), None::<&str>).map_err(|e| e.to_string())
 }

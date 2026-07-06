@@ -45,7 +45,8 @@ export const TOOLTIP_HEIGHT_PX = 28;
  */
 export const MAGNIFY_INFLUENCE_RADIUS_PX = (ICON_SIZE_PX + DOCK_GAP_PX) * 2;
 
-export const MOCK_APP_COUNT = 6;
+/** Fixed dock roster size (Discord, Steam, Spotify, Minecraft, OBS, Epic Games). */
+export const APP_COUNT = 6;
 
 /** Pill outer height at rest: py + icon + gap + LED — fixed; magnify overflows above. */
 export const PILL_HEIGHT_PX =
@@ -58,8 +59,8 @@ export const PILL_HEIGHT_HOVER_PX =
 /** Pill outer width at rest (padding + icons + gaps). */
 export const PILL_WIDTH_PX =
   DOCK_PADDING_X_PX * 2 +
-  MOCK_APP_COUNT * ICON_SIZE_PX +
-  (MOCK_APP_COUNT - 1) * DOCK_GAP_PX;
+  APP_COUNT * ICON_SIZE_PX +
+  (APP_COUNT - 1) * DOCK_GAP_PX;
 
 /**
  * Transparent band above the fixed pill inside the window — magnify overflow

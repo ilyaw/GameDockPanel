@@ -5,7 +5,7 @@
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::setup_dock_window;
+pub use macos::{activate_or_launch_app, setup_dock_window, start_apps_monitoring};
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
 /// a placeholder `windows.rs` stub with nothing in it. Add that module (and
@@ -18,4 +18,14 @@ pub fn setup_dock_window(app: &mut tauri::App) -> Result<(), String> {
         window.show().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn start_apps_monitoring(_app: &tauri::App) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn activate_or_launch_app(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
+    Err("process monitoring is not implemented on this platform yet".to_string())
 }
