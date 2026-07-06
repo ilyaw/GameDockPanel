@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local AI session notes and one-off prompts (not shipped with the app)
+CLAUDE.md
+PROMPT_*.md
