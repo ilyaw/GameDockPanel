@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useMotionValue } from "framer-motion";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Reorder, useMotionValue } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { DockIcon } from "./DockIcon";
+import { useDockApps } from "../hooks/useDockApps";
 import { PILL_HEIGHT_PX } from "../lib/constants";
-import type { AppIconUpdate, AppRunningUpdate, DockApp } from "../lib/types";
+import type { DockApp } from "../lib/types";
 
 interface DockCursorPayload {
   x: number;
@@ -35,49 +36,37 @@ function hitTestIcon(
   return bestId;
 }
 
-function mergeRunningUpdates(
-  apps: DockApp[],
-  updates: AppRunningUpdate[],
-): DockApp[] {
-  const byId = new Map(updates.map((update) => [update.id, update.isActive]));
-  return apps.map((app) => {
-    const isActive = byId.get(app.id);
-    return isActive === undefined ? app : { ...app, isActive };
-  });
-}
-
-function mergeIconUpdates(apps: DockApp[], updates: AppIconUpdate[]): DockApp[] {
-  const byId = new Map(updates.map((update) => [update.id, update.iconUrl]));
-  return apps.map((app) => {
-    const iconUrl = byId.get(app.id);
-    return iconUrl === undefined ? app : { ...app, iconUrl };
-  });
-}
-
 export function DockPanel() {
-  const [apps, setApps] = useState<DockApp[]>([]);
+  const { apps, activateApp, reorderApps, removeApp, fileDragOver } =
+    useDockApps();
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [hoverSessionId, setHoverSessionId] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const isDraggingRef = useRef(false);
 
   const mouseX = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
-  const appsRef = useRef<DockApp[]>([]);
-
-  useEffect(() => {
-    appsRef.current = apps;
-  }, [apps]);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const pillRef = useRef<HTMLUListElement>(null);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
   };
 
-  const applyCursor = useCallback((x: number, y: number) => {
-    mouseX.set(x);
-    setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
-  }, [mouseX]);
+  useEffect(() => {
+    isDraggingRef.current = isDragging;
+  }, [isDragging]);
+
+  const applyCursor = useCallback(
+    (x: number, y: number) => {
+      if (isDraggingRef.current) return;
+      mouseX.set(x);
+      setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
+    },
+    [mouseX],
+  );
 
   const leaveDock = useCallback(() => {
     dockHoveredRef.current = false;
@@ -90,14 +79,21 @@ export function DockPanel() {
     setHoverSessionId((id) => id + 1);
   }, []);
 
-  const activateApp = useCallback((id: string) => {
-    const app = appsRef.current.find((candidate) => candidate.id === id);
-    if (!app) return;
-    invoke("launch_or_activate_app", { bundleId: app.bundleId }).catch(
-      (error: unknown) => {
-        console.error(`Failed to launch or activate ${app.name}:`, error);
-      },
-    );
+  const handleReorder = useCallback(
+    (newOrder: DockApp[]) => {
+      void reorderApps(newOrder);
+    },
+    [reorderApps],
+  );
+
+  const beginDrag = useCallback(() => {
+    setIsDragging(true);
+    mouseX.set(Infinity);
+    setHoveredIconId(null);
+  }, [mouseX]);
+
+  const endDrag = useCallback(() => {
+    setIsDragging(false);
   }, []);
 
   useEffect(() => {
@@ -105,36 +101,6 @@ export function DockPanel() {
     const unlisteners: Array<() => void> = [];
 
     void (async () => {
-      const snapshot = await invoke<DockApp[]>("get_apps_snapshot");
-      if (cancelled) return;
-      setApps(snapshot);
-
-      unlisteners.push(
-        await listen<AppRunningUpdate[]>("apps-running-changed", (event) => {
-          setApps((prev) => mergeRunningUpdates(prev, event.payload));
-        }),
-      );
-
-      if (cancelled) {
-        for (const unlisten of unlisteners) {
-          unlisten();
-        }
-        return;
-      }
-
-      unlisteners.push(
-        await listen<AppIconUpdate[]>("apps-icons-updated", (event) => {
-          setApps((prev) => mergeIconUpdates(prev, event.payload));
-        }),
-      );
-
-      if (cancelled) {
-        for (const unlisten of unlisteners) {
-          unlisten();
-        }
-        return;
-      }
-
       unlisteners.push(
         await listen<boolean>("dock-hover", (event) => {
           if (event.payload) {
@@ -173,6 +139,7 @@ export function DockPanel() {
 
       unlisteners.push(
         await listen<DockCursorPayload>("dock-click", (event) => {
+          if (isDraggingRef.current) return;
           const { x, y } = event.payload;
           const id = hitTestIcon(iconRefs.current, x, y);
           if (id) activateApp(id);
@@ -194,9 +161,33 @@ export function DockPanel() {
     };
   }, [activateApp, mouseX, applyCursor, enterDock]);
 
+  useLayoutEffect(() => {
+    const el = pillRef.current;
+    if (!el) return;
+
+    const syncVibrancyPill = () => {
+      const rect = el.getBoundingClientRect();
+      void invoke("sync_vibrancy_pill", {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+      });
+    };
+
+    syncVibrancyPill();
+    const observer = new ResizeObserver(syncVibrancyPill);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [apps]);
+
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
-      <div
+      <Reorder.Group
+        ref={pillRef}
+        axis="x"
+        values={apps}
+        onReorder={handleReorder}
         onMouseEnter={enterDock}
         onMouseMove={(event) => {
           lastNativeMoveAt.current = performance.now();
@@ -208,19 +199,33 @@ export function DockPanel() {
           leaveDock();
         }}
         style={{ height: PILL_HEIGHT_PX }}
-        className="animate-rgb-glow pointer-events-auto mx-auto flex shrink-0 items-end gap-5 overflow-visible rounded-[28px] border border-transparent bg-zinc-950/80 px-5 py-3"
+        className={`animate-rgb-glow pointer-events-auto mx-auto m-0 flex shrink-0 list-none items-end gap-5 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
+          fileDragOver
+            ? "border-zinc-400 bg-zinc-900/90"
+            : "border-transparent bg-zinc-950/80"
+        }`}
       >
         {apps.map((app) => (
-          <DockIcon
+          <Reorder.Item
             key={app.id}
-            app={app}
-            registerRef={registerIconRef}
-            mouseX={mouseX}
-            isHovered={hoveredIconId === app.id}
-            hoverSessionId={hoverSessionId}
-          />
+            value={app}
+            className="relative list-none"
+            whileDrag={{ zIndex: 20, scale: 1.08 }}
+            onDragStart={beginDrag}
+            onDragEnd={endDrag}
+          >
+            <DockIcon
+              app={app}
+              registerRef={registerIconRef}
+              mouseX={mouseX}
+              isHovered={!isDragging && hoveredIconId === app.id}
+              hoverSessionId={hoverSessionId}
+              isDragging={isDragging}
+              onRemove={removeApp}
+            />
+          </Reorder.Item>
         ))}
-      </div>
+      </Reorder.Group>
     </div>
   );
 }

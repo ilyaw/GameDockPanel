@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use crate::commands::apps::{AppsState, APPS};
+use crate::commands::apps::AppsState;
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
 /// is over the dock pill so React can hit-test icons without CSS :hover.
@@ -12,10 +12,19 @@ struct DockCursorPayload {
     y: f64,
 }
 
-// Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
-const WINDOW_WIDTH_DIP: f64 = 379.0;
+// Layout formula mirrored from src/lib/constants.ts — see pillWidthPx()/
+// windowWidthDip() there for the JS-side copy of this math. DIP == points
+// throughout (Tauri's logical-pixel convention), so these are used directly
+// against `NSRect`/`NSWindow` without any extra unit conversion.
+const ICON_SIZE_DIP: f64 = 56.0;
+const DOCK_GAP_DIP: f64 = 20.0;
+const DOCK_PADDING_X_DIP: f64 = 20.0;
+const MAGNIFY_MAX_SCALE: f64 = 1.4;
+const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
+
+// Keep in sync with WINDOW_HEIGHT_DIP / PILL_* in src/lib/constants.ts.
+// Height never depends on app count — only width does (see slot_count()).
 const WINDOW_HEIGHT_DIP: f64 = 154.0;
-const PILL_WIDTH_DIP: f64 = 324.0;
 const PILL_HEIGHT_REST_DIP: f64 = 91.0;
 const PILL_HEIGHT_HOVER_DIP: f64 = 114.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
@@ -30,15 +39,36 @@ const CLICK_POLL_MS: u64 = 50;
 /// MAGNIFY_MAX_SCALE * 2` from `src/lib/constants.ts` (56 × 1.4 × 2 ≈ 157).
 const ICON_EXPORT_PX: f64 = 256.0;
 
+/// Flex slots in the pill — one per dock icon, no trailing "+" tile.
+fn slot_count(app_count: usize) -> usize {
+    app_count
+}
+
+fn pill_width_dip(slots: usize) -> f64 {
+    DOCK_PADDING_X_DIP * 2.0
+        + slots as f64 * ICON_SIZE_DIP
+        + slots.saturating_sub(1) as f64 * DOCK_GAP_DIP
+}
+
+fn window_width_dip(pill_width_dip: f64) -> f64 {
+    pill_width_dip + (ICON_SIZE_DIP * (MAGNIFY_MAX_SCALE - 1.0)).ceil() + WINDOW_GLOW_BLEED_DIP
+}
+
 /// Positions, sizes and reveals the main window: a compact, always-on-top
 /// strip anchored to the bottom-center of the primary display, with the
-/// app hidden from the Dock.
+/// app hidden from the Dock. Initial width is computed from
+/// `AppsState.entries` (populated by `commands::apps::init_entries` just
+/// before this runs), not a fixed constant.
 pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
 
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+    let app_count = app.state::<AppsState>().app_count();
+    let pill_width = pill_width_dip(slot_count(app_count));
+    let window_width = window_width_dip(pill_width);
 
     let monitor = window
         .primary_monitor()
@@ -48,7 +78,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     let scale = monitor.scale_factor();
     let monitor_size = *monitor.size();
     let monitor_pos = *monitor.position();
-    let width = (WINDOW_WIDTH_DIP * scale).round() as i32;
+    let width = (window_width * scale).round() as i32;
     let height = (WINDOW_HEIGHT_DIP * scale).round() as i32;
 
     window
@@ -69,10 +99,19 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         .set_ignore_cursor_events(true)
         .map_err(|e| e.to_string())?;
 
+    {
+        let state = app.state::<AppsState>();
+        let mut current_width = state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_width = pill_width;
+    }
+
     window.show().map_err(|e| e.to_string())?;
 
     enable_inactive_mouse_tracking(&window)?;
-    apply_dock_vibrancy(&window)?;
+    apply_dock_vibrancy(&window, pill_width)?;
 
     start_dock_click_tap(window.clone());
     start_click_through_poller(window);
@@ -88,17 +127,17 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
 const VIBRANCY_VIEW_TAG: isize = 91_376_254;
 
 /// Applies native macOS blur behind the dock and masks it to the pill's
-/// rounded footprint. `apply_vibrancy()` always sizes its
-/// `NSVisualEffectView` to the whole window content view (511x111 DIP),
-/// which is bigger than the visible 456x91 DIP pill — the extra space is
-/// reserved for RGB-glow bleed and future magnify/tooltip overflow (see
-/// WINDOW_*_DIP vs PILL_*_DIP above). Left untouched, vibrancy would paint a
-/// rectangular blur halo outside the pill's `rounded-[28px]` corners. So
-/// after applying vibrancy we look the blur view back up by its internal
-/// tag and shrink its frame down to just the pill's rect — the crate's own
-/// `radius` argument then rounds that smaller rect correctly.
+/// rounded footprint at the given initial width. `apply_vibrancy()` always
+/// sizes its `NSVisualEffectView` to the whole window content view, which is
+/// bigger than the visible pill — the extra space is reserved for RGB-glow
+/// bleed and magnify/tooltip overflow (see WINDOW_*_DIP vs PILL_*_DIP
+/// above). Left untouched, vibrancy would paint a rectangular blur halo
+/// outside the pill's `rounded-[28px]` corners. So after applying vibrancy
+/// we look the blur view back up by its internal tag and shrink its frame
+/// down to just the pill's rect — the crate's own `radius` argument then
+/// rounds that smaller rect correctly.
 #[cfg(target_os = "macos")]
-fn apply_dock_vibrancy(window: &WebviewWindow) -> Result<(), String> {
+fn apply_dock_vibrancy(window: &WebviewWindow, pill_width_dip: f64) -> Result<(), String> {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
     // HudWindow stays dark unconditionally (a fixed-style material, not a
@@ -114,22 +153,28 @@ fn apply_dock_vibrancy(window: &WebviewWindow) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    set_vibrancy_pill_height(window, PILL_HEIGHT_REST_DIP)
+    set_vibrancy_pill_frame(window, pill_width_dip, PILL_HEIGHT_REST_DIP, None, None)
 }
 
-/// Resizes the masked vibrancy blur view to match the fixed CSS pill height,
-/// anchored to the bottom inset. Magnified icons overflow above this rect.
+/// Resizes the masked vibrancy blur view to the given pill footprint.
+/// When `origin_x` / `origin_y` are `None`, the frame is centered on X and
+/// anchored with `DOCK_BOTTOM_INSET_DIP` on Y (startup before DOM measure).
+/// When provided, values are webview logical coords from
+/// `getBoundingClientRect()` (see `sync_vibrancy_pill_from_web`).
 #[cfg(target_os = "macos")]
-pub fn set_vibrancy_pill_height(window: &WebviewWindow, height_dip: f64) -> Result<(), String> {
-    use objc2_app_kit::NSWindow;
+fn set_vibrancy_pill_frame(
+    window: &WebviewWindow,
+    width_dip: f64,
+    height_dip: f64,
+    origin_x: Option<f64>,
+    origin_y: Option<f64>,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
 
-    let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())? as *mut NSWindow;
-    let ns_window = unsafe { &*ns_window_ptr };
-    let content_view = ns_window
-        .contentView()
-        .ok_or_else(|| "no content view".to_string())?;
+    let ns_view_ptr = window.ns_view().map_err(|e| e.to_string())? as *mut NSView;
+    let ns_view = unsafe { &*ns_view_ptr };
 
-    let Some(blur_view) = content_view.viewWithTag(VIBRANCY_VIEW_TAG) else {
+    let Some(blur_view) = ns_view.viewWithTag(VIBRANCY_VIEW_TAG) else {
         return Ok(());
     };
 
@@ -139,22 +184,98 @@ pub fn set_vibrancy_pill_height(window: &WebviewWindow, height_dip: f64) -> Resu
             .ok_or_else(|| "blur view has no superview".to_string())?
     };
     let bounds = parent.bounds();
+
+    blur_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
+
     let mut pill_frame = bounds;
-    pill_frame.size.width = PILL_WIDTH_DIP;
+    pill_frame.size.width = width_dip;
     pill_frame.size.height = height_dip;
-    pill_frame.origin.x = (bounds.size.width - PILL_WIDTH_DIP) / 2.0;
-    pill_frame.origin.y = if parent.isFlipped() {
-        bounds.size.height - DOCK_BOTTOM_INSET_DIP - height_dip
-    } else {
-        DOCK_BOTTOM_INSET_DIP
+    pill_frame.origin.x = origin_x.unwrap_or((bounds.size.width - width_dip) / 2.0);
+    pill_frame.origin.y = match origin_y {
+        Some(y) if parent.isFlipped() => y,
+        Some(y) => bounds.size.height - y - height_dip,
+        None if parent.isFlipped() => bounds.size.height - DOCK_BOTTOM_INSET_DIP - height_dip,
+        None => DOCK_BOTTOM_INSET_DIP,
     };
+
+    blur_view.setClipsToBounds(true);
     blur_view.setFrame(pill_frame);
 
     Ok(())
 }
 
+/// Positions the vibrancy blur view from the pill's measured DOM rect.
+#[cfg(target_os = "macos")]
+pub fn sync_vibrancy_pill_from_web(
+    window: &WebviewWindow,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    set_vibrancy_pill_frame(window, width, height, Some(x), Some(y))?;
+
+    let state = window.state::<AppsState>();
+    let mut current_width = state
+        .pill_width_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *current_width = width;
+
+    Ok(())
+}
+
 #[cfg(not(target_os = "macos"))]
-fn apply_dock_vibrancy(_window: &WebviewWindow) -> Result<(), String> {
+fn apply_dock_vibrancy(_window: &WebviewWindow, _pill_width_dip: f64) -> Result<(), String> {
+    Ok(())
+}
+
+/// Applies a discrete pill-width change for an already-visible window: one
+/// coordinated pass over NSWindow frame (animated), vibrancy pill frame,
+/// and the shared width value hit-testing reads. Only ever called from
+/// `add_app_from_path` / `remove_app` — a rare, user-initiated, discrete
+/// event — never from hover/magnify/mousemove paths. Height never changes
+/// here, only width.
+#[cfg(target_os = "macos")]
+pub fn sync_dock_geometry(window: &WebviewWindow, app_count: usize) -> Result<(), String> {
+    use objc2_app_kit::NSWindow;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let pill_width = pill_width_dip(slot_count(app_count));
+    let window_width = window_width_dip(pill_width);
+
+    let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())? as *mut NSWindow;
+    let ns_window = unsafe { &*ns_window_ptr };
+
+    // Only width changes on this path — derive the new frame from the
+    // window's *current* frame (already correct AppKit bottom-left-origin
+    // coordinates) instead of recomputing from monitor geometry, so no
+    // Y-flip math is needed: origin.y and size.height carry over untouched,
+    // only origin.x and size.width move, symmetric around the old center.
+    let current_frame = ns_window.frame();
+    let center_x = current_frame.origin.x + current_frame.size.width / 2.0;
+    let new_frame = NSRect::new(
+        NSPoint::new(center_x - window_width / 2.0, current_frame.origin.y),
+        NSSize::new(window_width, current_frame.size.height),
+    );
+    ns_window.setFrame_display_animate(new_frame, true, true);
+
+    set_vibrancy_pill_frame(window, pill_width, PILL_HEIGHT_REST_DIP, None, None)?;
+
+    {
+        let state = window.state::<AppsState>();
+        let mut current_width = state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_width = pill_width;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sync_dock_geometry(_window: &WebviewWindow, _app_count: usize) -> Result<(), String> {
     Ok(())
 }
 
@@ -164,11 +285,9 @@ fn apply_dock_vibrancy(_window: &WebviewWindow) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn enable_inactive_mouse_tracking(window: &WebviewWindow) -> Result<(), String> {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSWindow, NSTrackingArea, NSTrackingAreaOptions};
+    use objc2_app_kit::{NSTrackingArea, NSTrackingAreaOptions, NSWindow};
 
-    let ns_window_ptr = window
-        .ns_window()
-        .map_err(|e| e.to_string())? as *mut NSWindow;
+    let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())? as *mut NSWindow;
     let ns_window = unsafe { &*ns_window_ptr };
 
     ns_window.setAcceptsMouseMovedEvents(true);
@@ -200,7 +319,11 @@ fn enable_inactive_mouse_tracking(window: &WebviewWindow) -> Result<(), String> 
 }
 
 /// Maps a screen-space cursor position to DIP coords inside the window when
-/// the point lies on the rounded pill footprint; `None` otherwise.
+/// the point lies on the rounded pill footprint; `None` otherwise. Reads
+/// the pill's current width from `AppsState` (mutated by `setup_dock_window`
+/// / `sync_dock_geometry`) instead of a compile-time constant, so both
+/// consumers below (the click tap and the hover poller) automatically
+/// hit-test against whatever width is currently applied.
 #[cfg(target_os = "macos")]
 fn pill_cursor_at_screen(
     window: &WebviewWindow,
@@ -211,8 +334,16 @@ fn pill_cursor_at_screen(
     let scale = window.scale_factor().ok()?;
     let outer_pos = window.outer_position().ok()?;
     let outer_size = window.outer_size().ok()?;
+    let pill_width_dip = {
+        let state = window.state::<AppsState>();
+        let guard = state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard
+    };
 
-    let pill_w = (PILL_WIDTH_DIP * scale).round() as i32;
+    let pill_w = (pill_width_dip * scale).round() as i32;
     let pill_h = (pill_height_dip * scale).round() as i32;
     let inset = (DOCK_BOTTOM_INSET_DIP * scale).round() as i32;
     let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
@@ -240,9 +371,9 @@ fn pill_cursor_at_screen(
     })
 }
 
-/// Event-driven `LeftMouseDown` capture at the HID layer — reliable for short
-/// trackpad taps and for clicks swallowed by the vibrancy `NSVisualEffectView`
-/// before they reach WKWebView / React.
+/// HID-layer click capture — emits `dock-click` on mouse *up*, only when the
+/// pointer barely moved since mouse-down. That keeps icon drag-reorder from
+/// also launching the app (mousedown used to fire immediately).
 #[cfg(target_os = "macos")]
 fn start_dock_click_tap(window: WebviewWindow) {
     use core_foundation::mach_port::CFMachPort;
@@ -251,15 +382,25 @@ fn start_dock_click_tap(window: WebviewWindow) {
         CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
     };
 
+    /// Squared px tolerance — same order of magnitude as a macOS dock tap.
+    const CLICK_MOVE_TOLERANCE_SQ: i32 = 12 * 12;
+
+    struct PendingDown {
+        x: i32,
+        y: i32,
+    }
+
     std::thread::spawn(move || {
         let mach_port: Arc<Mutex<Option<CFMachPort>>> = Arc::new(Mutex::new(None));
         let mach_port_cb = Arc::clone(&mach_port);
+        let pending_down: Arc<Mutex<Option<PendingDown>>> = Arc::new(Mutex::new(None));
+        let pending_down_cb = Arc::clone(&pending_down);
 
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::Default,
-            vec![CGEventType::LeftMouseDown],
+            vec![CGEventType::LeftMouseDown, CGEventType::LeftMouseUp],
             move |_proxy, event_type, event| {
                 match event_type {
                     CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -272,15 +413,47 @@ fn start_dock_click_tap(window: WebviewWindow) {
                     }
                     CGEventType::LeftMouseDown => {
                         if let Ok(cursor) = window.cursor_position() {
-                            let cursor_x = cursor.x.round() as i32;
-                            let cursor_y = cursor.y.round() as i32;
-                            if let Some(payload) = pill_cursor_at_screen(
-                                &window,
-                                cursor_x,
-                                cursor_y,
-                                PILL_HEIGHT_HOVER_DIP,
-                            ) {
-                                let _ = window.emit("dock-click", payload);
+                            if let Ok(mut guard) = pending_down_cb.lock() {
+                                *guard = Some(PendingDown {
+                                    x: cursor.x.round() as i32,
+                                    y: cursor.y.round() as i32,
+                                });
+                            }
+                        }
+                    }
+                    CGEventType::LeftMouseUp => {
+                        let is_tap = {
+                            let Ok(cursor) = window.cursor_position() else {
+                                if let Ok(mut guard) = pending_down_cb.lock() {
+                                    *guard = None;
+                                }
+                                return Some(event.clone());
+                            };
+                            let up_x = cursor.x.round() as i32;
+                            let up_y = cursor.y.round() as i32;
+                            let Ok(mut guard) = pending_down_cb.lock() else {
+                                return Some(event.clone());
+                            };
+                            let Some(down) = guard.take() else {
+                                return Some(event.clone());
+                            };
+                            let dx = up_x - down.x;
+                            let dy = up_y - down.y;
+                            dx * dx + dy * dy <= CLICK_MOVE_TOLERANCE_SQ
+                        };
+
+                        if is_tap {
+                            if let Ok(cursor) = window.cursor_position() {
+                                let cursor_x = cursor.x.round() as i32;
+                                let cursor_y = cursor.y.round() as i32;
+                                if let Some(payload) = pill_cursor_at_screen(
+                                    &window,
+                                    cursor_x,
+                                    cursor_y,
+                                    PILL_HEIGHT_HOVER_DIP,
+                                ) {
+                                    let _ = window.emit("dock-click", payload);
+                                }
                             }
                         }
                     }
@@ -433,6 +606,12 @@ fn in_rounded_rect(
 // notifications. See the `tauri-glass-dock` skill for the thread-safety
 // rationale behind keeping `AppsState` as plain data instead of live
 // `NSRunningApplication` handles.
+//
+// Generalized in PROMPT_06_CUSTOM_APPS.md: both the startup snapshot and the
+// notification handler below read `AppsState.entries` fresh at the moment
+// they run, rather than closing over a fixed roster — the observer blocks
+// are registered once (`mem::forget`) and live for the whole process, but
+// `entries` keeps changing underneath them as the user adds/removes apps.
 
 /// Snapshots current state, subscribes to launch/terminate notifications,
 /// and resolves+caches icons for the dock roster. Runs on the main
@@ -449,29 +628,37 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
     let workspace = NSWorkspace::sharedWorkspace();
 
     {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let running_apps = workspace.runningApplications();
         let mut running = state
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for config in APPS {
+        for entry in entries.iter() {
             let is_running = running_apps.iter().any(|running_app| {
                 running_app
                     .bundleIdentifier()
-                    .map(|bundle_id| bundle_id.to_string() == config.bundle_id)
+                    .map(|bundle_id| bundle_id.to_string() == entry.bundle_id)
                     .unwrap_or(false)
             });
-            running.insert(config.bundle_id, is_running);
+            running.insert(entry.bundle_id.clone(), is_running);
         }
     }
 
     {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut icons = state
             .icons
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for config in APPS {
-            icons.insert(config.bundle_id, resolve_icon_data_url(config.bundle_id));
+        for entry in entries.iter() {
+            icons.insert(entry.bundle_id.clone(), resolve_icon_data_url(&entry.bundle_id));
         }
     }
 
@@ -538,24 +725,32 @@ fn handle_workspace_notification(
     };
     let bundle_id = bundle_id.to_string();
 
-    let Some(config) = APPS.iter().find(|config| config.bundle_id == bundle_id) else {
+    let state = app.state::<AppsState>();
+
+    let is_tracked = {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entries.iter().any(|entry| entry.bundle_id == bundle_id)
+    };
+    if !is_tracked {
         // Not one of our tracked apps — ignore.
         return;
-    };
+    }
 
-    let state = app.state::<AppsState>();
     {
         let mut running = state
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        running.insert(config.bundle_id, is_launch);
+        running.insert(bundle_id.clone(), is_launch);
     }
 
-    // Icons are normally resolved once at startup (see `start_apps_monitoring`).
-    // If the user installs a tracked app after the dock is already
-    // running, its cache entry stays `None` forever without this: retry only
-    // on the (rare) launch path, and only if still unresolved — not a hot path,
+    // Icons are normally resolved once at startup / at add-time (see
+    // `start_apps_monitoring` / `commands::apps::add_app_from_path`).
+    // If a tracked app's icon somehow never resolved, retry only on the
+    // (rare) launch path, and only if still unresolved — not a hot path,
     // no new polling/infrastructure.
     let mut icon_resolved = false;
     if is_launch {
@@ -564,15 +759,15 @@ fn handle_workspace_notification(
                 .icons
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            icons.get(config.bundle_id).cloned().flatten().is_none()
+            icons.get(&bundle_id).cloned().flatten().is_none()
         };
         if needs_resolve {
-            if let Some(icon_url) = resolve_icon_data_url(config.bundle_id) {
+            if let Some(icon_url) = resolve_icon_data_url(&bundle_id) {
                 let mut icons = state
                     .icons
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                icons.insert(config.bundle_id, Some(icon_url));
+                icons.insert(bundle_id.clone(), Some(icon_url));
                 icon_resolved = true;
             }
         }
@@ -580,7 +775,7 @@ fn handle_workspace_notification(
 
     emit_apps_running_changed(app);
     if icon_resolved {
-        if let Some(update) = state.icon_update_for(config.bundle_id) {
+        if let Some(update) = state.icon_update_for(&bundle_id) {
             emit_apps_icons_updated(app, vec![update]);
         }
     }
@@ -601,9 +796,11 @@ fn emit_apps_icons_updated(app: &AppHandle, updates: Vec<crate::commands::apps::
 /// Resolves a bundle ID to its installed `.app`'s icon and renders it as a
 /// `data:image/png;base64,...` URL. Returns `None` if the app isn't
 /// installed or the icon can't be encoded — the frontend falls back to an
-/// initials badge either way, same as a failed remote image load.
+/// initials badge either way, same as a failed remote image load. Exposed
+/// to `commands::apps` (as `resolve_app_icon`) via `platform::mod` for the
+/// add-app-from-dialog flow.
 #[cfg(target_os = "macos")]
-fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
+pub fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::NSString;
 
@@ -645,8 +842,56 @@ fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage) -> Option<String> {
     ))
 }
 
-/// Activates the bundle's running instance if one exists (brings its
-/// windows forward without spawning a second copy); otherwise launches it.
+/// Whether a bundle ID resolves to an installed `.app` at all — used to
+/// filter `SEED_POOL` candidates on first run (`commands::apps::seed_entries`).
+/// Same underlying `NSWorkspace` lookup as icon/launch resolution, just
+/// checking presence instead of using the result.
+#[cfg(target_os = "macos")]
+pub fn is_app_installed(bundle_id: &str) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    let workspace = NSWorkspace::sharedWorkspace();
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    workspace
+        .URLForApplicationWithBundleIdentifier(&ns_bundle_id)
+        .is_some()
+}
+
+/// Whether a bundle ID currently has a running instance — used when adding
+/// an app at runtime (`commands::apps::add_app_from_path`) to seed its
+/// initial LED state without waiting for the next `NSWorkspace` event.
+#[cfg(target_os = "macos")]
+pub fn is_bundle_running(bundle_id: &str) -> bool {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id)
+        .iter()
+        .next()
+        .is_some()
+}
+
+/// Resolves the `CFBundleIdentifier` of a `.app` bundle at `path` — the
+/// reverse of `resolve_icon_data_url`'s bundle-id-to-path lookup, needed for
+/// the "add app from native dialog" flow where all we have is a filesystem
+/// path the user picked.
+#[cfg(target_os = "macos")]
+pub fn resolve_bundle_id_from_path(path: &str) -> Result<String, String> {
+    use objc2_foundation::{NSBundle, NSString};
+
+    let ns_path = NSString::from_str(path);
+    let bundle = NSBundle::bundleWithPath(&ns_path)
+        .ok_or_else(|| format!("{path} is not a valid app bundle"))?;
+    let bundle_id = bundle
+        .bundleIdentifier()
+        .ok_or_else(|| format!("{path} has no CFBundleIdentifier"))?;
+    Ok(bundle_id.to_string())
+}
+
+/// Activates the app if a running instance exists (brings its windows to
+/// front, does not spawn a second instance); otherwise launches it.
 /// Dispatched onto the main thread — `NSRunningApplication`/`NSWorkspace`
 /// calls aren't safe from the Tauri command threadpool.
 #[cfg(target_os = "macos")]

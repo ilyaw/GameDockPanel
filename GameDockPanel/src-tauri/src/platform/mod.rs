@@ -5,7 +5,11 @@
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{activate_or_launch_app, setup_dock_window, start_apps_monitoring};
+pub use macos::{
+    activate_or_launch_app, is_app_installed, is_bundle_running,
+    resolve_bundle_id_from_path, resolve_icon_data_url as resolve_app_icon, setup_dock_window,
+    start_apps_monitoring, sync_dock_geometry, sync_vibrancy_pill_from_web,
+};
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
 /// a placeholder `windows.rs` stub with nothing in it. Add that module (and
@@ -28,4 +32,43 @@ pub fn start_apps_monitoring(_app: &tauri::App) -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 pub fn activate_or_launch_app(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
     Err("process monitoring is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_app_installed(_bundle_id: &str) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_bundle_running(_bundle_id: &str) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn resolve_bundle_id_from_path(_path: &str) -> Result<String, String> {
+    Err("adding apps is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn resolve_app_icon(_bundle_id: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sync_dock_geometry(
+    _window: &tauri::WebviewWindow,
+    _app_count: usize,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sync_vibrancy_pill_from_web(
+    _window: &tauri::WebviewWindow,
+    _x: f64,
+    _y: f64,
+    _width: f64,
+    _height: f64,
+) -> Result<(), String> {
+    Ok(())
 }

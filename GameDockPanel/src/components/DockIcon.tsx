@@ -6,6 +6,7 @@ import {
   useTransform,
   type MotionValue,
 } from "framer-motion";
+import { Trash2 } from "lucide-react";
 import type { DockApp } from "../lib/types";
 import { MAGNIFY_INFLUENCE_RADIUS_PX, MAGNIFY_MAX_SCALE, TOOLTIP_GAP_PX } from "../lib/constants";
 
@@ -25,6 +26,11 @@ interface DockIconProps {
    * that gap cheaply, without adding a `mousemove`-frequency cost.
    */
   hoverSessionId?: number;
+  /** Right-click → "Remove from Dock" — mirrors the real macOS Dock pattern
+   * (context menu item, not a separate "edit mode"). */
+  onRemove?: (bundleId: string) => void;
+  /** While an icon is being drag-reordered, magnify is suppressed. */
+  isDragging?: boolean;
 }
 
 export function DockIcon({
@@ -33,14 +39,42 @@ export function DockIcon({
   mouseX,
   isHovered = false,
   hoverSessionId = 0,
+  onRemove,
+  isDragging = false,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
-  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const buttonRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const centerX = useMotionValue(0);
 
   useEffect(() => {
     setBroken(false);
   }, [app.iconUrl]);
+
+  // Close the context menu on an outside click or Escape. Checks
+  // `menuRef.current?.contains(...)` rather than closing unconditionally on
+  // every `mousedown` — otherwise the menu item's own click never lands: the
+  // mousedown that starts that click would close (and unmount) the menu
+  // before the subsequent click event fires on it.
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      setMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [menuOpen]);
 
   // Rest-layout center X for the magnify distance curve — re-measured on layout
   // shifts (DPI, icon count), not on every mousemove frame.
@@ -85,26 +119,58 @@ export function DockIcon({
   const showFallback = broken || !app.iconUrl;
 
   return (
-    <button
-      type="button"
+    // A `<div>`, not `<button>`: it now has to contain the "Remove from
+    // Dock" menu's own real `<button>`, and nested `<button>`s are invalid
+    // HTML. No functionality is lost — activation has never gone through
+    // this element's own click handler anyway (see the native
+    // `dock-click`/`hitTestIcon` dispatch in DockPanel.tsx), so `role`/
+    // `aria-*` here are purely there to keep the same assistive-tech
+    // semantics `<button>` had.
+    <div
+      role="button"
+      tabIndex={0}
       ref={buttonRef}
       aria-pressed={app.isActive}
       aria-label={`${app.name}${app.isActive ? " (running)" : ""}`}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenuOpen(true);
+      }}
       className={`relative flex flex-col items-center gap-2 outline-none ${
-        isHovered ? "z-10" : "z-0"
-      }`}
+        isDragging ? "cursor-grabbing" : "cursor-grab"
+      } ${isHovered || menuOpen ? "z-10" : "z-0"}`}
     >
       <div className="relative shrink-0">
         <span
           style={{ marginBottom: TOOLTIP_GAP_PX }}
           className={`pointer-events-none absolute bottom-full left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
-            isHovered
+            isHovered && !menuOpen
               ? "scale-100 opacity-100"
               : "scale-90 opacity-0"
           }`}
         >
           {app.name}
         </span>
+
+        {menuOpen && (
+          <div
+            ref={menuRef}
+            style={{ marginBottom: TOOLTIP_GAP_PX }}
+            className="pointer-events-auto absolute bottom-full left-1/2 z-30 -translate-x-1/2 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onRemove?.(app.bundleId);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Remove from Dock
+            </button>
+          </div>
+        )}
 
         {showFallback ? (
           <motion.div
@@ -134,6 +200,6 @@ export function DockIcon({
             : "scale-0 text-transparent opacity-0"
         }`}
       />
-    </button>
+    </div>
   );
 }

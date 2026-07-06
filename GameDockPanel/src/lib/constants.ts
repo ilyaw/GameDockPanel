@@ -45,8 +45,12 @@ export const TOOLTIP_HEIGHT_PX = 28;
  */
 export const MAGNIFY_INFLUENCE_RADIUS_PX = (ICON_SIZE_PX + DOCK_GAP_PX) * 2;
 
-/** Fixed dock roster size (Discord, Steam, Spotify, OBS). */
-export const APP_COUNT = 4;
+/**
+ * Soft ceiling on total dock entries (seeded + manually added) — mirrors
+ * `MAX_APPS` in src-tauri/src/commands/apps.rs. Past this limit, drag-drop
+ * from Finder is rejected on the Rust side.
+ */
+export const MAX_APPS = 15;
 
 /** Pill outer height at rest: py + icon + gap + LED — fixed; magnify overflows above. */
 export const PILL_HEIGHT_PX =
@@ -55,12 +59,6 @@ export const PILL_HEIGHT_PX =
 /** Native hit-test band above the fixed pill (magnify overflow, not CSS pill height). */
 export const PILL_HEIGHT_HOVER_PX =
   PILL_HEIGHT_PX + MAGNIFY_HEIGHT_OVERFLOW_PX;
-
-/** Pill outer width at rest (padding + icons + gaps). */
-export const PILL_WIDTH_PX =
-  DOCK_PADDING_X_PX * 2 +
-  APP_COUNT * ICON_SIZE_PX +
-  (APP_COUNT - 1) * DOCK_GAP_PX;
 
 /**
  * Transparent band above the fixed pill inside the window — magnify overflow
@@ -73,8 +71,9 @@ export const PILL_TOP_RESERVE_PX =
   DOCK_PADDING_Y_PX;
 
 /**
- * Tauri window logical size — keep in sync with `WINDOW_*_DIP` in
- * src-tauri/src/platform/macos.rs and tauri.conf.json.
+ * Tauri window logical size — keep in sync with `WINDOW_HEIGHT_DIP` in
+ * src-tauri/src/platform/macos.rs and tauri.conf.json. Height never depends
+ * on app count — only width does (see `pillWidthPx`/`windowWidthDip` below).
  */
 export const WINDOW_HEIGHT_DIP =
   DOCK_BOTTOM_INSET_PX + PILL_HEIGHT_PX + PILL_TOP_RESERVE_PX;
@@ -82,7 +81,27 @@ export const WINDOW_HEIGHT_DIP =
 /** Horizontal glow bleed (~14px box-shadow each side). */
 export const WINDOW_GLOW_BLEED_PX = 32;
 
-export const WINDOW_WIDTH_DIP =
-  PILL_WIDTH_PX +
-  Math.ceil(ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1)) +
-  WINDOW_GLOW_BLEED_PX;
+/**
+ * Pill outer width at rest for `slots` flex children (padding + icons +
+ * gaps) — the CSS pill itself is content-driven (no explicit width is ever
+ * set in JSX, flex sizes it from its children), so nothing in the frontend
+ * actually calls this at runtime. It exists purely as the documented
+ * formula that `pillWidthDip`/`windowWidthDip` in
+ * src-tauri/src/platform/macos.rs mirror for native window/vibrancy/
+ * hit-test sizing — kept here, parametrized by count instead of a fixed
+ * `APP_COUNT`, so the two sides stay provably in sync.
+ */
+export function pillWidthPx(slots: number): number {
+  return (
+    DOCK_PADDING_X_PX * 2 + slots * ICON_SIZE_PX + (slots - 1) * DOCK_GAP_PX
+  );
+}
+
+/** See `pillWidthPx` — same "documented formula, not called at runtime" note. */
+export function windowWidthDip(slots: number): number {
+  return (
+    pillWidthPx(slots) +
+    Math.ceil(ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1)) +
+    WINDOW_GLOW_BLEED_PX
+  );
+}

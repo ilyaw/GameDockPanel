@@ -26,6 +26,7 @@
         "acceptFirstMouse": true,
         "focus": false,
         "focusable": true,
+        "dragDropEnabled": true,
         "visible": false
       }
     ],
