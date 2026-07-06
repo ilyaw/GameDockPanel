@@ -38,10 +38,9 @@ pub const APPS: &[AppConfig] = &[
     AppConfig {
         id: "minecraft",
         name: "Minecraft",
-        // Web-verified (Mojang launcher Info.plist, multiple sources), not
-        // confirmed with `mdls` on this machine — not installed locally.
-        // Re-verify with `mdls -name kMDItemCFBundleIdentifier` if this ever
-        // shows a wrong running/icon state.
+        // `mdls -name kMDItemCFBundleIdentifier` confirmed on a real install
+        // (Homebrew cask `minecraft`) during the stabilization pass —
+        // matches the value already here.
         bundle_id: "com.mojang.minecraftlauncher",
         color: "text-lime-400",
     },
@@ -54,8 +53,9 @@ pub const APPS: &[AppConfig] = &[
     AppConfig {
         id: "epic-games",
         name: "Epic Games",
-        // Web-verified (codesign -dvvv output on Epic's launcher), not
-        // confirmed with `mdls` on this machine — see note above.
+        // `mdls -name kMDItemCFBundleIdentifier` confirmed on a real install
+        // (Homebrew cask `epic-games`) during the stabilization pass —
+        // matches the value already here.
         bundle_id: "com.epicgames.EpicGamesLauncher",
         color: "text-fuchsia-400",
     },
