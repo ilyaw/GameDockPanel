@@ -12,8 +12,12 @@ export const DOCK_GAP_PX = 20;
 /** Mirrors `px-5` on the dock pill. */
 export const DOCK_PADDING_X_PX = 20;
 
-/** Mirrors `py-3` on the dock pill. */
+/** Mirrors `py-3` on the dock pill (rest vertical padding). */
 export const DOCK_PADDING_Y_PX = 12;
+
+/** Extra top padding on the pill while hovered — grows the dark background
+ * upward into the transparent window band (CSS only, no native resize). */
+export const DOCK_PADDING_TOP_HOVER_PX = 20;
 
 /** Mirrors `pb-2` — gap between pill and the window bottom edge. */
 export const DOCK_BOTTOM_INSET_PX = 8;
@@ -24,8 +28,8 @@ export const ICON_LED_GAP_PX = 8;
 /** LED bar height (`h-[3px]`). */
 export const LED_HEIGHT_PX = 3;
 
-/** Mirrors `mb-0.5` gap between tooltip and icon top. */
-export const TOOLTIP_GAP_PX = 2;
+/** Gap between tooltip bottom edge and icon top (`margin-bottom` on tooltip). */
+export const TOOLTIP_GAP_PX = 16;
 
 /** Approximate rendered height of the hover name tooltip (`text-xs` + `py-1`). */
 export const TOOLTIP_HEIGHT_PX = 28;
@@ -53,14 +57,16 @@ export const PILL_WIDTH_PX =
   (MOCK_APP_COUNT - 1) * DOCK_GAP_PX;
 
 /**
- * Transparent band above the pill top edge inside the window — just enough
- * for tooltip (`bottom-full mb-1`) and magnify (`origin-bottom`) overflow.
- * Both bleed into the pill's top padding where possible; only the remainder
- * needs window space above the pill background.
+ * Transparent band above the pill top edge inside the window — room for
+ * hover top-padding, tooltip, and magnify overflow. OS click-through still
+ * uses only the static pill footprint in Rust (see tauri-glass-dock skill).
  */
 export const PILL_TOP_RESERVE_PX = Math.max(
   Math.ceil(ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1)) - DOCK_PADDING_Y_PX,
-  TOOLTIP_HEIGHT_PX + TOOLTIP_GAP_PX - DOCK_PADDING_Y_PX,
+  DOCK_PADDING_TOP_HOVER_PX +
+    TOOLTIP_HEIGHT_PX +
+    TOOLTIP_GAP_PX -
+    DOCK_PADDING_Y_PX,
 );
 
 /**

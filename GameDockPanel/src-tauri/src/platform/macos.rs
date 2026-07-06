@@ -12,7 +12,7 @@ struct DockCursorPayload {
 
 // Keep in sync with WINDOW_*_DIP / PILL_* in src/lib/constants.ts.
 const WINDOW_WIDTH_DIP: f64 = 531.0;
-const WINDOW_HEIGHT_DIP: f64 = 117.0;
+const WINDOW_HEIGHT_DIP: f64 = 151.0;
 const PILL_WIDTH_DIP: f64 = 476.0;
 const PILL_HEIGHT_DIP: f64 = 91.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
@@ -182,11 +182,6 @@ fn enable_inactive_mouse_tracking(window: &WebviewWindow) -> Result<(), String> 
 
     content_view.addTrackingArea(&tracking_area);
 
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn enable_inactive_mouse_tracking(_window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
