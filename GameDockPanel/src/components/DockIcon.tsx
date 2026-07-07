@@ -34,12 +34,12 @@ interface DockIconProps {
    */
   hoverSessionId?: number;
   /**
-   * Bumped by `DockPanel` once per `Reorder.Item` whose layout box finished
-   * animating into its post-reorder position. A reorder-drag starts and
-   * ends while the cursor never leaves the pill, so it triggers neither
-   * `ResizeObserver` (position, not size, changed) nor a new hover session
-   * — this closes that gap the same way `hoverSessionId` closes the
-   * layout-shift gap above, see the recalculation effect below.
+   * Bumped by `DockPanel` once after all post-reorder layout animations have
+   * settled (debounced). A reorder-drag starts and ends while the cursor
+   * never leaves the pill, so it triggers neither `ResizeObserver` (position,
+   * not size, changed) nor a new hover session — this closes that gap the
+   * same way `hoverSessionId` closes the layout-shift gap above, see the
+   * recalculation effect below.
    */
   reorderSettledId?: number;
   /** Right-click → "Remove from Dock" — mirrors the real macOS Dock pattern
@@ -53,6 +53,8 @@ interface DockIconProps {
   onQuit?: (bundleId: string) => void;
   /** While an icon is being drag-reordered, magnify is suppressed. */
   isDragging?: boolean;
+  /** Brief post-drop window while layout position animation settles. */
+  isReorderSettling?: boolean;
   /** Mirrors `DockSettings.animationsEnabled` — gates only the LED's
    * "breathing" pulse keyframe, not its on/off (active/inactive) state,
    * which is a functional signal, not decoration. */
@@ -70,6 +72,7 @@ export function DockIcon({
   onShowInFinder,
   onQuit,
   isDragging = false,
+  isReorderSettling = false,
   animationsEnabled = true,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
@@ -205,6 +208,15 @@ export function DockIcon({
     [1, MAGNIFY_MAX_SCALE, 1],
   );
   const scale = useSpring(scaleRaw, MAGNIFY_SPRING);
+  const magnifySuppressed = isDragging || isReorderSettling;
+
+  useLayoutEffect(() => {
+    if (magnifySuppressed) {
+      scale.jump(1);
+    } else {
+      scale.set(scaleRaw.get());
+    }
+  }, [magnifySuppressed, scale, scaleRaw]);
 
   const iconVisualClass = "h-14 w-14 origin-bottom rounded-2xl";
 
@@ -304,7 +316,7 @@ export function DockIcon({
         {showFallback ? (
           <motion.div
             ref={(el) => registerRef?.(app.id, el)}
-            style={{ scale }}
+            style={{ scale: magnifySuppressed ? 1 : scale }}
             className={`flex items-center justify-center bg-zinc-800 text-lg font-semibold ${iconVisualClass} ${app.color}`}
           >
             {app.name.slice(0, 2).toUpperCase()}
@@ -312,7 +324,7 @@ export function DockIcon({
         ) : (
           <motion.img
             ref={(el) => registerRef?.(app.id, el)}
-            style={{ scale }}
+            style={{ scale: magnifySuppressed ? 1 : scale }}
             src={app.iconUrl ?? undefined}
             alt={app.name}
             draggable={false}

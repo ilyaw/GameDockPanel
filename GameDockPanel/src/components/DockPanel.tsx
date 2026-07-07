@@ -52,6 +52,10 @@ const PANEL_EFFECT_CLASSES: Record<string, { overlay: string; animation: string 
  * imported since it's a one-shot JS timer, not a CSS-consumed constant. */
 const REJECT_PULSE_MS = 400;
 
+/** Quiet period after the last `onLayoutAnimationComplete` before magnify
+ * resumes — batches N neighbor completions into one `centerX` refresh. */
+const SETTLE_DEBOUNCE_MS = 40;
+
 const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
 
 interface DockCursorPayload {
@@ -121,6 +125,15 @@ export function DockPanel() {
   const [reorderSettledId, setReorderSettledId] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const isDraggingRef = useRef(false);
+  const [isReorderSettling, setIsReorderSettling] = useState(false);
+  const isReorderSettlingRef = useRef(false);
+  const draggedAppIdRef = useRef<string | null>(null);
+  const orderAtDragStartRef = useRef<string[]>([]);
+  const layoutCompleteSeenRef = useRef(false);
+  const settleDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const lastCursorRef = useRef({ x: Infinity, y: Infinity });
   const [isRejecting, setIsRejecting] = useState(false);
 
   const mouseX = useMotionValue(Infinity);
@@ -145,9 +158,18 @@ export function DockPanel() {
     isDraggingRef.current = isDragging;
   }, [isDragging]);
 
+  useEffect(() => {
+    isReorderSettlingRef.current = isReorderSettling;
+  }, [isReorderSettling]);
+
+  useEffect(() => {
+    return () => clearTimeout(settleDebounceRef.current);
+  }, []);
+
   const applyCursor = useCallback(
     (x: number, y: number) => {
-      if (isDraggingRef.current) return;
+      lastCursorRef.current = { x, y };
+      if (isDraggingRef.current || isReorderSettlingRef.current) return;
       const settingsEl = settingsSlotRef.current;
       if (settingsEl && pointInRect(x, y, settingsEl)) {
         mouseX.set(Infinity);
@@ -166,6 +188,7 @@ export function DockPanel() {
 
   const leaveDock = useCallback(() => {
     dockHoveredRef.current = false;
+    lastCursorRef.current = { x: Infinity, y: Infinity };
     mouseX.set(Infinity);
     settingsMouseX.set(Infinity);
     setHoveredIconId(null);
@@ -189,32 +212,73 @@ export function DockPanel() {
     [reorderApps],
   );
 
-  const beginDrag = useCallback(() => {
-    setIsDragging(true);
+  const finishReorderSettle = useCallback(() => {
+    if (!isReorderSettlingRef.current) return;
+    clearTimeout(settleDebounceRef.current);
+    isReorderSettlingRef.current = false;
+    setIsReorderSettling(false);
+    draggedAppIdRef.current = null;
+    layoutCompleteSeenRef.current = false;
+    setReorderSettledId((id) => id + 1);
+
     mouseX.set(Infinity);
     settingsMouseX.set(Infinity);
     setHoveredIconId(null);
     setIsSettingsHovered(false);
   }, [mouseX, settingsMouseX]);
 
+  const scheduleFinishSettle = useCallback(() => {
+    clearTimeout(settleDebounceRef.current);
+    settleDebounceRef.current = setTimeout(() => {
+      finishReorderSettle();
+    }, SETTLE_DEBOUNCE_MS);
+  }, [finishReorderSettle]);
+
+  const beginDrag = useCallback(
+    (appId: string) => {
+      draggedAppIdRef.current = appId;
+      orderAtDragStartRef.current = apps.map((app) => app.id);
+      setIsDragging(true);
+      mouseX.set(Infinity);
+      settingsMouseX.set(Infinity);
+      setHoveredIconId(null);
+      setIsSettingsHovered(false);
+    },
+    [apps, mouseX, settingsMouseX],
+  );
+
   /** The one discrete "drop" event — persists the final order exactly once
    * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
   const endDrag = useCallback(() => {
     setIsDragging(false);
+    isDraggingRef.current = false;
+    setIsReorderSettling(true);
+    isReorderSettlingRef.current = true;
+    layoutCompleteSeenRef.current = false;
     void commitReorder();
-  }, [commitReorder]);
+
+    const orderChanged =
+      orderAtDragStartRef.current.join() !== apps.map((app) => app.id).join();
+    if (!orderChanged) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          finishReorderSettle();
+        });
+      });
+    }
+  }, [apps, commitReorder, finishReorderSettle]);
 
   /**
    * `onLayoutAnimationComplete` on a `Reorder.Item` fires once that item's
    * layout box has actually finished animating into its post-reorder
-   * position — after the DOM has visually settled, not mid-flight. Bumping
-   * on every completion (not just the first) is deliberate: it's cheap
-   * (a `getBoundingClientRect()` per icon in `DockIcon`, not a per-frame
-   * cost), and the last completion to fire always leaves `centerX` correct.
+   * position. Debounced so N neighbor completions become one `centerX`
+   * refresh instead of N spring re-targets on the dragged icon.
    */
   const handleItemLayoutAnimationComplete = useCallback(() => {
-    setReorderSettledId((id) => id + 1);
-  }, []);
+    if (!isReorderSettlingRef.current) return;
+    layoutCompleteSeenRef.current = true;
+    scheduleFinishSettle();
+  }, [scheduleFinishSettle]);
 
   useEffect(() => {
     let cancelled = false;
@@ -227,6 +291,7 @@ export function DockPanel() {
             enterDock();
           } else {
             dockHoveredRef.current = false;
+            lastCursorRef.current = { x: Infinity, y: Infinity };
             mouseX.set(Infinity);
             settingsMouseX.set(Infinity);
             setHoveredIconId(null);
@@ -261,7 +326,7 @@ export function DockPanel() {
 
       unlisteners.push(
         await listen<DockCursorPayload>("dock-click", (event) => {
-          if (isDraggingRef.current) return;
+          if (isDraggingRef.current || isReorderSettlingRef.current) return;
           const { x, y } = event.payload;
           const settingsEl = settingsSlotRef.current;
           if (settingsEl && pointInRect(x, y, settingsEl)) {
@@ -539,8 +604,8 @@ export function DockPanel() {
             // the context menu's real hit-box relative to where it's drawn.
             layout="position"
             className="relative list-none"
-            whileDrag={{ zIndex: 20, scale: 1.08 }}
-            onDragStart={beginDrag}
+            whileDrag={{ zIndex: 20 }}
+            onDragStart={() => beginDrag(app.id)}
             onDragEnd={endDrag}
             onLayoutAnimationComplete={handleItemLayoutAnimationComplete}
           >
@@ -548,10 +613,13 @@ export function DockPanel() {
               app={app}
               registerRef={registerIconRef}
               mouseX={mouseX}
-              isHovered={!isDragging && hoveredIconId === app.id}
+              isHovered={
+                !isDragging && !isReorderSettling && hoveredIconId === app.id
+              }
               hoverSessionId={hoverSessionId}
               reorderSettledId={reorderSettledId}
               isDragging={isDragging}
+              isReorderSettling={isReorderSettling}
               animationsEnabled={settings.animationsEnabled}
               onRemove={removeApp}
               onShowInFinder={showInFinder}
@@ -573,13 +641,13 @@ export function DockPanel() {
           <div
             ref={settingsSlotRef}
             className={`relative h-14 w-14 shrink-0 ${
-              isSettingsHovered && !isDragging ? "z-10" : ""
+              isSettingsHovered && !isDragging && !isReorderSettling ? "z-10" : ""
             }`}
           >
             <span
               style={{ marginBottom: TOOLTIP_GAP_PX }}
               className={`pointer-events-none absolute bottom-full left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
-                isSettingsHovered && !isDragging
+                isSettingsHovered && !isDragging && !isReorderSettling
                   ? "scale-100 opacity-100"
                   : "scale-90 opacity-0"
               }`}
@@ -587,7 +655,7 @@ export function DockPanel() {
               Настройки
             </span>
             <motion.div
-              style={{ scale: isDragging ? 1 : settingsScale }}
+              style={{ scale: isDragging || isReorderSettling ? 1 : settingsScale }}
               className="h-full w-full origin-bottom"
             >
               <button
