@@ -83,26 +83,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     let pill_width = pill_width_dip(app_count);
     let window_width = window_width_dip(pill_width);
 
-    let monitor = window
-        .primary_monitor()
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no primary monitor".to_string())?;
-
-    let scale = monitor.scale_factor();
-    let monitor_size = *monitor.size();
-    let monitor_pos = *monitor.position();
-    let width = (window_width * scale).round() as i32;
-    let height = (WINDOW_HEIGHT_DIP * scale).round() as i32;
-
-    window
-        .set_size(PhysicalSize::new(width as u32, height as u32))
-        .map_err(|e| e.to_string())?;
-    window
-        .set_position(PhysicalPosition::new(
-            monitor_pos.x + (monitor_size.width as i32 - width) / 2,
-            monitor_pos.y + monitor_size.height as i32 - height,
-        ))
-        .map_err(|e| e.to_string())?;
+    apply_dock_window_frame(&window, window_width)?;
     window
         .set_always_on_top(true)
         .map_err(|e| e.to_string())?;
@@ -218,43 +199,71 @@ fn set_vibrancy_pill_frame(
     Ok(())
 }
 
-/// Snaps the native window inner width to `target_content_width`, keeping
-/// the outer frame centered on its current screen X. Uses Tauri's
-/// `set_size` (content/inner size) — same convention as `setup_dock_window`
-/// — not raw `NSWindow.setFrame`, which mixes frame vs content coords.
-/// Returns `true` when the width actually changed.
+/// Sizes the window to `target_content_width` (inner DIP) and anchors it
+/// to the bottom-center of the primary monitor — same geometry as
+/// `setup_dock_window`. Always updates position even when width is
+/// unchanged, so a prior resize that grew right without recentering is
+/// corrected on the next call. Uses inner size for both `set_size` and the
+/// centering math (not `outer_size`) to stay consistent with
+/// `setup_dock_window` and avoid macOS inner/outer drift.
+#[cfg(target_os = "macos")]
+fn apply_dock_window_frame(
+    window: &WebviewWindow,
+    target_content_width: f64,
+) -> Result<bool, String> {
+    let monitor = window
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no primary monitor".to_string())?;
+
+    let scale = monitor.scale_factor();
+    let monitor_size = *monitor.size();
+    let monitor_pos = *monitor.position();
+
+    let inner = window.inner_size().map_err(|e| e.to_string())?;
+    let current_width = inner.width as f64 / scale;
+    let width_changed = (current_width - target_content_width).abs() >= 0.5;
+
+    let width_px = (target_content_width * scale).round() as i32;
+    let height_px = (WINDOW_HEIGHT_DIP * scale).round() as i32;
+
+    if width_changed {
+        window
+            .set_size(PhysicalSize::new(width_px as u32, height_px as u32))
+            .map_err(|e| e.to_string())?;
+    }
+
+    window
+        .set_position(PhysicalPosition::new(
+            monitor_pos.x + (monitor_size.width as i32 - width_px) / 2,
+            monitor_pos.y + monitor_size.height as i32 - height_px,
+        ))
+        .map_err(|e| e.to_string())?;
+
+    Ok(width_changed)
+}
+
+/// Dispatches `apply_dock_window_frame` onto the main thread — window
+/// frame mutations must not run from the Tauri command threadpool.
 #[cfg(target_os = "macos")]
 fn set_window_width_instant(
     window: &WebviewWindow,
     target_content_width: f64,
 ) -> Result<bool, String> {
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let inner = window.inner_size().map_err(|e| e.to_string())?;
-    let current_width = inner.width as f64 / scale;
-
-    if (current_width - target_content_width).abs() < 0.5 {
-        return Ok(false);
-    }
-
-    let outer_pos = window.outer_position().map_err(|e| e.to_string())?;
-    let outer_size = window.outer_size().map_err(|e| e.to_string())?;
-    let center_x = outer_pos.x as f64 + outer_size.width as f64 / 2.0;
-
-    let inner_height = inner.height as f64 / scale;
-    let width_px = (target_content_width * scale).round() as u32;
-    let height_px = (inner_height * scale).round() as u32;
-
+    let window = window.clone();
+    let window_for_closure = window.clone();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
     window
-        .set_size(PhysicalSize::new(width_px, height_px))
+        .run_on_main_thread(move || {
+            let _ = tx.send(apply_dock_window_frame(
+                &window_for_closure,
+                target_content_width,
+            ));
+        })
         .map_err(|e| e.to_string())?;
 
-    let new_outer_size = window.outer_size().map_err(|e| e.to_string())?;
-    let new_x = (center_x - new_outer_size.width as f64 / 2.0).round() as i32;
-    window
-        .set_position(PhysicalPosition::new(new_x, outer_pos.y))
-        .map_err(|e| e.to_string())?;
-
-    Ok(true)
+    rx.recv()
+        .map_err(|_| "set_window_width_instant did not complete".to_string())?
 }
 
 /// Resizes the native window inner width to fit `pill_width` (pill +
@@ -265,7 +274,26 @@ pub fn resize_dock_window_for_pill(
     window: &WebviewWindow,
     pill_width: f64,
 ) -> Result<bool, String> {
-    set_window_width_instant(window, window_width_dip(pill_width))
+    let changed = set_window_width_instant(window, window_width_dip(pill_width))?;
+
+    let state = window.state::<AppsState>();
+    let mut current_width = state
+        .pill_width_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *current_width = pill_width;
+
+    Ok(changed)
+}
+
+/// Formula-based resize when the DOM has not measured yet — used from
+/// `add_app_from_path` / `remove_app` as a belt-and-suspenders path.
+#[cfg(target_os = "macos")]
+pub fn resize_dock_window_for_app_count(
+    window: &WebviewWindow,
+    app_count: usize,
+) -> Result<bool, String> {
+    resize_dock_window_for_pill(window, pill_width_dip(app_count))
 }
 
 /// Aligns the masked vibrancy blur view to the pill's measured DOM rect.

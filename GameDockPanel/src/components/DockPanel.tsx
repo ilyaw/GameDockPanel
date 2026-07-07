@@ -379,6 +379,10 @@ export function DockPanel() {
     };
 
     const syncDockGeometry = async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      if (cancelled) return;
       const rect = measurePill();
       await invoke("resize_dock_window", { pillWidth: rect.width });
       if (cancelled) return;

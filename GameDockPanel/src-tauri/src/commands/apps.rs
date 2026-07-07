@@ -427,12 +427,17 @@ pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) 
         icons.insert(bundle_id.clone(), platform::resolve_app_icon(&bundle_id));
     }
 
-    {
+    let app_count = {
         let entries = state
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         save_entries(&app, &entries)?;
+        entries.len()
+    };
+
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = platform::resize_dock_window_for_app_count(&window, app_count);
     }
 
     let _ = app.emit("apps-list-changed", state.snapshot());
@@ -472,12 +477,17 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
         icons.remove(&bundle_id);
     }
 
-    {
+    let app_count = {
         let entries = state
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         save_entries(&app, &entries)?;
+        entries.len()
+    };
+
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = platform::resize_dock_window_for_app_count(&window, app_count);
     }
 
     let _ = app.emit("apps-list-changed", state.snapshot());
