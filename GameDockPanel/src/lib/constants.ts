@@ -126,13 +126,16 @@ export const CONTEXT_MENU_ROW_HEIGHT_PX = 30;
 export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
 /**
  * Tallest the icon context menu ever gets: Show in Finder + Remove from Dock
- * + divider + Quit (Quit and the divider only render while the app is
- * running). Must be accounted for in `pillTopReservePx` same as the
- * tooltip — the menu renders `bottom-full` off the same anchor, and the
- * window has no scroll, so anything past its height is simply not drawn.
+ * + divider + indicator color + optional Reset + optional Quit divider/row.
+ * Must be accounted for in `pillTopReservePx` — the menu renders
+ * `bottom-full` off the same anchor, and the window has no scroll, so
+ * anything past its height is simply not drawn.
  */
+export const CONTEXT_MENU_MAX_ROWS = 5;
+export const CONTEXT_MENU_MAX_DIVIDERS = 2;
 export const CONTEXT_MENU_HEIGHT_PX =
-  CONTEXT_MENU_ROW_HEIGHT_PX * 3 + CONTEXT_MENU_DIVIDER_HEIGHT_PX;
+  CONTEXT_MENU_ROW_HEIGHT_PX * CONTEXT_MENU_MAX_ROWS +
+  CONTEXT_MENU_DIVIDER_HEIGHT_PX * CONTEXT_MENU_MAX_DIVIDERS;
 
 /**
  * Soft ceiling on total dock entries (seeded + manually added) — mirrors
@@ -455,4 +458,30 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   backgroundSpeed: 0.4,
   iconSizePreset: "medium",
   iconSizePx: DEFAULT_ICON_SIZE_PX,
+  ledColorMode: "auto",
+  ledFixedColor: "#ff9d3b",
 };
+
+export type LedColorMode = DockSettings["ledColorMode"];
+
+export const LED_COLOR_MODE_OPTIONS: {
+  id: LedColorMode;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "auto",
+    label: "Из иконки",
+    description: "Автоматически подбирает цвет из иконки приложения",
+  },
+  {
+    id: "fixed",
+    label: "Один цвет",
+    description: "Одинаковый цвет индикатора для всех приложений",
+  },
+  {
+    id: "override_only",
+    label: "Только ручные",
+    description: "Только приложения с заданным вручную цветом; остальные — нейтральные",
+  },
+];

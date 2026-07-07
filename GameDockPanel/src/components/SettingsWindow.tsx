@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { SlidersHorizontal } from "lucide-react";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
@@ -8,11 +9,13 @@ import {
   ICON_SIZE_PRESETS,
   ICON_SIZE_MAX_PX,
   ICON_SIZE_MIN_PX,
+  LED_COLOR_MODE_OPTIONS,
   PANEL_EFFECT_PRESETS,
   clampIconSizePx,
   type BackgroundPreset,
   type BorderStylePreset,
   type IconSizePreset,
+  type LedColorMode,
   type PanelEffectPreset,
 } from "../lib/constants";
 import type { DockSettings } from "../lib/types";
@@ -317,6 +320,42 @@ export function SettingsWindow() {
             checked={settings.animationsEnabled}
             onChange={(value) => update({ animationsEnabled: value })}
           />
+        </SettingsRow>
+
+        <SettingsRow
+          title="Индикаторы запущенных приложений"
+          description="Цвет полоски под иконкой: автоматически из иконки, один для всех, или только вручную заданные."
+        >
+          <div className="flex max-w-[240px] flex-col items-end gap-2">
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {LED_COLOR_MODE_OPTIONS.map((option) => (
+                <StylePresetButton
+                  key={option.id}
+                  preset={{ id: option.id, label: option.label, description: option.description }}
+                  selected={settings.ledColorMode === option.id}
+                  onSelect={() => update({ ledColorMode: option.id as LedColorMode })}
+                />
+              ))}
+            </div>
+            {settings.ledColorMode === "fixed" && (
+              <input
+                type="color"
+                value={settings.ledFixedColor}
+                onChange={(event) => update({ ledFixedColor: event.target.value })}
+                className={colorInputClass}
+                aria-label="Фиксированный цвет индикатора"
+              />
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                void invoke("refresh_indicator_colors");
+              }}
+              className="text-xs text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+            >
+              Пересчитать цвета из иконок
+            </button>
+          </div>
         </SettingsRow>
 
         <SettingsRow

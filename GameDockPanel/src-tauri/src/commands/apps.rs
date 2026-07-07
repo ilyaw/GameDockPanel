@@ -6,11 +6,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::platform;
+use crate::commands::settings::{DockSettings, SettingsState};
+use crate::platform::{self, IconResolveResult};
 
 fn icon_metrics_for_app(app: &AppHandle) -> (f64, f64) {
-    use crate::commands::settings::SettingsState;
-
     let icon_size_dip = {
         let state = app.state::<SettingsState>();
         let guard = state
@@ -26,6 +25,10 @@ fn icon_metrics_for_app(app: &AppHandle) -> (f64, f64) {
     (icon_size_dip, scale_factor)
 }
 
+/// Neutral LED fallback when `ledColorMode` is `override_only` and no manual
+/// color is set for an app.
+pub const LED_NEUTRAL_FALLBACK: &str = "#a1a1aa";
+
 /// One dock entry — persisted to disk and used as the live runtime roster.
 /// `id` and `bundle_id` are always equal: a bundle ID is the only stable
 /// identifier an arbitrary user-added app has, so there's no value in also
@@ -37,7 +40,26 @@ pub struct AppEntry {
     pub id: String,
     pub name: String,
     pub bundle_id: String,
-    pub color: String,
+    /// Manual LED hex override (`#rrggbb`). `None` uses auto-sampled color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_override: Option<String>,
+    /// Legacy Tailwind `text-*` class from configs before icon sampling.
+    /// Ignored on read except when it is already a hex override.
+    #[serde(default, skip_serializing)]
+    color: Option<String>,
+}
+
+impl AppEntry {
+    fn normalize_legacy_color(mut self) -> Self {
+        if self.color_override.is_none() {
+            if let Some(legacy) = self.color.take() {
+                if legacy.starts_with('#') {
+                    self.color_override = Some(legacy);
+                }
+            }
+        }
+        self
+    }
 }
 
 /// Curated first-run candidate — `'static` compile-time data, never
@@ -46,7 +68,6 @@ pub struct AppEntry {
 struct SeedCandidate {
     name: &'static str,
     bundle_id: &'static str,
-    color: &'static str,
 }
 
 /// First-run candidate pool, ordered by priority. Only entries that resolve
@@ -60,40 +81,26 @@ const SEED_POOL: &[SeedCandidate] = &[
     SeedCandidate {
         name: "Discord",
         bundle_id: "com.hnc.Discord",
-        color: "text-indigo-400",
     },
     SeedCandidate {
         name: "Steam",
         bundle_id: "com.valvesoftware.steam",
-        color: "text-sky-400",
     },
     SeedCandidate {
         name: "Spotify",
         bundle_id: "com.spotify.client",
-        color: "text-green-400",
     },
     SeedCandidate {
         name: "OBS Studio",
         bundle_id: "com.obsproject.obs-studio",
-        color: "text-red-400",
     },
     SeedCandidate {
         name: "Epic Games",
-        // Confirmed via `mdls` during the process-monitoring pass (see
-        // CLAUDE.md / commit history) before Epic was later trimmed from
-        // the then-static roster. Reused here unchanged.
         bundle_id: "com.epicgames.EpicGamesLauncher",
-        color: "text-fuchsia-400",
     },
     SeedCandidate {
         name: "Battle.net",
-        // Web-verified only (Homebrew cask uninstall path, macupdater.com,
-        // `net.battle.*` preference file prefixes) — not confirmed with
-        // `mdls` on this machine. Same caveat category as Epic/Minecraft
-        // before their local verification; re-check with `mdls -name
-        // kMDItemCFBundleIdentifier` if this ever shows a wrong state.
         bundle_id: "net.battle.app",
-        color: "text-blue-400",
     },
 ];
 
@@ -110,27 +117,31 @@ const DEFAULT_SEED_LIMIT: usize = 10;
 /// with the reject-pulse cue (see `add_app_from_path` below).
 pub const MAX_APPS: usize = 15;
 
-/// Small, fixed palette for arbitrary user-added apps — colors are picked
-/// deterministically from a hash of the bundle ID, not sampled from icon
-/// pixels (a harder, separate task out of scope for this pass). Disjoint
-/// from every `SEED_POOL` color so a manually added app never visually
-/// collides with a seeded one.
+/// Deterministic hex fallback when icon sampling fails — keyed by bundle ID.
 const COLOR_PALETTE: &[&str] = &[
-    "text-orange-400",
-    "text-purple-400",
-    "text-pink-400",
-    "text-yellow-400",
-    "text-teal-400",
-    "text-rose-400",
-    "text-lime-400",
-    "text-violet-400",
+    "#fb923c",
+    "#c084fc",
+    "#f472b6",
+    "#facc15",
+    "#2dd4bf",
+    "#fb7185",
+    "#a3e635",
+    "#a78bfa",
 ];
 
-fn color_for_bundle_id(bundle_id: &str) -> &'static str {
+fn fallback_hex_for_bundle_id(bundle_id: &str) -> &'static str {
     let mut hasher = DefaultHasher::new();
     bundle_id.hash(&mut hasher);
     let index = (hasher.finish() as usize) % COLOR_PALETTE.len();
     COLOR_PALETTE[index]
+}
+
+fn is_valid_hex_color(color: &str) -> bool {
+    let color = color.trim();
+    if color.len() != 7 || !color.starts_with('#') {
+        return false;
+    }
+    color[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 /// Derives a display name from a `.app` bundle's filename (e.g.
@@ -155,7 +166,9 @@ pub struct DockAppPayload {
     pub bundle_id: String,
     pub icon_url: Option<String>,
     pub is_active: bool,
-    pub color: String,
+    pub indicator_color: String,
+    pub indicator_color_auto: String,
+    pub indicator_color_override: Option<String>,
 }
 
 /// Lightweight running-state update — emitted on launch/terminate without
@@ -181,39 +194,59 @@ pub struct AppIconUpdatePayload {
 /// see the `tauri-glass-dock` skill for why: AppKit objects aren't `Send`,
 /// and Tauri commands run off the main thread where `NSWorkspace`
 /// notifications are delivered.
-///
-/// `entries` is the persisted, user-configurable roster (order = dock
-/// order) — the single source of truth `running`/`icons` are keyed against.
-/// `pill_width_dip`/`pill_height_dip` mirror the last width/height applied
-/// by `sync_vibrancy_pill_from_web` (measured DOM rect); hit-testing reads
-/// them directly instead of compile-time constants now that both vary at
-/// runtime — width with app count, height with the icon-size preset. They
-/// live here rather than in a separate managed state because they're
-/// derived straight from the pill footprint and only ever change alongside
-/// `entries` (width) or `DockSettings.icon_size_preset` (height).
-///
-/// `menu_overlay_height_dip` is 0.0 while no `DockIcon` context menu is
-/// open, or the open menu's measured DOM height (`getBoundingClientRect()`,
-/// set via `commands::window::set_menu_overlay`) while one is. The native
-/// click-through hit-test (`platform::macos::start_click_through_poller`)
-/// reads it so the "in the pill" region grows to cover the whole open menu
-/// — the menu can render far above the pill itself (see
-/// `CONTEXT_MENU_HEIGHT_PX` in `src/lib/constants.ts`), well past the fixed
-/// magnify-overflow band the hit-test otherwise uses, and without this the
-/// upper menu rows are physically unreachable: the OS starts passing clicks
-/// straight through the window before the cursor ever gets there.
 #[derive(Default)]
 pub struct AppsState {
     pub entries: Mutex<Vec<AppEntry>>,
     pub running: Mutex<HashMap<String, bool>>,
     pub icons: Mutex<HashMap<String, Option<String>>>,
+    pub auto_colors: Mutex<HashMap<String, String>>,
     pub pill_width_dip: Mutex<f64>,
     pub pill_height_dip: Mutex<f64>,
     pub menu_overlay_height_dip: Mutex<f64>,
 }
 
+pub(crate) fn resolve_indicator_color(
+    settings: &DockSettings,
+    entry: &AppEntry,
+    auto_colors: &HashMap<String, String>,
+) -> (String, String, Option<String>) {
+    let auto = auto_colors
+        .get(&entry.bundle_id)
+        .cloned()
+        .unwrap_or_else(|| fallback_hex_for_bundle_id(&entry.bundle_id).to_string());
+    let indicator = match settings.led_color_mode.as_str() {
+        "fixed" => settings.led_fixed_color.clone(),
+        "override_only" => entry
+            .color_override
+            .clone()
+            .unwrap_or_else(|| LED_NEUTRAL_FALLBACK.to_string()),
+        _ => entry
+            .color_override
+            .clone()
+            .unwrap_or_else(|| auto.clone()),
+    };
+    (indicator, auto, entry.color_override.clone())
+}
+
+pub(crate) fn apply_icon_resolve(state: &AppsState, bundle_id: &str, resolved: IconResolveResult) {
+    {
+        let mut icons = state
+            .icons
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        icons.insert(bundle_id.to_string(), resolved.icon_url);
+    }
+    if let Some(color) = resolved.accent_color {
+        let mut auto_colors = state
+            .auto_colors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        auto_colors.insert(bundle_id.to_string(), color);
+    }
+}
+
 impl AppsState {
-    pub fn snapshot(&self) -> Vec<DockAppPayload> {
+    pub fn snapshot(&self, settings: &DockSettings) -> Vec<DockAppPayload> {
         let entries = self
             .entries
             .lock()
@@ -226,16 +259,26 @@ impl AppsState {
             .icons
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let auto_colors = self
+            .auto_colors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         entries
             .iter()
-            .map(|app| DockAppPayload {
-                id: app.id.clone(),
-                name: app.name.clone(),
-                bundle_id: app.bundle_id.clone(),
-                icon_url: icons.get(&app.bundle_id).cloned().flatten(),
-                is_active: running.get(&app.bundle_id).copied().unwrap_or(false),
-                color: app.color.clone(),
+            .map(|app| {
+                let (indicator_color, indicator_color_auto, indicator_color_override) =
+                    resolve_indicator_color(settings, app, &auto_colors);
+                DockAppPayload {
+                    id: app.id.clone(),
+                    name: app.name.clone(),
+                    bundle_id: app.bundle_id.clone(),
+                    icon_url: icons.get(&app.bundle_id).cloned().flatten(),
+                    is_active: running.get(&app.bundle_id).copied().unwrap_or(false),
+                    indicator_color,
+                    indicator_color_auto,
+                    indicator_color_override,
+                }
             })
             .collect()
     }
@@ -316,11 +359,6 @@ fn save_entries(app: &AppHandle, entries: &[AppEntry]) -> Result<(), String> {
     crate::persistence::write_json_atomic(&path, &entries)
 }
 
-/// Builds the first-run dock from `SEED_POOL`: walks it in priority order,
-/// keeps only candidates that resolve as actually installed, and stops
-/// once `DEFAULT_SEED_LIMIT` matches are found. Does not exist to prune an
-/// already-persisted list — this only ever runs once, when no config file
-/// exists yet.
 fn seed_entries() -> Vec<AppEntry> {
     SEED_POOL
         .iter()
@@ -330,23 +368,23 @@ fn seed_entries() -> Vec<AppEntry> {
             id: candidate.bundle_id.to_string(),
             name: candidate.name.to_string(),
             bundle_id: candidate.bundle_id.to_string(),
-            color: candidate.color.to_string(),
+            color_override: None,
+            color: None,
         })
         .collect()
 }
 
-/// Loads the persisted roster, or — on first run, when no config file
-/// exists — computes and immediately persists the installed-candidate
-/// seed. Persisting the seed right away (rather than waiting for the first
-/// user edit) means a machine with zero matching candidates stays an empty
-/// dock on every subsequent launch, instead of re-running the installed
-/// check every time a config file happens to be missing.
 fn load_or_seed_entries(app: &AppHandle) -> Result<Vec<AppEntry>, String> {
     let path = config_file_path(app)?;
 
     if let Ok(contents) = std::fs::read_to_string(&path) {
         match serde_json::from_str::<Vec<AppEntry>>(&contents) {
-            Ok(entries) => return Ok(entries),
+            Ok(entries) => {
+                return Ok(entries
+                    .into_iter()
+                    .map(AppEntry::normalize_legacy_color)
+                    .collect());
+            }
             Err(err) => {
                 eprintln!(
                     "GameDockPanel: {} is corrupt ({err}), reseeding from candidates",
@@ -361,10 +399,6 @@ fn load_or_seed_entries(app: &AppHandle) -> Result<Vec<AppEntry>, String> {
     Ok(seeded)
 }
 
-/// Populates `AppsState.entries` before the window/monitoring are set up —
-/// called once from `lib.rs`'s `.setup()`, ahead of `setup_dock_window` so
-/// the initial window size is computed from the real entry count instead
-/// of a placeholder.
 pub fn init_entries(app: &AppHandle) -> Result<(), String> {
     let entries = load_or_seed_entries(app)?;
     let state = app.state::<AppsState>();
@@ -376,30 +410,30 @@ pub fn init_entries(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// One-time pull for the initial render — avoids the race where push events
-/// fire before the frontend has subscribed. Running updates arrive via
-/// `apps-running-changed`; icon updates via `apps-icons-updated`; list
-/// membership changes (add/remove) via `apps-list-changed` (see
-/// `platform::macos`).
-#[tauri::command]
-pub fn get_apps_snapshot(state: State<AppsState>) -> Vec<DockAppPayload> {
-    state.snapshot()
+fn settings_snapshot(app: &AppHandle) -> DockSettings {
+    app.state::<SettingsState>()
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
-/// Activates the app if a running instance exists (brings its windows to
-/// front, does not spawn a second instance); otherwise launches it.
+pub(crate) fn emit_apps_list_changed(app: &AppHandle, state: &AppsState) {
+    let settings = settings_snapshot(app);
+    let _ = app.emit("apps-list-changed", state.snapshot(&settings));
+}
+
+#[tauri::command]
+pub fn get_apps_snapshot(app: AppHandle, state: State<AppsState>) -> Vec<DockAppPayload> {
+    let settings = settings_snapshot(&app);
+    state.snapshot(&settings)
+}
+
 #[tauri::command]
 pub fn launch_or_activate_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
     platform::activate_or_launch_app(app, bundle_id)
 }
 
-/// Resolves the bundle ID from a user-picked `.app` path (native `Open`
-/// dialog, filtered to `/Applications`), adds it to the dock, resolves its
-/// icon and current running state immediately (the app is confirmed
-/// installed at this point — no late-resolve needed on this path), persists
-/// the updated roster, and resizes the window. Emits `apps-list-changed`
-/// rather than returning the new list directly, matching the event-driven
-/// pattern already used for running/icon updates.
 #[tauri::command]
 pub fn add_app_from_path(
     app: AppHandle,
@@ -426,7 +460,8 @@ pub fn add_app_from_path(
         id: bundle_id.clone(),
         name: display_name_from_path(&path),
         bundle_id: bundle_id.clone(),
-        color: color_for_bundle_id(&bundle_id).to_string(),
+        color_override: None,
+        color: None,
     };
 
     {
@@ -446,15 +481,9 @@ pub fn add_app_from_path(
         running.insert(bundle_id.clone(), platform::is_bundle_running(&bundle_id));
     }
     {
-        let mut icons = state
-            .icons
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (icon_size_dip, scale_factor) = icon_metrics_for_app(&app);
-        icons.insert(
-            bundle_id.clone(),
-            platform::resolve_app_icon(&bundle_id, icon_size_dip, scale_factor),
-        );
+        let resolved = platform::resolve_app_icon(&bundle_id, icon_size_dip, scale_factor);
+        apply_icon_resolve(&state, &bundle_id, resolved);
     }
 
     {
@@ -465,13 +494,10 @@ pub fn add_app_from_path(
         save_entries(&app, &entries)?;
     }
 
-    let _ = app.emit("apps-list-changed", state.snapshot());
+    emit_apps_list_changed(&app, &state);
     Ok(())
 }
 
-/// Removes an entry from the persisted list and `AppsState` only — never
-/// terminates the app's own running process, this only affects what the
-/// dock displays.
 #[tauri::command]
 pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) -> Result<(), String> {
     let removed = {
@@ -501,6 +527,13 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         icons.remove(&bundle_id);
     }
+    {
+        let mut auto_colors = state
+            .auto_colors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        auto_colors.remove(&bundle_id);
+    }
 
     {
         let entries = state
@@ -510,35 +543,79 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
         save_entries(&app, &entries)?;
     }
 
-    let _ = app.emit("apps-list-changed", state.snapshot());
+    emit_apps_list_changed(&app, &state);
     Ok(())
 }
 
-/// Re-rasterizes cached icons at the current display metrics — used when
-/// `iconSizePx` changes so Retina PNGs stay sharp.
 pub(crate) fn refresh_icon_cache(app: &AppHandle, state: &AppsState) {
     platform::refresh_dock_icons(app, state);
 }
 
-/// Reveals the installed `.app` for `bundle_id` in Finder. Purely a
-/// filesystem-lookup passthrough — doesn't touch `AppsState` at all.
+/// Re-samples accent colors from native icons without changing icon size.
+#[tauri::command]
+pub fn refresh_indicator_colors(app: AppHandle, state: State<AppsState>) -> Result<(), String> {
+    let entries = state
+        .entries
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let (icon_size_dip, scale_factor) = icon_metrics_for_app(&app);
+
+    for entry in entries.iter() {
+        let resolved = platform::resolve_app_icon(&entry.bundle_id, icon_size_dip, scale_factor);
+        apply_icon_resolve(&state, &entry.bundle_id, resolved);
+    }
+
+    emit_apps_list_changed(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_app_indicator_color(
+    app: AppHandle,
+    state: State<AppsState>,
+    bundle_id: String,
+    color: Option<String>,
+) -> Result<(), String> {
+    if let Some(ref hex) = color {
+        if !is_valid_hex_color(hex) {
+            return Err("color must be a #rrggbb hex value".to_string());
+        }
+    }
+
+    {
+        let mut entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = entries.iter_mut().find(|e| e.bundle_id == bundle_id) else {
+            return Err(format!("{bundle_id} is not in the dock"));
+        };
+        entry.color_override = color;
+    }
+
+    {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        save_entries(&app, &entries)?;
+    }
+
+    emit_apps_list_changed(&app, &state);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn reveal_app_in_finder(app: AppHandle, bundle_id: String) -> Result<(), String> {
     platform::reveal_app_in_finder(app, bundle_id)
 }
 
-/// Soft-quits the running instance of `bundle_id`, if any (see
-/// `platform::quit_app` for why this never touches `AppsState.running`
-/// itself — the real LED update comes from the `NSWorkspace` termination
-/// notification, same as `remove_app` never touching the process).
 #[tauri::command]
 pub fn quit_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
     platform::quit_app(app, bundle_id)
 }
 
-/// Reorders the persisted roster to match `ordered_bundle_ids` — same set of
-/// IDs, new sequence. Emits `apps-list-changed`; does not resize (count
-/// unchanged).
 #[tauri::command]
 pub fn reorder_apps(
     app: AppHandle,
@@ -579,6 +656,6 @@ pub fn reorder_apps(
     };
 
     save_entries(&app, &snapshot)?;
-    let _ = app.emit("apps-list-changed", state.snapshot());
+    emit_apps_list_changed(&app, &state);
     Ok(())
 }

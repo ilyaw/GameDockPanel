@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::commands::apps::{refresh_icon_cache, AppsState};
+use crate::commands::apps::{refresh_icon_cache, emit_apps_list_changed, AppsState};
 
 /// Live-tunable visual settings for the dock, persisted to
 /// `dock-settings.json` and broadcast to every webview on change (see
@@ -53,6 +53,11 @@ pub struct DockSettings {
     /// 0.0..=1.0 — flow speed, mapped to an animation duration on the
     /// frontend.
     pub background_speed: f64,
+    #[serde(default = "default_led_color_mode")]
+    pub led_color_mode: String,
+    /// Hex LED color when `led_color_mode` is `fixed`.
+    #[serde(default = "default_led_fixed_color")]
+    pub led_fixed_color: String,
     /// Id into the frontend's `ICON_SIZE_PRESETS` table (constants.ts) —
     /// the single input every dock layout number derives from
     /// (`getSizeMetrics` on the frontend, `size_metrics` in
@@ -77,6 +82,14 @@ pub struct DockSettings {
     /// that id when `iconSizePx` is absent in the JSON.
     #[serde(default = "default_icon_size_px")]
     pub icon_size_px: f64,
+}
+
+fn default_led_color_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_led_fixed_color() -> String {
+    "#ff9d3b".to_string()
 }
 
 fn default_icon_size_preset() -> String {
@@ -123,6 +136,8 @@ impl Default for DockSettings {
             background_intensity: 0.7,
             background_visibility: 0.45,
             background_speed: 0.4,
+            led_color_mode: default_led_color_mode(),
+            led_fixed_color: default_led_fixed_color(),
             icon_size_preset: "medium".to_string(),
             icon_size_px: 56.0,
         }
@@ -215,6 +230,18 @@ pub fn update_dock_settings(
     settings.background_visibility = settings.background_visibility.clamp(0.0, 1.0);
     settings.background_speed = settings.background_speed.clamp(0.0, 1.0);
     settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
+    if !matches!(
+        settings.led_color_mode.as_str(),
+        "auto" | "fixed" | "override_only"
+    ) {
+        settings.led_color_mode = default_led_color_mode();
+    }
+    if !settings.led_fixed_color.starts_with('#')
+        || settings.led_fixed_color.len() != 7
+        || !settings.led_fixed_color[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        settings.led_fixed_color = default_led_fixed_color();
+    }
 
     let previous_icon_size_px = {
         let guard = state
@@ -245,6 +272,9 @@ pub fn update_dock_settings(
     if icon_size_changed {
         let apps_state = app.state::<AppsState>();
         refresh_icon_cache(&app, &apps_state);
+    } else {
+        let apps_state = app.state::<AppsState>();
+        emit_apps_list_changed(&app, &apps_state);
     }
 
     let _ = app.emit("dock-settings-changed", settings);

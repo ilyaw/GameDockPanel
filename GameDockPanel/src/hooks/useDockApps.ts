@@ -290,6 +290,30 @@ export function useDockApps() {
     });
   }, []);
 
+  const setIndicatorColor = useCallback(
+    async (bundleId: string, color: string | null) => {
+      setApps((prev) =>
+        prev.map((app) => {
+          if (app.bundleId !== bundleId) return app;
+          return {
+            ...app,
+            indicatorColorOverride: color,
+            indicatorColor: color ?? app.indicatorColorAuto,
+          };
+        }),
+      );
+
+      try {
+        await invoke("set_app_indicator_color", { bundleId, color });
+      } catch (error) {
+        console.error(`Failed to set indicator color for ${bundleId}:`, error);
+        const snapshot = await invoke<DockApp[]>("get_apps_snapshot");
+        setApps(snapshot);
+      }
+    },
+    [],
+  );
+
   return {
     apps,
     appsRef,
@@ -303,5 +327,6 @@ export function useDockApps() {
     rejectPulseKey,
     showInFinder,
     quitApp,
+    setIndicatorColor,
   };
 }

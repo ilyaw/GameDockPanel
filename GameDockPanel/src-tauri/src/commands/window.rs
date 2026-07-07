@@ -44,12 +44,24 @@ pub fn sync_vibrancy_pill(
 /// `platform::`) is enough since this only ever writes shared state, no
 /// AppKit calls are involved.
 #[tauri::command]
-pub fn set_menu_overlay(state: State<AppsState>, active: bool, height: f64) -> Result<(), String> {
+pub fn set_menu_overlay(
+    app: AppHandle,
+    state: State<AppsState>,
+    active: bool,
+    height: f64,
+) -> Result<(), String> {
     let mut overlay_height = state
         .menu_overlay_height_dip
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *overlay_height = if active { height.max(0.0) } else { 0.0 };
+
+    if active && height > 0.0 {
+        if let Some(window) = app.get_webview_window("main") {
+            platform::ensure_window_fits_menu_overlay(&window, height)?;
+        }
+    }
+
     Ok(())
 }
 

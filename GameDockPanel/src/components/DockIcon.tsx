@@ -60,6 +60,8 @@ interface DockIconProps {
   /** Right-click → "Quit" — only rendered when `app.isActive`; see the menu
    * JSX below for why this is distinct from `onRemove`. */
   onQuit?: (bundleId: string) => void;
+  /** Right-click → manual LED color override (`null` resets to auto). */
+  onSetIndicatorColor?: (bundleId: string, color: string | null) => void;
   /** While an icon is being drag-reordered, magnify is suppressed. */
   isDragging?: boolean;
   /** Brief post-drop window while layout position animation settles. */
@@ -81,6 +83,7 @@ export function DockIcon({
   onRemove,
   onShowInFinder,
   onQuit,
+  onSetIndicatorColor,
   isDragging = false,
   isReorderSettling = false,
   animationsEnabled = true,
@@ -89,6 +92,7 @@ export function DockIcon({
   const [menuOpen, setMenuOpen] = useState(false);
   const buttonRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const colorPickActiveRef = useRef(false);
   const centerX = useMotionValue(0);
 
   useEffect(() => {
@@ -112,6 +116,7 @@ export function DockIcon({
     if (!menuOpen) return;
 
     const handlePointerDown = (event: MouseEvent) => {
+      if (colorPickActiveRef.current) return;
       if (menuRef.current?.contains(event.target as Node)) return;
       setMenuOpen(false);
     };
@@ -141,6 +146,7 @@ export function DockIcon({
     let cancelled = false;
 
     void listen<WindowLogicalPoint>("dock-global-mousedown", (event) => {
+      if (colorPickActiveRef.current) return;
       const rect = menuRef.current?.getBoundingClientRect();
       if (!rect) return;
       const { x, y } = event.payload;
@@ -177,12 +183,26 @@ export function DockIcon({
     };
 
     if (!menuOpen) {
+      colorPickActiveRef.current = false;
       reportMenuOverlay(false, 0);
       return;
     }
-    reportMenuOverlay(true, menuRef.current?.getBoundingClientRect().height ?? 0);
-    return () => reportMenuOverlay(false, 0);
-  }, [menuOpen]);
+
+    const measure = () => {
+      reportMenuOverlay(true, menuRef.current?.getBoundingClientRect().height ?? 0);
+    };
+
+    measure();
+    const menuEl = menuRef.current;
+    if (!menuEl) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(menuEl);
+    return () => {
+      observer.disconnect();
+      colorPickActiveRef.current = false;
+      reportMenuOverlay(false, 0);
+    };
+  }, [menuOpen, app.isActive, app.indicatorColorOverride]);
 
   // Rest-layout center X for the magnify distance curve — re-measured on layout
   // shifts (DPI, icon count), not on every mousemove frame.
@@ -307,6 +327,39 @@ export function DockIcon({
               Remove from Dock
             </button>
 
+            <div className="h-px bg-zinc-700/70" />
+
+            <div className="flex items-center justify-between gap-3 px-3 py-1.5">
+              <span className="text-zinc-300">Цвет индикатора</span>
+              <input
+                type="color"
+                value={app.indicatorColorOverride ?? app.indicatorColorAuto}
+                onPointerDown={() => {
+                  colorPickActiveRef.current = true;
+                }}
+                onBlur={() => {
+                  colorPickActiveRef.current = false;
+                }}
+                onChange={(event) => {
+                  colorPickActiveRef.current = false;
+                  onSetIndicatorColor?.(app.bundleId, event.target.value);
+                }}
+                className="h-7 w-7 cursor-pointer rounded border border-zinc-600 bg-transparent p-0"
+                aria-label={`Цвет индикатора для ${app.name}`}
+              />
+            </div>
+            {app.indicatorColorOverride && (
+              <button
+                type="button"
+                onClick={() => {
+                  onSetIndicatorColor?.(app.bundleId, null);
+                }}
+                className="flex w-full items-center px-3 py-1.5 text-left text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              >
+                Сбросить к авто
+              </button>
+            )}
+
             {/* Quit terminates the running process (soft `terminate()`) and
                 leaves the dock list untouched — the opposite of Remove,
                 which edits the dock list and never touches the process. Kept
@@ -340,8 +393,9 @@ export function DockIcon({
               height: iconHeight,
               borderRadius: iconCornerRadius,
               scale: magnifySuppressed ? 1 : scale,
+              color: app.indicatorColor,
             }}
-            className={`flex origin-bottom items-center justify-center bg-zinc-800 text-lg font-semibold ${app.color}`}
+            className="flex origin-bottom items-center justify-center bg-zinc-800 text-lg font-semibold"
           >
             {app.name.slice(0, 2).toUpperCase()}
           </motion.div>
@@ -364,9 +418,10 @@ export function DockIcon({
       </div>
 
       <span
+        style={{ color: app.indicatorColor }}
         className={`h-[3px] w-6 rounded-full bg-current transition-all duration-300 ease-out ${
           app.isActive
-            ? `${app.color} opacity-100 ${
+            ? `opacity-100 ${
                 animationsEnabled
                   ? "animate-led-pulse"
                   : "shadow-[0_0_10px_2px_currentColor]"

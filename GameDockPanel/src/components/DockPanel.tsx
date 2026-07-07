@@ -183,6 +183,7 @@ export function DockPanel() {
     rejectPulseKey,
     showInFinder,
     quitApp,
+    setIndicatorColor,
   } = useDockApps();
   const { settings, hydrated } = useDockSettings();
   const iconSizeTarget = useMotionValue(settings.iconSizePx);
@@ -869,6 +870,7 @@ export function DockPanel() {
               onRemove={removeApp}
               onShowInFinder={showInFinder}
               onQuit={quitApp}
+              onSetIndicatorColor={setIndicatorColor}
             />
           </Reorder.Item>
         ))}

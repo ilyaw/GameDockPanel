@@ -4,6 +4,7 @@ use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, We
 
 use crate::commands::apps::AppsState;
 use crate::commands::settings::SettingsState;
+use crate::platform::IconResolveResult;
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
 /// is over the dock pill so React can hit-test icons without CSS :hover.
@@ -77,9 +78,9 @@ const PILL_CORNER_RADIUS_DIP: f64 = 28.0;
 const TOOLTIP_GAP_DIP: f64 = 16.0;
 /// Mirrors `TOOLTIP_HEIGHT_PX` in src/lib/constants.ts.
 const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
-/// Mirrors `CONTEXT_MENU_HEIGHT_PX` in src/lib/constants.ts (3 rows +
-/// divider — Show in Finder + Remove from Dock + divider + Quit).
-const CONTEXT_MENU_HEIGHT_DIP: f64 = 91.0;
+/// Mirrors `CONTEXT_MENU_HEIGHT_PX` in src/lib/constants.ts (max rows for
+/// Finder/Remove/color/reset/quit + dividers).
+const CONTEXT_MENU_HEIGHT_DIP: f64 = 152.0;
 const CLICK_POLL_MS: u64 = 50;
 /// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts — the gap between the
 /// open context menu's own bottom edge and the icon it hangs off of. Used
@@ -426,6 +427,55 @@ pub fn resize_dock_window_for_pill(
     }
 
     Ok(changed)
+}
+
+/// Grows the dock window when an open context menu is taller than the
+/// current top reserve — prevents the menu from being clipped by the
+/// webview's `overflow: hidden` boundary.
+#[cfg(target_os = "macos")]
+pub fn ensure_window_fits_menu_overlay(
+    window: &WebviewWindow,
+    menu_height_dip: f64,
+) -> Result<(), String> {
+    if menu_height_dip <= 0.0 {
+        return Ok(());
+    }
+
+    let icon_size_dip = current_icon_size_dip(window);
+    let pill_height_dip = {
+        let state = window.state::<AppsState>();
+        let stored = state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *stored > 0.0 {
+            *stored
+        } else {
+            size_metrics(icon_size_dip).pill_height_dip
+        }
+    };
+
+    let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
+    let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
+    let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
+    let menu_stack_dip = MENU_OVERLAY_GAP_DIP + menu_height_dip;
+    let top_reserve_dip = magnify_height_overflow_dip
+        .max(TOOLTIP_GAP_DIP + TOOLTIP_HEIGHT_DIP)
+        .max(menu_stack_dip)
+        - dock_padding_y_dip;
+    let target_height_dip = DOCK_BOTTOM_INSET_DIP + pill_height_dip + top_reserve_dip;
+
+    let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
+    let current_height_dip =
+        window.inner_size().map_err(|e| e.to_string())?.height as f64 / scale_factor;
+    if target_height_dip <= current_height_dip + 0.5 {
+        return Ok(());
+    }
+
+    let current_width_dip =
+        window.inner_size().map_err(|e| e.to_string())?.width as f64 / scale_factor;
+    set_window_frame_instant(window, current_width_dip, target_height_dip)?;
+    Ok(())
 }
 
 /// Formula-based resize when the DOM has not measured yet — kept as a
@@ -933,17 +983,11 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut icons = state
-            .icons
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let icon_size_dip = current_icon_size_dip_from_app(&app_handle);
         let scale_factor = dock_window_scale_factor(&app_handle);
         for entry in entries.iter() {
-            icons.insert(
-                entry.bundle_id.clone(),
-                resolve_icon_data_url(&entry.bundle_id, icon_size_dip, scale_factor),
-            );
+            let resolved = resolve_app_icon(&entry.bundle_id, icon_size_dip, scale_factor);
+            crate::commands::apps::apply_icon_resolve(&state, &entry.bundle_id, resolved);
         }
     }
 
@@ -981,6 +1025,7 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
 
     emit_apps_icons_updated(&app_handle, app.state::<AppsState>().icons_snapshot());
     emit_apps_running_changed(&app_handle);
+    crate::commands::apps::emit_apps_list_changed(&app_handle, &app.state::<AppsState>());
 
     Ok(())
 }
@@ -1049,14 +1094,9 @@ fn handle_workspace_notification(
         if needs_resolve {
             let icon_size_dip = current_icon_size_dip_from_app(app);
             let scale_factor = dock_window_scale_factor(app);
-            if let Some(icon_url) =
-                resolve_icon_data_url(&bundle_id, icon_size_dip, scale_factor)
-            {
-                let mut icons = state
-                    .icons
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                icons.insert(bundle_id.clone(), Some(icon_url));
+            let resolved = resolve_app_icon(&bundle_id, icon_size_dip, scale_factor);
+            if resolved.icon_url.is_some() {
+                crate::commands::apps::apply_icon_resolve(&state, &bundle_id, resolved);
                 icon_resolved = true;
             }
         }
@@ -1092,43 +1132,39 @@ pub fn refresh_dock_icons(app: &AppHandle, state: &AppsState) {
         .entries
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut icons = state
-        .icons
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     for entry in entries.iter() {
-        icons.insert(
-            entry.bundle_id.clone(),
-            resolve_icon_data_url(&entry.bundle_id, icon_size_dip, scale_factor),
-        );
+        let resolved = resolve_app_icon(&entry.bundle_id, icon_size_dip, scale_factor);
+        crate::commands::apps::apply_icon_resolve(state, &entry.bundle_id, resolved);
     }
 
     emit_apps_icons_updated(app, state.icons_snapshot());
+    crate::commands::apps::emit_apps_list_changed(app, state);
 }
 
 /// Resolves a bundle ID to its installed `.app`'s icon and renders it as a
-/// `data:image/png;base64,...` URL. Returns `None` if the app isn't
-/// installed or the icon can't be encoded — the frontend falls back to an
-/// initials badge either way, same as a failed remote image load. Exposed
-/// to `commands::apps` (as `resolve_app_icon`) via `platform::mod` for the
-/// add-app-from-dialog flow.
+/// `data:image/png;base64,...` URL, sampling an accent color from the same
+/// bitmap. Returns empty fields if the app isn't installed or encoding fails.
 #[cfg(target_os = "macos")]
-pub fn resolve_icon_data_url(
+pub fn resolve_app_icon(
     bundle_id: &str,
     icon_size_dip: f64,
     scale_factor: f64,
-) -> Option<String> {
+) -> IconResolveResult {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::NSString;
 
     let workspace = NSWorkspace::sharedWorkspace();
     let ns_bundle_id = NSString::from_str(bundle_id);
-    let app_url = workspace.URLForApplicationWithBundleIdentifier(&ns_bundle_id)?;
-    let path = app_url.path()?;
+    let Some(app_url) = workspace.URLForApplicationWithBundleIdentifier(&ns_bundle_id) else {
+        return IconResolveResult::default();
+    };
+    let Some(path) = app_url.path() else {
+        return IconResolveResult::default();
+    };
     let icon = workspace.iconForFile(&path);
     let export_px = icon_export_px(icon_size_dip, scale_factor);
-    icon_to_png_data_url(&icon, export_px)
+    icon_to_png_and_accent(&icon, export_px)
 }
 
 #[cfg(target_os = "macos")]
@@ -1157,7 +1193,7 @@ fn dock_window_scale_factor(app: &AppHandle) -> f64 {
 /// expose a modern direct-to-PNG method, so the standard AppKit route is
 /// `NSImage` → `CGImage` → `NSBitmapImageRep` → PNG `NSData`.
 #[cfg(target_os = "macos")]
-fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage, export_px: f64) -> Option<String> {
+fn icon_to_png_and_accent(icon: &objc2_app_kit::NSImage, export_px: f64) -> IconResolveResult {
     use base64::Engine as _;
     use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
@@ -1167,6 +1203,7 @@ fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage, export_px: f64) -> Option
     let min_pixels = (export_px * 0.75).floor() as i64;
     let mut best_png: Option<Vec<u8>> = None;
     let mut best_pixels: i64 = 0;
+    let mut best_accent: Option<String> = None;
 
     for rep in icon.representations().iter() {
         let Some(bitmap) = rep.downcast_ref::<NSBitmapImageRep>() else {
@@ -1176,20 +1213,25 @@ fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage, export_px: f64) -> Option
         if px <= best_pixels {
             continue;
         }
+        let accent = extract_accent_color_from_bitmap(bitmap);
         if let Some(png_data) = unsafe {
             bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
         } {
             best_pixels = px;
             best_png = Some(png_data.to_vec());
+            best_accent = accent;
         }
     }
 
     if let Some(png_bytes) = best_png {
         if best_pixels >= min_pixels {
-            return Some(format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(png_bytes)
-            ));
+            return IconResolveResult {
+                icon_url: Some(format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(png_bytes)
+                )),
+                accent_color: best_accent,
+            };
         }
     }
 
@@ -1197,18 +1239,201 @@ fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage, export_px: f64) -> Option
     let export_size = NSSize::new(export_px, export_px);
     icon.setSize(export_size);
     let mut proposed_rect = NSRect::new(NSPoint::new(0.0, 0.0), export_size);
-    let cg_image =
-        unsafe { icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None) }?;
+    let cg_image = unsafe {
+        icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None)
+    };
+    let Some(cg_image) = cg_image else {
+        return IconResolveResult::default();
+    };
 
     let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
+    let accent = extract_accent_color_from_bitmap(&bitmap);
     let png_data = unsafe {
         bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
-    }?;
+    };
+    let Some(png_data) = png_data else {
+        return IconResolveResult::default();
+    };
 
-    Some(format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(png_data.to_vec())
-    ))
+    IconResolveResult {
+        icon_url: Some(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png_data.to_vec())
+        )),
+        accent_color: accent,
+    }
+}
+
+/// Picks a saturated accent color from icon pixels for the running-app LED.
+#[cfg(target_os = "macos")]
+fn extract_accent_color_from_bitmap(bitmap: &objc2_app_kit::NSBitmapImageRep) -> Option<String> {
+    let width = bitmap.pixelsWide();
+    let height = bitmap.pixelsHigh();
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    let bytes_per_row = bitmap.bytesPerRow();
+    let samples_per_pixel = bitmap.samplesPerPixel();
+    if bytes_per_row <= 0 || samples_per_pixel < 3 {
+        return None;
+    }
+
+    let data = bitmap.bitmapData();
+    if data.is_null() {
+        return None;
+    }
+
+    const HUE_BUCKETS: usize = 16;
+    let mut bucket_weight = [0.0f64; HUE_BUCKETS];
+    let mut bucket_hue = [0.0f64; HUE_BUCKETS];
+    let mut bucket_sat = [0.0f64; HUE_BUCKETS];
+    let mut bucket_light = [0.0f64; HUE_BUCKETS];
+    let mut bucket_count = [0u32; HUE_BUCKETS];
+
+    let step_x = (width / 32).max(1);
+    let step_y = (height / 32).max(1);
+
+    for y in (0..height).step_by(step_y as usize) {
+        for x in (0..width).step_by(step_x as usize) {
+            let Some((r, g, b, a)) = read_bitmap_rgba(
+                data,
+                bytes_per_row,
+                samples_per_pixel,
+                x,
+                y,
+            ) else {
+                continue;
+            };
+            if a < 128 {
+                continue;
+            }
+
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            if l < 0.15 || l > 0.92 || s < 0.25 {
+                continue;
+            }
+
+            let bucket = ((h * HUE_BUCKETS as f64).floor() as usize).min(HUE_BUCKETS - 1);
+            let weight = s * s;
+            bucket_weight[bucket] += weight;
+            bucket_hue[bucket] += h * weight;
+            bucket_sat[bucket] += s * weight;
+            bucket_light[bucket] += l * weight;
+            bucket_count[bucket] += 1;
+        }
+    }
+
+    let (best_bucket, _) = bucket_weight
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+
+    if bucket_weight[best_bucket] <= 0.0 || bucket_count[best_bucket] == 0 {
+        return None;
+    }
+
+    let total = bucket_weight[best_bucket];
+    let h = bucket_hue[best_bucket] / total;
+    let s = (bucket_sat[best_bucket] / total * 1.1).clamp(0.35, 1.0);
+    let l = (bucket_light[best_bucket] / total).clamp(0.5, 0.72);
+    let (r, g, b) = hsl_to_rgb(h, s, l);
+    Some(format!("#{:02x}{:02x}{:02x}", r, g, b))
+}
+
+#[cfg(target_os = "macos")]
+fn read_bitmap_rgba(
+    data: *mut u8,
+    bytes_per_row: objc2_foundation::NSInteger,
+    samples_per_pixel: objc2_foundation::NSInteger,
+    x: objc2_foundation::NSInteger,
+    y: objc2_foundation::NSInteger,
+) -> Option<(u8, u8, u8, u8)> {
+    let spp = samples_per_pixel as isize;
+    let offset = (y as isize) * bytes_per_row as isize + (x as isize) * spp;
+    if offset < 0 {
+        return None;
+    }
+    unsafe {
+        let base = data.offset(offset);
+        let r = *base;
+        let g = *base.add(1);
+        let b = *base.add(2);
+        let a = if spp > 3 { *base.add(3) } else { 255 };
+        Some((r, g, b, a))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let r = r as f64 / 255.0;
+    let g = g as f64 / 255.0;
+    let b = b as f64 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    if (max - min).abs() < f64::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = if (max - r).abs() < f64::EPSILON {
+        let mut hue = (g - b) / d;
+        if g < b {
+            hue += 6.0;
+        }
+        hue / 6.0
+    } else if (max - g).abs() < f64::EPSILON {
+        ((b - r) / d + 2.0) / 6.0
+    } else {
+        ((r - g) / d + 4.0) / 6.0
+    };
+    (h, s, l)
+}
+
+#[cfg(target_os = "macos")]
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    if s <= f64::EPSILON {
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let r = hue_to_rgb_channel(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb_channel(p, q, h);
+    let b = hue_to_rgb_channel(p, q, h - 1.0 / 3.0);
+    (
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn hue_to_rgb_channel(p: f64, q: f64, mut t: f64) -> f64 {
+    if t < 0.0 {
+        t += 1.0;
+    }
+    if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        p + (q - p) * 6.0 * t
+    } else if t < 1.0 / 2.0 {
+        q
+    } else if t < 2.0 / 3.0 {
+        p + (q - p) * (2.0 / 3.0 - t) * 6.0
+    } else {
+        p
+    }
 }
 
 /// Whether a bundle ID resolves to an installed `.app` at all — used to

@@ -1,16 +1,24 @@
 //! Platform-specific window setup, kept out of `lib.rs` (see dockpanel rule:
 //! "Platform-specific код — только в `platform/`").
 
+/// Result of resolving a native app icon — PNG data URL plus an optional
+/// accent color sampled from the same bitmap.
+#[derive(Clone, Debug, Default)]
+pub struct IconResolveResult {
+    pub icon_url: Option<String>,
+    pub accent_color: Option<String>,
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
     activate_or_launch_app, is_app_installed, is_bundle_running, quit_app,
-    refresh_dock_icons, resolve_bundle_id_from_path,
-    resolve_icon_data_url as resolve_app_icon, reveal_app_in_finder,
-    resize_dock_window_for_pill, setup_dock_window, start_apps_monitoring,
-    sync_vibrancy_pill_from_web,
+    refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon,
+    reveal_app_in_finder, resize_dock_window_for_pill, setup_dock_window,
+    start_apps_monitoring, sync_vibrancy_pill_from_web,
+    ensure_window_fits_menu_overlay,
 };
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
@@ -56,8 +64,8 @@ pub fn resolve_app_icon(
     _bundle_id: &str,
     _icon_size_dip: f64,
     _scale_factor: f64,
-) -> Option<String> {
-    None
+) -> IconResolveResult {
+    IconResolveResult::default()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -79,6 +87,14 @@ pub fn resize_dock_window_for_app_count(
     _app_count: usize,
 ) -> Result<bool, String> {
     Ok(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_window_fits_menu_overlay(
+    _window: &tauri::WebviewWindow,
+    _menu_height_dip: f64,
+) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]

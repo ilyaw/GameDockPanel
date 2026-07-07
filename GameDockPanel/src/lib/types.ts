@@ -16,12 +16,12 @@ export interface DockApp {
   iconUrl: string | null;
   /** Whether the app is currently running, per `NSWorkspace` — not mocked. */
   isActive: boolean;
-  /**
-   * Tailwind `text-*` class. Sets `currentColor`, reused by the LED both for
-   * its fill (`bg-current`) and its glow (`box-shadow: currentColor` in the
-   * `led-pulse` keyframes) — one field to keep both in sync.
-   */
-  color: string;
+  /** Resolved LED hex — accounts for global mode, auto sample, and override. */
+  indicatorColor: string;
+  /** Auto-sampled accent from the native icon (or hash fallback). */
+  indicatorColorAuto: string;
+  /** Manual `#rrggbb` override, or `null` to use auto/global mode. */
+  indicatorColorOverride: string | null;
 }
 
 /** Running-state push from Rust — no icon payloads. */
@@ -90,4 +90,9 @@ export interface DockSettings {
   /** Icon edge length in logical px (44–72) — single input every dock layout
    * number derives from via `getSizeMetrics`. */
   iconSizePx: number;
+  /** How running-app LED colors are chosen: auto from icon, one fixed color,
+   * or manual overrides only. */
+  ledColorMode: "auto" | "fixed" | "override_only";
+  /** Hex LED color when `ledColorMode` is `fixed`. */
+  ledFixedColor: string;
 }
