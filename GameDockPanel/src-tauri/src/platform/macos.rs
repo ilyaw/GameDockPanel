@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use crate::commands::apps::AppsState;
+use crate::commands::apps::{AppsState, DockItem};
 use crate::commands::settings::SettingsState;
 use crate::platform::IconResolveResult;
 
@@ -67,6 +67,10 @@ const LED_HEIGHT_DIP: f64 = 3.0;
 // Mirrors the vertical divider between the app icons and the settings gear
 // in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line.
 const DOCK_DIVIDER_WIDTH_DIP: f64 = 9.0;
+/// Horizontal slot for an in-row dock separator — mirrors
+/// `DOCK_SEPARATOR_WIDTH_PX` in src/lib/constants.ts (distinct from the
+/// apps↔settings divider above).
+const DOCK_SEPARATOR_WIDTH_DIP: f64 = 7.0;
 const MAGNIFY_MAX_SCALE: f64 = 1.4;
 const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
@@ -80,7 +84,7 @@ const TOOLTIP_GAP_DIP: f64 = 16.0;
 const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
 /// Mirrors `CONTEXT_MENU_HEIGHT_PX` in src/lib/constants.ts (max rows for
 /// Finder/Remove/color/reset/quit + dividers).
-const CONTEXT_MENU_HEIGHT_DIP: f64 = 152.0;
+const CONTEXT_MENU_HEIGHT_DIP: f64 = 214.0;
 const CLICK_POLL_MS: u64 = 50;
 /// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts — the gap between the
 /// open context menu's own bottom edge and the icon it hangs off of. Used
@@ -157,14 +161,22 @@ fn pill_height_hover_dip(pill_height_rest_dip: f64, icon_size_dip: f64) -> f64 {
     pill_height_rest_dip + magnify_height_overflow_dip
 }
 
-fn pill_width_dip(app_count: usize, icon_size_dip: f64) -> f64 {
+fn pill_width_dip(entries: &[DockItem], icon_size_dip: f64) -> f64 {
     let metrics = size_metrics(icon_size_dip);
-    let apps_width = app_count as f64 * icon_size_dip
-        + app_count.saturating_sub(1) as f64 * metrics.dock_gap_dip;
+    let mut row_width = 0.0;
+    for (index, item) in entries.iter().enumerate() {
+        if index > 0 {
+            row_width += metrics.dock_gap_dip;
+        }
+        row_width += match item {
+            DockItem::App(_) => icon_size_dip,
+            DockItem::Separator(_) => DOCK_SEPARATOR_WIDTH_DIP,
+        };
+    }
     // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
     let settings_slot =
         metrics.dock_gap_dip + DOCK_DIVIDER_WIDTH_DIP + metrics.dock_gap_dip + icon_size_dip;
-    metrics.dock_padding_x_dip * 2.0 + apps_width + settings_slot
+    metrics.dock_padding_x_dip * 2.0 + row_width + settings_slot
 }
 
 fn window_width_dip(pill_width_dip: f64, icon_size_dip: f64) -> f64 {
@@ -184,8 +196,8 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
     let icon_size_dip = current_icon_size_dip(&window);
-    let app_count = app.state::<AppsState>().app_count();
-    let pill_width = pill_width_dip(app_count, icon_size_dip);
+    let entries = app.state::<AppsState>().entries_snapshot();
+    let pill_width = pill_width_dip(&entries, icon_size_dip);
     let window_width = window_width_dip(pill_width, icon_size_dip);
     let metrics = size_metrics(icon_size_dip);
 
@@ -484,10 +496,10 @@ pub fn ensure_window_fits_menu_overlay(
 #[allow(dead_code)]
 pub fn resize_dock_window_for_app_count(
     window: &WebviewWindow,
-    app_count: usize,
+    entries: &[DockItem],
 ) -> Result<bool, String> {
     let icon_size_dip = current_icon_size_dip(window);
-    let pill_width = pill_width_dip(app_count, icon_size_dip);
+    let pill_width = pill_width_dip(entries, icon_size_dip);
     let pill_height = size_metrics(icon_size_dip).pill_height_dip;
     resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)
 }
@@ -967,7 +979,10 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for entry in entries.iter() {
+        for item in entries.iter() {
+            let DockItem::App(entry) = item else {
+                continue;
+            };
             let is_running = running_apps.iter().any(|running_app| {
                 running_app
                     .bundleIdentifier()
@@ -985,7 +1000,10 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let icon_size_dip = current_icon_size_dip_from_app(&app_handle);
         let scale_factor = dock_window_scale_factor(&app_handle);
-        for entry in entries.iter() {
+        for item in entries.iter() {
+            let DockItem::App(entry) = item else {
+                continue;
+            };
             let resolved = resolve_app_icon(&entry.bundle_id, icon_size_dip, scale_factor);
             crate::commands::apps::apply_icon_resolve(&state, &entry.bundle_id, resolved);
         }
@@ -1062,7 +1080,12 @@ fn handle_workspace_notification(
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.iter().any(|entry| entry.bundle_id == bundle_id)
+        entries.iter().any(|item| {
+            matches!(
+                item,
+                DockItem::App(entry) if entry.bundle_id == bundle_id
+            )
+        })
     };
     if !is_tracked {
         // Not one of our tracked apps — ignore.
@@ -1133,7 +1156,10 @@ pub fn refresh_dock_icons(app: &AppHandle, state: &AppsState) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    for entry in entries.iter() {
+    for item in entries.iter() {
+        let DockItem::App(entry) = item else {
+            continue;
+        };
         let resolved = resolve_app_icon(&entry.bundle_id, icon_size_dip, scale_factor);
         crate::commands::apps::apply_icon_resolve(state, &entry.bundle_id, resolved);
     }

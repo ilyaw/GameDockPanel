@@ -1,4 +1,4 @@
-import type { DockSettings } from "./types";
+import type { DockItem, DockSettings } from "./types";
 
 /**
  * Dock layout numbers — single source of truth for JS magnify math and for
@@ -106,6 +106,13 @@ export const LED_HEIGHT_PX = 3;
 /** Mirrors the vertical divider between the app icons and the settings
  * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
 export const DOCK_DIVIDER_WIDTH_PX = 9;
+/** Horizontal slot for an in-row dock separator — distinct from icon width
+ * and from the apps↔settings divider above. Mirrors
+ * `DOCK_SEPARATOR_WIDTH_DIP` in src-tauri/src/platform/macos.rs. */
+export const DOCK_SEPARATOR_WIDTH_PX = 7;
+/** Vertical row divider height as a fraction of `iconSizePx` — shared by the
+ * settings gear divider and in-row dock separators (`DockRowDivider`). */
+export const DOCK_ROW_DIVIDER_HEIGHT_RATIO = 0.6;
 /** Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx). */
 export const PILL_CORNER_RADIUS_PX = 28;
 /** Horizontal glow bleed (~14px box-shadow each side). */
@@ -131,8 +138,8 @@ export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
  * `bottom-full` off the same anchor, and the window has no scroll, so
  * anything past its height is simply not drawn.
  */
-export const CONTEXT_MENU_MAX_ROWS = 5;
-export const CONTEXT_MENU_MAX_DIVIDERS = 2;
+export const CONTEXT_MENU_MAX_ROWS = 7;
+export const CONTEXT_MENU_MAX_DIVIDERS = 4;
 export const CONTEXT_MENU_HEIGHT_PX =
   CONTEXT_MENU_ROW_HEIGHT_PX * CONTEXT_MENU_MAX_ROWS +
   CONTEXT_MENU_DIVIDER_HEIGHT_PX * CONTEXT_MENU_MAX_DIVIDERS;
@@ -143,6 +150,10 @@ export const CONTEXT_MENU_HEIGHT_PX =
  * from Finder is rejected on the Rust side.
  */
 export const MAX_APPS = 15;
+
+/** Soft ceiling on separator count — mirrors `MAX_SEPARATORS` in
+ * src-tauri/src/commands/apps.rs. */
+export const MAX_SEPARATORS = 5;
 
 /**
  * Every dock layout number that DOES depend on icon size, computed from one
@@ -233,19 +244,26 @@ export function getSizeMetrics(iconSizePx: number): SizeMetrics {
  * `commands/window.rs`) — this formula only has to get the *native window
  * frame* wide enough to avoid clipping it.
  */
-export function pillWidthPx(appCount: number, iconSizePx: number): number {
+export function pillWidthPx(items: DockItem[], iconSizePx: number): number {
   const metrics = getSizeMetrics(iconSizePx);
-  const appsWidth = appCount * iconSizePx + (appCount - 1) * metrics.dockGapPx;
+  let rowWidth = 0;
+  items.forEach((item, index) => {
+    if (index > 0) {
+      rowWidth += metrics.dockGapPx;
+    }
+    rowWidth +=
+      item.type === "app" ? iconSizePx : DOCK_SEPARATOR_WIDTH_PX;
+  });
   // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
   const settingsSlot =
     metrics.dockGapPx + DOCK_DIVIDER_WIDTH_PX + metrics.dockGapPx + iconSizePx;
-  return metrics.dockPaddingXPx * 2 + appsWidth + settingsSlot;
+  return metrics.dockPaddingXPx * 2 + rowWidth + settingsSlot;
 }
 
 /** See `pillWidthPx` — same "documented formula, not called at runtime" note. */
-export function windowWidthDip(appCount: number, iconSizePx: number): number {
+export function windowWidthDip(items: DockItem[], iconSizePx: number): number {
   return (
-    pillWidthPx(appCount, iconSizePx) +
+    pillWidthPx(items, iconSizePx) +
     Math.ceil(iconSizePx * (MAGNIFY_MAX_SCALE - 1)) +
     WINDOW_GLOW_BLEED_PX
   );

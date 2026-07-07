@@ -62,6 +62,53 @@ impl AppEntry {
     }
 }
 
+/// A visual divider between dock app groups — persisted, no bundle ID or icon.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparatorEntry {
+    pub id: String,
+}
+
+/// One persisted dock row — either an app or a separator.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DockItem {
+    #[serde(rename = "app")]
+    App(AppEntry),
+    #[serde(rename = "separator")]
+    Separator(SeparatorEntry),
+}
+
+impl DockItem {
+    pub fn id(&self) -> &str {
+        match self {
+            DockItem::App(entry) => &entry.id,
+            DockItem::Separator(separator) => &separator.id,
+        }
+    }
+
+    pub fn app_entry(&self) -> Option<&AppEntry> {
+        match self {
+            DockItem::App(entry) => Some(entry),
+            DockItem::Separator(_) => None,
+        }
+    }
+}
+
+pub fn count_apps(entries: &[DockItem]) -> usize {
+    entries
+        .iter()
+        .filter(|item| matches!(item, DockItem::App(_)))
+        .count()
+}
+
+pub fn count_separators(entries: &[DockItem]) -> usize {
+    entries
+        .iter()
+        .filter(|item| matches!(item, DockItem::Separator(_)))
+        .count()
+}
+
 /// Curated first-run candidate — `'static` compile-time data, never
 /// persisted itself (only copied into an owned `AppEntry` once resolved as
 /// actually installed on disk).
@@ -117,6 +164,10 @@ const DEFAULT_SEED_LIMIT: usize = 10;
 /// with the reject-pulse cue (see `add_app_from_path` below).
 pub const MAX_APPS: usize = 15;
 
+/// Soft ceiling on separator count — keeps the pill from degrading into an
+/// endless row of empty lines.
+pub const MAX_SEPARATORS: usize = 5;
+
 /// Deterministic hex fallback when icon sampling fails — keyed by bundle ID.
 const COLOR_PALETTE: &[&str] = &[
     "#fb923c",
@@ -156,7 +207,7 @@ fn display_name_from_path(path: &str) -> String {
         .to_string()
 }
 
-/// Wire shape sent to the frontend — must stay in sync with `DockApp` in
+/// App fields inside a dock snapshot — must stay in sync with `DockApp` in
 /// `src/lib/types.ts`.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +220,20 @@ pub struct DockAppPayload {
     pub indicator_color: String,
     pub indicator_color_auto: String,
     pub indicator_color_override: Option<String>,
+}
+
+/// Wire shape for one dock row — tagged union mirroring `DockItem` /
+/// `DockItem` in `src/lib/types.ts`.
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DockItemPayload {
+    #[serde(rename = "app")]
+    App {
+        #[serde(flatten)]
+        app: DockAppPayload,
+    },
+    #[serde(rename = "separator")]
+    Separator { id: String },
 }
 
 /// Lightweight running-state update — emitted on launch/terminate without
@@ -196,7 +261,7 @@ pub struct AppIconUpdatePayload {
 /// notifications are delivered.
 #[derive(Default)]
 pub struct AppsState {
-    pub entries: Mutex<Vec<AppEntry>>,
+    pub entries: Mutex<Vec<DockItem>>,
     pub running: Mutex<HashMap<String, bool>>,
     pub icons: Mutex<HashMap<String, Option<String>>>,
     pub auto_colors: Mutex<HashMap<String, String>>,
@@ -246,7 +311,7 @@ pub(crate) fn apply_icon_resolve(state: &AppsState, bundle_id: &str, resolved: I
 }
 
 impl AppsState {
-    pub fn snapshot(&self, settings: &DockSettings) -> Vec<DockAppPayload> {
+    pub fn snapshot(&self, settings: &DockSettings) -> Vec<DockItemPayload> {
         let entries = self
             .entries
             .lock()
@@ -266,19 +331,26 @@ impl AppsState {
 
         entries
             .iter()
-            .map(|app| {
-                let (indicator_color, indicator_color_auto, indicator_color_override) =
-                    resolve_indicator_color(settings, app, &auto_colors);
-                DockAppPayload {
-                    id: app.id.clone(),
-                    name: app.name.clone(),
-                    bundle_id: app.bundle_id.clone(),
-                    icon_url: icons.get(&app.bundle_id).cloned().flatten(),
-                    is_active: running.get(&app.bundle_id).copied().unwrap_or(false),
-                    indicator_color,
-                    indicator_color_auto,
-                    indicator_color_override,
+            .map(|item| match item {
+                DockItem::App(app) => {
+                    let (indicator_color, indicator_color_auto, indicator_color_override) =
+                        resolve_indicator_color(settings, app, &auto_colors);
+                    DockItemPayload::App {
+                        app: DockAppPayload {
+                            id: app.id.clone(),
+                            name: app.name.clone(),
+                            bundle_id: app.bundle_id.clone(),
+                            icon_url: icons.get(&app.bundle_id).cloned().flatten(),
+                            is_active: running.get(&app.bundle_id).copied().unwrap_or(false),
+                            indicator_color,
+                            indicator_color_auto,
+                            indicator_color_override,
+                        },
+                    }
                 }
+                DockItem::Separator(separator) => DockItemPayload::Separator {
+                    id: separator.id.clone(),
+                },
             })
             .collect()
     }
@@ -295,9 +367,14 @@ impl AppsState {
 
         entries
             .iter()
-            .map(|app| AppRunningPayload {
-                id: app.id.clone(),
-                is_active: running.get(&app.bundle_id).copied().unwrap_or(false),
+            .filter_map(|item| {
+                let DockItem::App(app) = item else {
+                    return None;
+                };
+                Some(AppRunningPayload {
+                    id: app.id.clone(),
+                    is_active: running.get(&app.bundle_id).copied().unwrap_or(false),
+                })
             })
             .collect()
     }
@@ -314,9 +391,14 @@ impl AppsState {
 
         entries
             .iter()
-            .map(|app| AppIconUpdatePayload {
-                id: app.id.clone(),
-                icon_url: icons.get(&app.bundle_id).cloned().flatten(),
+            .filter_map(|item| {
+                let DockItem::App(app) = item else {
+                    return None;
+                };
+                Some(AppIconUpdatePayload {
+                    id: app.id.clone(),
+                    icon_url: icons.get(&app.bundle_id).cloned().flatten(),
+                })
             })
             .collect()
     }
@@ -326,7 +408,10 @@ impl AppsState {
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry = entries.iter().find(|app| app.bundle_id == bundle_id)?;
+        let entry = entries.iter().find_map(|item| match item {
+            DockItem::App(app) if app.bundle_id == bundle_id => Some(app),
+            _ => None,
+        })?;
         let id = entry.id.clone();
         drop(entries);
 
@@ -341,11 +426,11 @@ impl AppsState {
         })
     }
 
-    pub fn app_count(&self) -> usize {
+    pub fn entries_snapshot(&self) -> Vec<DockItem> {
         self.entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
+            .clone()
     }
 }
 
@@ -354,37 +439,52 @@ fn config_file_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Writes `entries` to disk atomically — see `persistence::write_json_atomic`.
-fn save_entries(app: &AppHandle, entries: &[AppEntry]) -> Result<(), String> {
+fn save_entries(app: &AppHandle, entries: &[DockItem]) -> Result<(), String> {
     let path = config_file_path(app)?;
     crate::persistence::write_json_atomic(&path, &entries)
 }
 
-fn seed_entries() -> Vec<AppEntry> {
+fn seed_entries() -> Vec<DockItem> {
     SEED_POOL
         .iter()
         .filter(|candidate| platform::is_app_installed(candidate.bundle_id))
         .take(DEFAULT_SEED_LIMIT)
-        .map(|candidate| AppEntry {
-            id: candidate.bundle_id.to_string(),
-            name: candidate.name.to_string(),
-            bundle_id: candidate.bundle_id.to_string(),
-            color_override: None,
-            color: None,
+        .map(|candidate| {
+            DockItem::App(AppEntry {
+                id: candidate.bundle_id.to_string(),
+                name: candidate.name.to_string(),
+                bundle_id: candidate.bundle_id.to_string(),
+                color_override: None,
+                color: None,
+            })
         })
         .collect()
 }
 
-fn load_or_seed_entries(app: &AppHandle) -> Result<Vec<AppEntry>, String> {
+fn parse_dock_items_json(contents: &str) -> Result<Vec<DockItem>, String> {
+    let values: Vec<serde_json::Value> =
+        serde_json::from_str(contents).map_err(|err| err.to_string())?;
+
+    values
+        .into_iter()
+        .map(|value| {
+            if value.get("type").is_none() {
+                let entry: AppEntry =
+                    serde_json::from_value(value).map_err(|err| err.to_string())?;
+                Ok(DockItem::App(entry.normalize_legacy_color()))
+            } else {
+                serde_json::from_value(value).map_err(|err| err.to_string())
+            }
+        })
+        .collect()
+}
+
+fn load_or_seed_entries(app: &AppHandle) -> Result<Vec<DockItem>, String> {
     let path = config_file_path(app)?;
 
     if let Ok(contents) = std::fs::read_to_string(&path) {
-        match serde_json::from_str::<Vec<AppEntry>>(&contents) {
-            Ok(entries) => {
-                return Ok(entries
-                    .into_iter()
-                    .map(AppEntry::normalize_legacy_color)
-                    .collect());
-            }
+        match parse_dock_items_json(&contents) {
+            Ok(entries) => return Ok(entries),
             Err(err) => {
                 eprintln!(
                     "GameDockPanel: {} is corrupt ({err}), reseeding from candidates",
@@ -424,7 +524,7 @@ pub(crate) fn emit_apps_list_changed(app: &AppHandle, state: &AppsState) {
 }
 
 #[tauri::command]
-pub fn get_apps_snapshot(app: AppHandle, state: State<AppsState>) -> Vec<DockAppPayload> {
+pub fn get_apps_snapshot(app: AppHandle, state: State<AppsState>) -> Vec<DockItemPayload> {
     let settings = settings_snapshot(&app);
     state.snapshot(&settings)
 }
@@ -448,10 +548,13 @@ pub fn add_app_from_path(
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if entries.iter().any(|entry| entry.bundle_id == bundle_id) {
+        if entries.iter().any(|item| {
+            item.app_entry()
+                .is_some_and(|entry| entry.bundle_id == bundle_id)
+        }) {
             return Err(format!("{} is already in the dock", bundle_id));
         }
-        if entries.len() >= MAX_APPS {
+        if count_apps(&entries) >= MAX_APPS {
             return Err("dock is full".to_string());
         }
     }
@@ -470,7 +573,7 @@ pub fn add_app_from_path(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let idx = insert_index.unwrap_or(entries.len()).min(entries.len());
-        entries.insert(idx, entry);
+        entries.insert(idx, DockItem::App(entry));
     }
 
     {
@@ -506,7 +609,12 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let before = entries.len();
-        entries.retain(|entry| entry.bundle_id != bundle_id);
+        entries.retain(|item| {
+            !matches!(
+                item,
+                DockItem::App(entry) if entry.bundle_id == bundle_id
+            )
+        });
         entries.len() != before
     };
     if !removed {
@@ -561,7 +669,10 @@ pub fn refresh_indicator_colors(app: AppHandle, state: State<AppsState>) -> Resu
         .clone();
     let (icon_size_dip, scale_factor) = icon_metrics_for_app(&app);
 
-    for entry in entries.iter() {
+    for item in entries.iter() {
+        let DockItem::App(entry) = item else {
+            continue;
+        };
         let resolved = platform::resolve_app_icon(&entry.bundle_id, icon_size_dip, scale_factor);
         apply_icon_resolve(&state, &entry.bundle_id, resolved);
     }
@@ -588,7 +699,10 @@ pub fn set_app_indicator_color(
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(entry) = entries.iter_mut().find(|e| e.bundle_id == bundle_id) else {
+        let Some(entry) = entries.iter_mut().find_map(|item| match item {
+            DockItem::App(app) if app.bundle_id == bundle_id => Some(app),
+            _ => None,
+        }) else {
             return Err(format!("{bundle_id} is not in the dock"));
         };
         entry.color_override = color;
@@ -620,7 +734,7 @@ pub fn quit_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
 pub fn reorder_apps(
     app: AppHandle,
     state: State<AppsState>,
-    ordered_bundle_ids: Vec<String>,
+    ordered_ids: Vec<String>,
 ) -> Result<(), String> {
     let snapshot = {
         let mut entries = state
@@ -628,26 +742,26 @@ pub fn reorder_apps(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let current: HashSet<&str> = entries.iter().map(|e| e.bundle_id.as_str()).collect();
-        let proposed: HashSet<&str> = ordered_bundle_ids.iter().map(String::as_str).collect();
+        let current: HashSet<&str> = entries.iter().map(|item| item.id()).collect();
+        let proposed: HashSet<&str> = ordered_ids.iter().map(String::as_str).collect();
         if current != proposed {
             return Err("reorder list does not match current dock entries".to_string());
         }
-        if ordered_bundle_ids.len() != entries.len() {
+        if ordered_ids.len() != entries.len() {
             return Err("reorder list length mismatch".to_string());
         }
 
-        let by_id: HashMap<String, AppEntry> = entries
+        let by_id: HashMap<String, DockItem> = entries
             .iter()
-            .map(|entry| (entry.bundle_id.clone(), entry.clone()))
+            .map(|item| (item.id().to_string(), item.clone()))
             .collect();
-        let reordered = ordered_bundle_ids
+        let reordered = ordered_ids
             .iter()
-            .map(|bundle_id| {
+            .map(|id| {
                 by_id
-                    .get(bundle_id)
+                    .get(id)
                     .cloned()
-                    .ok_or_else(|| format!("{bundle_id} is not in the dock"))
+                    .ok_or_else(|| format!("{id} is not in the dock"))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -658,4 +772,172 @@ pub fn reorder_apps(
     save_entries(&app, &snapshot)?;
     emit_apps_list_changed(&app, &state);
     Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SeparatorPlacement {
+    Before,
+    After,
+}
+
+#[tauri::command]
+pub fn insert_separator(
+    app: AppHandle,
+    state: State<AppsState>,
+    bundle_id: String,
+    placement: SeparatorPlacement,
+    separator_id: String,
+) -> Result<(), String> {
+    {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if count_separators(&entries) >= MAX_SEPARATORS {
+            return Err("separator limit reached".to_string());
+        }
+        if entries.iter().any(|item| item.id() == separator_id) {
+            return Err("separator id already exists".to_string());
+        }
+    }
+
+    {
+        let mut entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let app_index = entries.iter().position(|item| {
+            matches!(
+                item,
+                DockItem::App(entry) if entry.bundle_id == bundle_id
+            )
+        });
+        let Some(app_index) = app_index else {
+            return Err(format!("{bundle_id} is not in the dock"));
+        };
+
+        let insert_index = match placement {
+            SeparatorPlacement::Before => app_index,
+            SeparatorPlacement::After => app_index + 1,
+        };
+
+        if insert_index < entries.len()
+            && matches!(entries[insert_index], DockItem::Separator(_))
+        {
+            return Err("separator already at this position".to_string());
+        }
+        if insert_index > 0
+            && matches!(entries[insert_index - 1], DockItem::Separator(_))
+        {
+            return Err("adjacent separator not allowed".to_string());
+        }
+
+        entries.insert(
+            insert_index,
+            DockItem::Separator(SeparatorEntry { id: separator_id }),
+        );
+    }
+
+    {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        save_entries(&app, &entries)?;
+    }
+
+    emit_apps_list_changed(&app, &state);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_separator(
+    app: AppHandle,
+    state: State<AppsState>,
+    separator_id: String,
+) -> Result<(), String> {
+    let removed = {
+        let mut entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = entries.len();
+        entries.retain(|item| {
+            !matches!(
+                item,
+                DockItem::Separator(separator) if separator.id == separator_id
+            )
+        });
+        entries.len() != before
+    };
+    if !removed {
+        return Err(format!("{separator_id} is not in the dock"));
+    }
+
+    {
+        let entries = state
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        save_entries(&app, &entries)?;
+    }
+
+    emit_apps_list_changed(&app, &state);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_legacy_flat_app_entries_without_type() {
+        let json = r#"[{"id":"com.hnc.Discord","name":"Discord","bundleId":"com.hnc.Discord"}]"#;
+        let items = parse_dock_items_json(json).expect("legacy json should parse");
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            DockItem::App(entry) => {
+                assert_eq!(entry.bundle_id, "com.hnc.Discord");
+                assert_eq!(entry.id, "com.hnc.Discord");
+                assert_eq!(entry.name, "Discord");
+            }
+            DockItem::Separator(_) => panic!("expected app entry"),
+        }
+    }
+
+    #[test]
+    fn load_tagged_dock_items_with_separator() {
+        let json = r#"[
+            {"type":"app","id":"com.hnc.Discord","name":"Discord","bundleId":"com.hnc.Discord"},
+            {"type":"separator","id":"sep-1"}
+        ]"#;
+        let items = parse_dock_items_json(json).expect("tagged json should parse");
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], DockItem::App(_)));
+        assert!(matches!(&items[1], DockItem::Separator(_)));
+    }
+
+    #[test]
+    fn snapshot_payload_flattens_app_fields_for_frontend() {
+        let payload = DockItemPayload::App {
+            app: DockAppPayload {
+                id: "com.test.app".to_string(),
+                name: "Test".to_string(),
+                bundle_id: "com.test.app".to_string(),
+                icon_url: None,
+                is_active: false,
+                indicator_color: "#ffffff".to_string(),
+                indicator_color_auto: "#ffffff".to_string(),
+                indicator_color_override: None,
+            },
+        };
+        let json = serde_json::to_value(payload).expect("serialize snapshot");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("app"));
+        assert_eq!(
+            json.get("bundleId").and_then(|v| v.as_str()),
+            Some("com.test.app")
+        );
+        assert!(json.get("app").is_none());
+    }
 }

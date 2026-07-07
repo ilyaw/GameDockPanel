@@ -15,6 +15,8 @@ pub fn run() {
             commands::apps::add_app_from_path,
             commands::apps::remove_app,
             commands::apps::reorder_apps,
+            commands::apps::insert_separator,
+            commands::apps::remove_separator,
             commands::apps::reveal_app_in_finder,
             commands::apps::quit_app,
             commands::apps::set_app_indicator_color,

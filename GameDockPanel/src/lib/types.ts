@@ -24,6 +24,25 @@ export interface DockApp {
   indicatorColorOverride: string | null;
 }
 
+/** One dock row — app (with runtime fields) or a visual separator. */
+export type DockItem =
+  | ({ type: "app" } & DockApp)
+  | { type: "separator"; id: string };
+
+export function isDockAppItem(
+  item: DockItem,
+): item is { type: "app" } & DockApp {
+  return item.type === "app";
+}
+
+export function countDockApps(items: DockItem[]): number {
+  return items.filter(isDockAppItem).length;
+}
+
+export function countDockSeparators(items: DockItem[]): number {
+  return items.filter((item) => item.type === "separator").length;
+}
+
 /** Running-state push from Rust — no icon payloads. */
 export interface AppRunningUpdate {
   id: string;

@@ -84,7 +84,7 @@ pub fn resize_dock_window_for_pill(
 #[cfg(not(target_os = "macos"))]
 pub fn resize_dock_window_for_app_count(
     _window: &tauri::WebviewWindow,
-    _app_count: usize,
+    _entries: &[crate::commands::apps::DockItem],
 ) -> Result<bool, String> {
     Ok(false)
 }

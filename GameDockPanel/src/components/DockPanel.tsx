@@ -4,10 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Settings } from "lucide-react";
 import { DockIcon } from "./DockIcon";
+import { DockRowDivider } from "./DockRowDivider";
+import { DockSeparator } from "./DockSeparator";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
   MAGNIFY_MAX_SCALE,
+  MAX_SEPARATORS,
   TOOLTIP_GAP_PX,
   getBackgroundPreset,
   backgroundSpeedToDurationS,
@@ -15,7 +18,8 @@ import {
   getPanelEffectPreset,
   getSizeMetrics,
 } from "../lib/constants";
-import type { DockApp } from "../lib/types";
+import type { DockItem } from "../lib/types";
+import { countDockSeparators, isDockAppItem } from "../lib/types";
 
 /**
  * React only types `style` as known CSS properties — custom properties
@@ -100,31 +104,49 @@ function hitTestIcon(
   return bestId;
 }
 
-/** macOS Dock-style slot: insert before the first icon whose center is
+/** macOS Dock-style slot: insert before the first app icon whose center is
  * right of the cursor; otherwise append before settings. */
 function resolveInsertIndex(
-  apps: DockApp[],
+  items: DockItem[],
   refs: Map<string, HTMLElement>,
   pillEl: HTMLElement | null,
   x: number,
   y: number,
 ): number {
   if (pillEl && !pointInRect(x, y, pillEl)) {
-    return apps.length;
+    return items.length;
   }
 
-  for (let i = 0; i < apps.length; i++) {
-    const el = refs.get(apps[i].id);
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!isDockAppItem(item)) continue;
+    const el = refs.get(item.id);
     if (!el) continue;
     const rect = el.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
     if (x < centerX) return i;
   }
-  return apps.length;
+  return items.length;
+}
+
+function findAppIdAtOrBefore(items: DockItem[], index: number): string | null {
+  for (let i = Math.min(index, items.length - 1); i >= 0; i--) {
+    const item = items[i];
+    if (isDockAppItem(item)) return item.id;
+  }
+  return null;
+}
+
+function findAppIdAtOrAfter(items: DockItem[], index: number): string | null {
+  for (let i = index; i < items.length; i++) {
+    const item = items[i];
+    if (isDockAppItem(item)) return item.id;
+  }
+  return null;
 }
 
 function getInsertMarkerMetrics(
-  apps: DockApp[],
+  items: DockItem[],
   refs: Map<string, HTMLElement>,
   pillEl: HTMLElement,
   insertIndex: number,
@@ -135,15 +157,17 @@ function getInsertMarkerMetrics(
   let markerHeight = 0;
 
   if (insertIndex <= 0) {
-    const first = apps[0] ? refs.get(apps[0].id) : null;
+    const firstId = findAppIdAtOrAfter(items, 0);
+    const first = firstId ? refs.get(firstId) : null;
     if (first) {
       const rect = first.getBoundingClientRect();
       markerX = rect.left;
       markerTop = rect.top;
       markerHeight = rect.height;
     }
-  } else if (insertIndex >= apps.length) {
-    const last = apps[apps.length - 1] ? refs.get(apps[apps.length - 1].id) : null;
+  } else if (insertIndex >= items.length) {
+    const lastId = findAppIdAtOrBefore(items, items.length - 1);
+    const last = lastId ? refs.get(lastId) : null;
     if (last) {
       const rect = last.getBoundingClientRect();
       markerX = rect.right;
@@ -151,14 +175,26 @@ function getInsertMarkerMetrics(
       markerHeight = rect.height;
     }
   } else {
-    const prev = refs.get(apps[insertIndex - 1].id);
-    const next = refs.get(apps[insertIndex].id);
+    const prevId = findAppIdAtOrBefore(items, insertIndex - 1);
+    const nextId = findAppIdAtOrAfter(items, insertIndex);
+    const prev = prevId ? refs.get(prevId) : null;
+    const next = nextId ? refs.get(nextId) : null;
     if (prev && next) {
       const prevRect = prev.getBoundingClientRect();
       const nextRect = next.getBoundingClientRect();
       markerX = (prevRect.right + nextRect.left) / 2;
       markerTop = Math.min(prevRect.top, nextRect.top);
       markerHeight = Math.max(prevRect.height, nextRect.height);
+    } else if (prev) {
+      const prevRect = prev.getBoundingClientRect();
+      markerX = prevRect.right;
+      markerTop = prevRect.top;
+      markerHeight = prevRect.height;
+    } else if (next) {
+      const nextRect = next.getBoundingClientRect();
+      markerX = nextRect.left;
+      markerTop = nextRect.top;
+      markerHeight = nextRect.height;
     }
   }
 
@@ -172,11 +208,13 @@ function getInsertMarkerMetrics(
 
 export function DockPanel() {
   const {
-    apps,
+    items,
     activateApp,
-    reorderApps,
+    reorderItems,
     commitReorder,
     removeApp,
+    insertSeparator,
+    removeSeparator,
     fileDragOver,
     fileDragInsertIndex,
     resolveInsertIndexRef,
@@ -185,6 +223,7 @@ export function DockPanel() {
     quitApp,
     setIndicatorColor,
   } = useDockApps();
+  const separatorsFull = countDockSeparators(items) >= MAX_SEPARATORS;
   const { settings, hydrated } = useDockSettings();
   const iconSizeTarget = useMotionValue(settings.iconSizePx);
   const iconSizeAnimated = useSpring(iconSizeTarget, ICON_SIZE_SPRING);
@@ -235,7 +274,6 @@ export function DockPanel() {
     (px) => getSizeMetrics(px).dockPaddingYPx,
   );
   const iconRowGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
-  const dividerHeightPx = useTransform(iconSizeAnimated, (px) => px * 0.55);
   const settingsSlotSizePx = useTransform(iconSizeAnimated, (px) => px);
   const settingsCornerRadiusPx = useTransform(
     iconSizeAnimated,
@@ -298,8 +336,8 @@ export function DockPanel() {
 
   useEffect(() => {
     resolveInsertIndexRef.current = (x, y) =>
-      resolveInsertIndex(apps, iconRefs.current, pillRef.current, x, y);
-  }, [apps, resolveInsertIndexRef]);
+      resolveInsertIndex(items, iconRefs.current, pillRef.current, x, y);
+  }, [items, resolveInsertIndexRef]);
 
   useLayoutEffect(() => {
     const pillEl = pillRef.current;
@@ -309,13 +347,13 @@ export function DockPanel() {
     }
 
     const metrics = getInsertMarkerMetrics(
-      apps,
+      items,
       iconRefs.current,
       pillEl,
       fileDragInsertIndex,
     );
     setInsertMarker(metrics);
-  }, [apps, fileDragOver, fileDragInsertIndex, iconSizeAnimated]);
+  }, [items, fileDragOver, fileDragInsertIndex, iconSizeAnimated]);
 
   useEffect(() => {
     isDraggingRef.current = isDragging;
@@ -370,10 +408,10 @@ export function DockPanel() {
    * separate, single call from `endDrag` below.
    */
   const handleReorder = useCallback(
-    (newOrder: DockApp[]) => {
-      reorderApps(newOrder);
+    (newOrder: DockItem[]) => {
+      reorderItems(newOrder);
     },
-    [reorderApps],
+    [reorderItems],
   );
 
   const finishReorderSettle = useCallback(() => {
@@ -398,13 +436,13 @@ export function DockPanel() {
   }, [finishReorderSettle]);
 
   const beginDrag = useCallback(() => {
-    orderAtDragStartRef.current = apps.map((app) => app.id);
+    orderAtDragStartRef.current = items.map((item) => item.id);
     setIsDragging(true);
     mouseX.set(Infinity);
     settingsMouseX.set(Infinity);
     setHoveredIconId(null);
     setIsSettingsHovered(false);
-  }, [apps, mouseX, settingsMouseX]);
+  }, [items, mouseX, settingsMouseX]);
 
   /** The one discrete "drop" event — persists the final order exactly once
    * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
@@ -416,7 +454,7 @@ export function DockPanel() {
     void commitReorder();
 
     const orderChanged =
-      orderAtDragStartRef.current.join() !== apps.map((app) => app.id).join();
+      orderAtDragStartRef.current.join() !== items.map((item) => item.id).join();
     if (!orderChanged) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -429,7 +467,7 @@ export function DockPanel() {
         finishReorderSettle();
       }, SETTLE_SAFETY_MS);
     }
-  }, [apps, commitReorder, finishReorderSettle]);
+  }, [items, commitReorder, finishReorderSettle]);
 
   /**
    * `onLayoutAnimationComplete` on a `Reorder.Item` fires once that item's
@@ -634,7 +672,7 @@ export function DockPanel() {
       }
       observer.disconnect();
     };
-  }, [apps, iconSizeAnimated]);
+  }, [items, iconSizeAnimated]);
 
   useLayoutEffect(() => {
     const el = settingsSlotRef.current;
@@ -649,7 +687,7 @@ export function DockPanel() {
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [settingsCenterX, apps, hoverSessionId, reorderSettledId]);
+  }, [settingsCenterX, items, hoverSessionId, reorderSettledId]);
 
   const settingsScaleRaw = useTransform(
     [settingsMouseX, settingsCenterX, settingsMagnifyRadiusPx],
@@ -821,32 +859,16 @@ export function DockPanel() {
         )}
         <Reorder.Group
           axis="x"
-          values={apps}
+          values={items}
           onReorder={handleReorder}
           style={{ gap: iconRowGapPx }}
           className="m-0 flex list-none items-end"
           as="ul"
         >
-        {apps.map((app) => (
-          // Dragging an icon out of the pill and releasing just snaps it
-          // back into its (possibly reordered) slot — a deliberate decision,
-          // not an unexamined default: Framer Motion hardcodes
-          // `dragSnapToOrigin: true` inside `Reorder.Item` (spread after
-          // `...props`, so it can't be overridden via a prop anyway), and a
-          // "drag out to remove" gesture was explicitly considered and
-          // rejected as out of scope for this pass.
+        {items.map((item) => (
           <Reorder.Item
-            key={app.id}
-            value={app}
-            // `layout="position"` (not the default `true`) opts out of
-            // framer-motion's layout *size* tracking. Icons never change
-            // size on reorder — only position — so the size half is dead
-            // weight; worse, framer-motion's automatic scale-correction for
-            // size changes stacks with `DockIcon`'s own independent magnify
-            // `scale` spring on the same element/descendants, producing a
-            // visible jitter on exactly the just-dragged icon (the only one
-            // still carrying a live size-projection box) and throwing off
-            // the context menu's real hit-box relative to where it's drawn.
+            key={item.id}
+            value={item}
             layout="position"
             className="relative list-none"
             whileDrag={{ zIndex: 20 }}
@@ -854,32 +876,44 @@ export function DockPanel() {
             onDragEnd={endDrag}
             onLayoutAnimationComplete={handleItemLayoutAnimationComplete}
           >
-            <DockIcon
-              app={app}
-              iconSizePx={iconSizeAnimated}
-              registerRef={registerIconRef}
-              mouseX={mouseX}
-              isHovered={
-                !isDragging && !isReorderSettling && hoveredIconId === app.id
-              }
-              hoverSessionId={hoverSessionId}
-              reorderSettledId={reorderSettledId}
-              isDragging={isDragging}
-              isReorderSettling={isReorderSettling}
-              animationsEnabled={settings.animationsEnabled}
-              onRemove={removeApp}
-              onShowInFinder={showInFinder}
-              onQuit={quitApp}
-              onSetIndicatorColor={setIndicatorColor}
-            />
+            {isDockAppItem(item) ? (
+              <DockIcon
+                app={item}
+                iconSizePx={iconSizeAnimated}
+                registerRef={registerIconRef}
+                mouseX={mouseX}
+                isHovered={
+                  !isDragging && !isReorderSettling && hoveredIconId === item.id
+                }
+                hoverSessionId={hoverSessionId}
+                reorderSettledId={reorderSettledId}
+                isDragging={isDragging}
+                isReorderSettling={isReorderSettling}
+                animationsEnabled={settings.animationsEnabled}
+                onRemove={removeApp}
+                onShowInFinder={showInFinder}
+                onQuit={quitApp}
+                onSetIndicatorColor={setIndicatorColor}
+                onInsertSeparatorBefore={(bundleId) => {
+                  void insertSeparator(bundleId, "before");
+                }}
+                onInsertSeparatorAfter={(bundleId) => {
+                  void insertSeparator(bundleId, "after");
+                }}
+                separatorsFull={separatorsFull}
+              />
+            ) : (
+              <DockSeparator
+                id={item.id}
+                iconSizePx={iconSizeAnimated}
+                onRemove={removeSeparator}
+                isDragging={isDragging}
+              />
+            )}
           </Reorder.Item>
         ))}
         </Reorder.Group>
-        <motion.div
-          aria-hidden
-          className="mx-1 mb-3 w-px shrink-0 self-end bg-zinc-600/80"
-          style={{ height: dividerHeightPx }}
-        />
+        <DockRowDivider iconSizePx={iconSizeAnimated} className="mx-1" />
         {/* Matches DockIcon's own `flex-col items-center gap-2` shape (icon +
             gap + LED) with an invisible spacer standing in for the LED — the
             pill row is `items-end`, so without this the button's bottom

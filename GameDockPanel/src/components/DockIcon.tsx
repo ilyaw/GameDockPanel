@@ -8,7 +8,7 @@ import {
 } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { FolderOpen, Power, Trash2 } from "lucide-react";
+import { FolderOpen, Minus, Power, Trash2 } from "lucide-react";
 import type { DockApp } from "../lib/types";
 import {
   ICON_CORNER_RADIUS_RATIO,
@@ -62,6 +62,9 @@ interface DockIconProps {
   onQuit?: (bundleId: string) => void;
   /** Right-click → manual LED color override (`null` resets to auto). */
   onSetIndicatorColor?: (bundleId: string, color: string | null) => void;
+  onInsertSeparatorBefore?: (bundleId: string) => void;
+  onInsertSeparatorAfter?: (bundleId: string) => void;
+  separatorsFull?: boolean;
   /** While an icon is being drag-reordered, magnify is suppressed. */
   isDragging?: boolean;
   /** Brief post-drop window while layout position animation settles. */
@@ -84,6 +87,9 @@ export function DockIcon({
   onShowInFinder,
   onQuit,
   onSetIndicatorColor,
+  onInsertSeparatorBefore,
+  onInsertSeparatorAfter,
+  separatorsFull = false,
   isDragging = false,
   isReorderSettling = false,
   animationsEnabled = true,
@@ -325,6 +331,34 @@ export function DockIcon({
             >
               <Trash2 className="h-3.5 w-3.5" />
               Remove from Dock
+            </button>
+
+            <div className="h-px bg-zinc-700/70" />
+
+            <button
+              type="button"
+              disabled={separatorsFull}
+              onClick={() => {
+                setMenuOpen(false);
+                onInsertSeparatorBefore?.(app.bundleId);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Minus className="h-3.5 w-3.5" />
+              Разделитель слева
+            </button>
+
+            <button
+              type="button"
+              disabled={separatorsFull}
+              onClick={() => {
+                setMenuOpen(false);
+                onInsertSeparatorAfter?.(app.bundleId);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Minus className="h-3.5 w-3.5" />
+              Разделитель справа
             </button>
 
             <div className="h-px bg-zinc-700/70" />
