@@ -23,6 +23,10 @@ const COMMIT_DEBOUNCE_MS = 120;
  */
 export function useDockSettings() {
   const [settings, setSettings] = useState<DockSettings>(DEFAULT_DOCK_SETTINGS);
+  /** True after the first `get_dock_settings` pull — lets the dock window
+   * snap its icon-size spring to the persisted value instead of animating
+   * from the placeholder default on cold start. */
+  const [hydrated, setHydrated] = useState(false);
   const pendingRef = useRef<DockSettings | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -34,6 +38,7 @@ export function useDockSettings() {
       const snapshot = await invoke<DockSettings>("get_dock_settings");
       if (cancelled) return;
       setSettings(snapshot);
+      setHydrated(true);
 
       unlisteners.push(
         await listen<DockSettings>("dock-settings-changed", (event) => {
@@ -57,25 +62,33 @@ export function useDockSettings() {
     };
   }, []);
 
+  const persistSettings = useCallback((toSend: DockSettings) => {
+    invoke("update_dock_settings", { settings: toSend }).catch((error: unknown) => {
+      console.error("Failed to persist dock settings:", error);
+    });
+  }, []);
+
   /**
    * Applies `next` immediately to local state (instant visual feedback in
    * the settings window itself), and debounces the actual persist +
-   * cross-window broadcast. Always sends the full snapshot — simpler than
-   * diffing, and the caller already has the complete object in hand.
+   * cross-window broadcast. Icon-size live preview during slider drags
+   * goes through `preview_dock_icon_size` instead (see SettingsWindow).
    */
-  const commit = useCallback((next: DockSettings) => {
-    setSettings(next);
-    pendingRef.current = next;
-    clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(() => {
-      const toSend = pendingRef.current;
-      pendingRef.current = null;
-      if (!toSend) return;
-      invoke("update_dock_settings", { settings: toSend }).catch((error: unknown) => {
-        console.error("Failed to persist dock settings:", error);
-      });
-    }, COMMIT_DEBOUNCE_MS);
-  }, []);
+  const commit = useCallback(
+    (next: DockSettings) => {
+      setSettings(next);
+      pendingRef.current = next;
+      clearTimeout(debounceTimer.current);
 
-  return { settings, commit };
+      debounceTimer.current = setTimeout(() => {
+        const toSend = pendingRef.current;
+        pendingRef.current = null;
+        if (!toSend) return;
+        persistSettings(toSend);
+      }, COMMIT_DEBOUNCE_MS);
+    },
+    [persistSettings],
+  );
+
+  return { settings, commit, hydrated };
 }

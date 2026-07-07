@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 use crate::commands::apps::AppsState;
+use crate::commands::settings::SettingsState;
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
 /// is over the dock pill so React can hit-test icons without CSS :hover.
@@ -12,37 +13,57 @@ struct DockCursorPayload {
     y: f64,
 }
 
-// Layout formula mirrored from src/lib/constants.ts — see pillWidthPx()/
-// windowWidthDip() there for the JS-side copy of this math. DIP == points
-// throughout (Tauri's logical-pixel convention), so these are used directly
-// against `NSRect`/`NSWindow` without any extra unit conversion.
-const ICON_SIZE_DIP: f64 = 56.0;
-// Mirrors `gap-2` on the dock pill (src/lib/constants.ts DOCK_GAP_PX).
-const DOCK_GAP_DIP: f64 = 8.0;
-const DOCK_PADDING_X_DIP: f64 = 20.0;
+// Layout formula mirrored from src/lib/constants.ts — see getSizeMetrics()/
+// pillWidthPx()/windowWidthDip() there for the JS-side copy of this math.
+// DIP == points throughout (Tauri's logical-pixel convention), so these are
+// used directly against `NSRect`/`NSWindow` without any extra unit
+// conversion. Everything that scales with icon size is derived by
+// `size_metrics()` from a single `icon_size_dip` input (see
+// `PROMPT_11_ADJUSTABLE_HEIGHT.md`) instead of being a fixed constant.
+
+/// Mirrors `ICON_SIZE_PRESETS` in src/lib/constants.ts — id comes from
+/// Reads the current icon size straight from `SettingsState` — used by every
+/// geometry call site below instead of threading an extra parameter through
+/// each one (mirrors how `pill_width_dip`/`pill_height_dip` are already read
+/// from `AppsState` rather than passed around).
+fn current_icon_size_dip(window: &WebviewWindow) -> f64 {
+    let state = window.state::<SettingsState>();
+    let guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.icon_size_px
+}
+
+// Reference icon size the constants below were originally tuned against
+// (the dock's pre-preset fixed size) — mirrors `BASE_ICON_SIZE_PX` in
+// src/lib/constants.ts.
+const BASE_ICON_SIZE_DIP: f64 = 56.0;
+const BASE_DOCK_GAP_DIP: f64 = 8.0;
+const BASE_DOCK_PADDING_X_DIP: f64 = 20.0;
+const BASE_DOCK_PADDING_Y_DIP: f64 = 12.0;
+const BASE_ICON_LED_GAP_DIP: f64 = 8.0;
+const LED_HEIGHT_DIP: f64 = 3.0;
+
+// Fixed across every icon-size preset — see the "stays fixed" rationale in
+// src/lib/constants.ts next to the JS copies of these same constants.
 // Mirrors the vertical divider between the app icons and the settings gear
-// in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. See
-// src/lib/constants.ts DOCK_DIVIDER_WIDTH_PX for the JS-side copy.
+// in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line.
 const DOCK_DIVIDER_WIDTH_DIP: f64 = 9.0;
 const MAGNIFY_MAX_SCALE: f64 = 1.4;
 const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
-
-// Keep in sync with WINDOW_HEIGHT_DIP / PILL_* in src/lib/constants.ts.
-// Height never depends on app count — only width does (see pill_width_dip()).
-// 194 = DOCK_BOTTOM_INSET_DIP(8) + PILL_HEIGHT_REST_DIP(91) +
-// PILL_TOP_RESERVE_PX(95) — the top reserve is sized for the tallest thing
-// that ever pokes above the pill, which is now DockIcon's context menu
-// (Show in Finder + Remove from Dock + divider + Quit), not the shorter hover
-// tooltip or magnify overflow. See PILL_TOP_RESERVE_PX's `Math.max(...)` in
-// constants.ts for the full derivation — this constant must track it.
-const WINDOW_HEIGHT_DIP: f64 = 194.0;
-const PILL_HEIGHT_REST_DIP: f64 = 91.0;
-const PILL_HEIGHT_HOVER_DIP: f64 = 114.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
 /// Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx) —
 /// CSS and the native vibrancy/hit-test masks below only agree with the
 /// visible shape if this stays in sync with that class.
 const PILL_CORNER_RADIUS_DIP: f64 = 28.0;
+/// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts.
+const TOOLTIP_GAP_DIP: f64 = 16.0;
+/// Mirrors `TOOLTIP_HEIGHT_PX` in src/lib/constants.ts.
+const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
+/// Mirrors `CONTEXT_MENU_HEIGHT_PX` in src/lib/constants.ts (3 rows +
+/// divider — Show in Finder + Remove from Dock + divider + Quit).
+const CONTEXT_MENU_HEIGHT_DIP: f64 = 91.0;
 const CLICK_POLL_MS: u64 = 50;
 /// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts — the gap between the
 /// open context menu's own bottom edge and the icon it hangs off of. Used
@@ -51,20 +72,86 @@ const CLICK_POLL_MS: u64 = 50;
 const MENU_OVERLAY_GAP_DIP: f64 = 16.0;
 
 /// Raster size for native icon export — `NSWorkspace.iconForFile` defaults to
-/// 32×32; upscaling that in the dock looks blocky. Keep ≥ `ICON_SIZE_PX *
-/// MAGNIFY_MAX_SCALE * 2` from `src/lib/constants.ts` (56 × 1.4 × 2 ≈ 157).
+/// 32×32; upscaling that in the dock looks blocky. Comfortably above the
+/// largest on-screen icon footprint across every preset (72 × 1.4 × 2 ≈ 202).
 const ICON_EXPORT_PX: f64 = 256.0;
 
-fn pill_width_dip(app_count: usize) -> f64 {
-    let apps_width = app_count as f64 * ICON_SIZE_DIP
-        + app_count.saturating_sub(1) as f64 * DOCK_GAP_DIP;
-    // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
-    let settings_slot = DOCK_GAP_DIP + DOCK_DIVIDER_WIDTH_DIP + DOCK_GAP_DIP + ICON_SIZE_DIP;
-    DOCK_PADDING_X_DIP * 2.0 + apps_width + settings_slot
+/// Mirrors `SizeMetrics`/`getSizeMetrics` in src/lib/constants.ts — trimmed
+/// to just the fields Rust itself reads (window sizing / hit-testing).
+/// Magnify curve numbers (influence radius, etc.) stay JS-only since Rust
+/// never renders the magnify animation.
+struct SizeMetrics {
+    dock_gap_dip: f64,
+    dock_padding_x_dip: f64,
+    pill_height_dip: f64,
+    window_height_dip: f64,
 }
 
-fn window_width_dip(pill_width_dip: f64) -> f64 {
-    pill_width_dip + (ICON_SIZE_DIP * (MAGNIFY_MAX_SCALE - 1.0)).ceil() + WINDOW_GLOW_BLEED_DIP
+/// Transparent band above the pill inside the window — big enough for
+/// whichever thing currently pokes highest above it (magnified icon, hover
+/// tooltip, or the taller context menu). Mirrors `pillTopReservePx` in
+/// `getSizeMetrics` (src/lib/constants.ts).
+fn pill_top_reserve_dip(icon_size_dip: f64) -> f64 {
+    let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
+    let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
+    let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
+
+    magnify_height_overflow_dip
+        .max(TOOLTIP_GAP_DIP + TOOLTIP_HEIGHT_DIP)
+        .max(TOOLTIP_GAP_DIP + CONTEXT_MENU_HEIGHT_DIP)
+        - dock_padding_y_dip
+}
+
+/// Full window height for a given (measured or formula) pill height —
+/// mirrors `windowHeightDip` derivation in `getSizeMetrics`. Takes the pill
+/// height as a parameter (like `window_width_dip` takes pill width) so the
+/// primary, DOM-measured resize path can feed in the real rendered pill
+/// height while only the invisible top-reserve margin comes from the
+/// formula.
+fn window_height_dip(pill_height_dip: f64, icon_size_dip: f64) -> f64 {
+    DOCK_BOTTOM_INSET_DIP + pill_height_dip + pill_top_reserve_dip(icon_size_dip)
+}
+
+fn size_metrics(icon_size_dip: f64) -> SizeMetrics {
+    let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
+    let dock_gap_dip = (BASE_DOCK_GAP_DIP * scale).round();
+    let dock_padding_x_dip = (BASE_DOCK_PADDING_X_DIP * scale).round();
+    let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
+    let icon_led_gap_dip = (BASE_ICON_LED_GAP_DIP * scale).round();
+
+    let pill_height_dip =
+        dock_padding_y_dip * 2.0 + icon_size_dip + icon_led_gap_dip + LED_HEIGHT_DIP;
+
+    SizeMetrics {
+        dock_gap_dip,
+        dock_padding_x_dip,
+        pill_height_dip,
+        window_height_dip: window_height_dip(pill_height_dip, icon_size_dip),
+    }
+}
+
+/// Mirrors `pillHeightHoverPx` in `getSizeMetrics` — used by the click-tap
+/// and click-through hit-test, which read the *measured* rest height from
+/// `AppsState` and only need the formula-only magnify-overflow margin added
+/// on top (same "measured base + formula margin" pattern as
+/// `window_height_dip`).
+fn pill_height_hover_dip(pill_height_rest_dip: f64, icon_size_dip: f64) -> f64 {
+    let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
+    pill_height_rest_dip + magnify_height_overflow_dip
+}
+
+fn pill_width_dip(app_count: usize, icon_size_dip: f64) -> f64 {
+    let metrics = size_metrics(icon_size_dip);
+    let apps_width = app_count as f64 * icon_size_dip
+        + app_count.saturating_sub(1) as f64 * metrics.dock_gap_dip;
+    // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
+    let settings_slot =
+        metrics.dock_gap_dip + DOCK_DIVIDER_WIDTH_DIP + metrics.dock_gap_dip + icon_size_dip;
+    metrics.dock_padding_x_dip * 2.0 + apps_width + settings_slot
+}
+
+fn window_width_dip(pill_width_dip: f64, icon_size_dip: f64) -> f64 {
+    pill_width_dip + (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil() + WINDOW_GLOW_BLEED_DIP
 }
 
 /// Positions, sizes and reveals the main window: a compact, always-on-top
@@ -79,11 +166,13 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
 
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+    let icon_size_dip = current_icon_size_dip(&window);
     let app_count = app.state::<AppsState>().app_count();
-    let pill_width = pill_width_dip(app_count);
-    let window_width = window_width_dip(pill_width);
+    let pill_width = pill_width_dip(app_count, icon_size_dip);
+    let window_width = window_width_dip(pill_width, icon_size_dip);
+    let metrics = size_metrics(icon_size_dip);
 
-    apply_dock_window_frame(&window, window_width)?;
+    apply_dock_window_frame(&window, window_width, metrics.window_height_dip)?;
     window
         .set_always_on_top(true)
         .map_err(|e| e.to_string())?;
@@ -100,17 +189,27 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *current_width = pill_width;
+        let mut current_height = state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_height = metrics.pill_height_dip;
     }
 
     enable_inactive_mouse_tracking(&window)?;
-    apply_dock_vibrancy(&window, pill_width)?;
+    apply_dock_vibrancy(&window, pill_width, metrics.pill_height_dip)?;
 
     start_dock_click_tap(window.clone());
+
+    // Reveal immediately with the formula-sized frame; the WebView's first
+    // `sync_vibrancy_pill` call then aligns the blur mask to the measured
+    // CSS pill. Without this fallback the window stays `visible: false` in
+    // tauri.conf.json until that sync runs — if the first DOM measure is
+    // delayed (Motion spring values, Strict Mode, etc.) the dock never appears.
+    window.show().map_err(|e| e.to_string())?;
+
     start_click_through_poller(window);
 
-    // Shown from `sync_vibrancy_pill_from_web` once the WebView has
-    // measured the real pill rect — avoids flashing a formula-sized blur
-    // mask that does not match the CSS pill.
     Ok(())
 }
 
@@ -132,7 +231,11 @@ const VIBRANCY_VIEW_TAG: isize = 91_376_254;
 /// down to just the pill's rect — the crate's own `radius` argument then
 /// rounds that smaller rect correctly.
 #[cfg(target_os = "macos")]
-fn apply_dock_vibrancy(window: &WebviewWindow, pill_width_dip: f64) -> Result<(), String> {
+fn apply_dock_vibrancy(
+    window: &WebviewWindow,
+    pill_width_dip: f64,
+    pill_height_dip: f64,
+) -> Result<(), String> {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
     // HudWindow stays dark unconditionally (a fixed-style material, not a
@@ -148,7 +251,7 @@ fn apply_dock_vibrancy(window: &WebviewWindow, pill_width_dip: f64) -> Result<()
     )
     .map_err(|e| e.to_string())?;
 
-    set_vibrancy_pill_frame(window, pill_width_dip, PILL_HEIGHT_REST_DIP, None, None)
+    set_vibrancy_pill_frame(window, pill_width_dip, pill_height_dip, None, None)
 }
 
 /// Resizes the masked vibrancy blur view to the given pill footprint.
@@ -199,17 +302,20 @@ fn set_vibrancy_pill_frame(
     Ok(())
 }
 
-/// Sizes the window to `target_content_width` (inner DIP) and anchors it
-/// to the bottom-center of the primary monitor — same geometry as
-/// `setup_dock_window`. Always updates position even when width is
-/// unchanged, so a prior resize that grew right without recentering is
-/// corrected on the next call. Uses inner size for both `set_size` and the
-/// centering math (not `outer_size`) to stay consistent with
-/// `setup_dock_window` and avoid macOS inner/outer drift.
+/// Sizes the window to `target_content_width` × `target_content_height`
+/// (inner DIP) and anchors it to the bottom-center of the primary monitor —
+/// same geometry as `setup_dock_window`. Always updates position even when
+/// the size is unchanged, so a prior resize that grew without recentering
+/// is corrected on the next call — this is what keeps the dock centered on
+/// *every* geometry change (app add/remove, icon-size preset switch alike),
+/// not just the one that happened to change the size. Uses inner size for
+/// both `set_size` and the centering math (not `outer_size`) to stay
+/// consistent with `setup_dock_window` and avoid macOS inner/outer drift.
 #[cfg(target_os = "macos")]
 fn apply_dock_window_frame(
     window: &WebviewWindow,
     target_content_width: f64,
+    target_content_height: f64,
 ) -> Result<bool, String> {
     let monitor = window
         .primary_monitor()
@@ -222,12 +328,14 @@ fn apply_dock_window_frame(
 
     let inner = window.inner_size().map_err(|e| e.to_string())?;
     let current_width = inner.width as f64 / scale;
-    let width_changed = (current_width - target_content_width).abs() >= 0.5;
+    let current_height = inner.height as f64 / scale;
+    let size_changed = (current_width - target_content_width).abs() >= 0.5
+        || (current_height - target_content_height).abs() >= 0.5;
 
     let width_px = (target_content_width * scale).round() as i32;
-    let height_px = (WINDOW_HEIGHT_DIP * scale).round() as i32;
+    let height_px = (target_content_height * scale).round() as i32;
 
-    if width_changed {
+    if size_changed {
         window
             .set_size(PhysicalSize::new(width_px as u32, height_px as u32))
             .map_err(|e| e.to_string())?;
@@ -240,15 +348,16 @@ fn apply_dock_window_frame(
         ))
         .map_err(|e| e.to_string())?;
 
-    Ok(width_changed)
+    Ok(size_changed)
 }
 
 /// Dispatches `apply_dock_window_frame` onto the main thread — window
 /// frame mutations must not run from the Tauri command threadpool.
 #[cfg(target_os = "macos")]
-fn set_window_width_instant(
+fn set_window_frame_instant(
     window: &WebviewWindow,
     target_content_width: f64,
+    target_content_height: f64,
 ) -> Result<bool, String> {
     let window = window.clone();
     let window_for_closure = window.clone();
@@ -258,42 +367,62 @@ fn set_window_width_instant(
             let _ = tx.send(apply_dock_window_frame(
                 &window_for_closure,
                 target_content_width,
+                target_content_height,
             ));
         })
         .map_err(|e| e.to_string())?;
 
     rx.recv()
-        .map_err(|_| "set_window_width_instant did not complete".to_string())?
+        .map_err(|_| "set_window_frame_instant did not complete".to_string())?
 }
 
-/// Resizes the native window inner width to fit `pill_width` (pill +
-/// magnify overflow + glow bleed). Does not touch the vibrancy mask — call
+/// Resizes the native window inner size to fit `pill_width` × `pill_height`
+/// (pill + magnify overflow + glow bleed / top reserve), re-centering it in
+/// the same call. Does not touch the vibrancy mask — call
 /// `sync_vibrancy_pill_from_web` afterwards once the WebView has laid out.
 #[cfg(target_os = "macos")]
 pub fn resize_dock_window_for_pill(
     window: &WebviewWindow,
     pill_width: f64,
+    pill_height: f64,
 ) -> Result<bool, String> {
-    let changed = set_window_width_instant(window, window_width_dip(pill_width))?;
+    let icon_size_dip = current_icon_size_dip(window);
+    let target_width = window_width_dip(pill_width, icon_size_dip);
+    let target_height = window_height_dip(pill_height, icon_size_dip);
+    let changed = set_window_frame_instant(window, target_width, target_height)?;
 
     let state = window.state::<AppsState>();
-    let mut current_width = state
-        .pill_width_dip
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *current_width = pill_width;
+    {
+        let mut current_width = state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_width = pill_width;
+    }
+    {
+        let mut current_height = state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_height = pill_height;
+    }
 
     Ok(changed)
 }
 
 /// Formula-based resize when the DOM has not measured yet — used from
-/// `add_app_from_path` / `remove_app` as a belt-and-suspenders path.
+/// `add_app_from_path` / `remove_app` (app count changed) and from
+/// `update_dock_settings` (icon-size preset changed) as a belt-and-
+/// suspenders path ahead of the frontend's own measured-DOM resize.
 #[cfg(target_os = "macos")]
 pub fn resize_dock_window_for_app_count(
     window: &WebviewWindow,
     app_count: usize,
 ) -> Result<bool, String> {
-    resize_dock_window_for_pill(window, pill_width_dip(app_count))
+    let icon_size_dip = current_icon_size_dip(window);
+    let pill_width = pill_width_dip(app_count, icon_size_dip);
+    let pill_height = size_metrics(icon_size_dip).pill_height_dip;
+    resize_dock_window_for_pill(window, pill_width, pill_height)
 }
 
 /// Aligns the masked vibrancy blur view to the pill's measured DOM rect.
@@ -310,11 +439,20 @@ pub fn sync_vibrancy_pill_from_web(
     set_vibrancy_pill_frame(window, width, height, Some(x), Some(y))?;
 
     let state = window.state::<AppsState>();
-    let mut current_width = state
-        .pill_width_dip
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *current_width = width;
+    {
+        let mut current_width = state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_width = width;
+    }
+    {
+        let mut current_height = state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current_height = height;
+    }
 
     // Idempotent — deferred from `setup_dock_window` so the first paint
     // already has a DOM-aligned vibrancy mask.
@@ -324,7 +462,11 @@ pub fn sync_vibrancy_pill_from_web(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn apply_dock_vibrancy(_window: &WebviewWindow, _pill_width_dip: f64) -> Result<(), String> {
+fn apply_dock_vibrancy(
+    _window: &WebviewWindow,
+    _pill_width_dip: f64,
+    _pill_height_dip: f64,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -419,6 +561,21 @@ fn pill_cursor_at_screen(
         x: (screen_x - outer_pos.x) as f64 / scale,
         y: (screen_y - outer_pos.y) as f64 / scale,
     })
+}
+
+/// Reads the pill's current *rest* height from `AppsState` (mutated by
+/// `setup_dock_window`/`resize_dock_window_for_pill`/
+/// `sync_vibrancy_pill_from_web`) — same "state, not compile-time constant"
+/// rationale as `pill_cursor_at_screen`'s own width read, generalized to
+/// height now that it varies by icon-size preset too.
+#[cfg(target_os = "macos")]
+fn current_pill_height_rest_dip(window: &WebviewWindow) -> f64 {
+    let state = window.state::<AppsState>();
+    let guard = state
+        .pill_height_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard
 }
 
 /// Converts a screen-space point to this window's logical (DIP) coordinates,
@@ -529,11 +686,15 @@ fn start_dock_click_tap(window: WebviewWindow) {
                             if let Ok(cursor) = window.cursor_position() {
                                 let cursor_x = cursor.x.round() as i32;
                                 let cursor_y = cursor.y.round() as i32;
+                                let pill_height_rest_dip = current_pill_height_rest_dip(&window);
+                                let icon_size_dip = current_icon_size_dip(&window);
+                                let pill_height_hover =
+                                    pill_height_hover_dip(pill_height_rest_dip, icon_size_dip);
                                 if let Some(payload) = pill_cursor_at_screen(
                                     &window,
                                     cursor_x,
                                     cursor_y,
-                                    PILL_HEIGHT_HOVER_DIP,
+                                    pill_height_hover,
                                 ) {
                                     let _ = window.emit("dock-click", payload);
                                 }
@@ -617,6 +778,8 @@ fn start_click_through_poller(window: WebviewWindow) {
                 *guard
             };
 
+            let pill_height_rest_dip = current_pill_height_rest_dip(&window);
+
             // While a `DockIcon` context menu is open, the hit-test rect has
             // to reach all the way up through it — the menu can render much
             // taller than the fixed magnify-overflow band below, and any
@@ -624,11 +787,11 @@ fn start_click_through_poller(window: WebviewWindow) {
             // the cursor before it reaches the upper menu rows, making them
             // permanently unreachable (see `AppsState::menu_overlay_height_dip`).
             let pill_h_dip = if menu_overlay_height_dip > 0.0 {
-                PILL_HEIGHT_REST_DIP + MENU_OVERLAY_GAP_DIP + menu_overlay_height_dip
+                pill_height_rest_dip + MENU_OVERLAY_GAP_DIP + menu_overlay_height_dip
             } else if dock_hovered {
-                PILL_HEIGHT_HOVER_DIP
+                pill_height_hover_dip(pill_height_rest_dip, current_icon_size_dip(&window))
             } else {
-                PILL_HEIGHT_REST_DIP
+                pill_height_rest_dip
             };
             let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y, pill_h_dip);
             let in_pill = pill_cursor.is_some();

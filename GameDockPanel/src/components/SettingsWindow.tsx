@@ -1,12 +1,18 @@
-import { useCallback, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { SlidersHorizontal } from "lucide-react";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
   BACKGROUND_PRESETS,
   BORDER_STYLE_PRESETS,
+  ICON_SIZE_PRESETS,
+  ICON_SIZE_MAX_PX,
+  ICON_SIZE_MIN_PX,
   PANEL_EFFECT_PRESETS,
+  clampIconSizePx,
   type BackgroundPreset,
   type BorderStylePreset,
+  type IconSizePreset,
   type PanelEffectPreset,
 } from "../lib/constants";
 import type { DockSettings } from "../lib/types";
@@ -112,7 +118,7 @@ function StylePresetButton({
   disabled,
   onSelect,
 }: {
-  preset: BorderStylePreset | PanelEffectPreset;
+  preset: BorderStylePreset | PanelEffectPreset | IconSizePreset;
   selected: boolean;
   disabled?: boolean;
   onSelect: () => void;
@@ -138,10 +144,12 @@ function StylePresetButton({
 function SettingsRow({
   title,
   description,
+  descriptionClassName = "max-w-xs",
   children,
 }: {
   title: string;
   description?: string;
+  descriptionClassName?: string;
   children: ReactNode;
 }) {
   return (
@@ -149,7 +157,9 @@ function SettingsRow({
       <div>
         <p className="text-sm font-medium text-zinc-200">{title}</p>
         {description && (
-          <p className="mt-0.5 max-w-xs text-xs text-zinc-500">{description}</p>
+          <p className={`mt-0.5 text-xs text-zinc-500 ${descriptionClassName}`}>
+            {description}
+          </p>
         )}
       </div>
       <div className="shrink-0">{children}</div>
@@ -162,6 +172,21 @@ const colorInputClass =
 
 export function SettingsWindow() {
   const { settings, commit } = useDockSettings();
+  const [sliderIconSizePx, setSliderIconSizePx] = useState(settings.iconSizePx);
+  const previewRafRef = useRef(0);
+  const persistSizeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  useEffect(() => {
+    setSliderIconSizePx(settings.iconSizePx);
+  }, [settings.iconSizePx]);
+
+  useEffect(
+    () => () => {
+      if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current);
+      clearTimeout(persistSizeTimerRef.current);
+    },
+    [],
+  );
 
   const update = useCallback(
     (patch: Partial<DockSettings>) => {
@@ -169,6 +194,40 @@ export function SettingsWindow() {
     },
     [settings, commit],
   );
+
+  const queueIconSizePreview = useCallback((px: number) => {
+    if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current);
+    previewRafRef.current = requestAnimationFrame(() => {
+      previewRafRef.current = 0;
+      void invoke("preview_dock_icon_size", { iconSizePx: px });
+    });
+  }, []);
+
+  const persistIconSize = useCallback(
+    (px: number, presetId?: string) => {
+      const patch: Partial<DockSettings> = { iconSizePx: px };
+      if (presetId) patch.iconSizePreset = presetId;
+      update(patch);
+    },
+    [update],
+  );
+
+  const handleIconSizeSliderChange = useCallback(
+    (px: number) => {
+      setSliderIconSizePx(px);
+      queueIconSizePreview(px);
+      clearTimeout(persistSizeTimerRef.current);
+      persistSizeTimerRef.current = setTimeout(() => {
+        persistIconSize(px);
+      }, 200);
+    },
+    [queueIconSizePreview, persistIconSize],
+  );
+
+  const handleIconSizeSliderRelease = useCallback(() => {
+    clearTimeout(persistSizeTimerRef.current);
+    persistIconSize(sliderIconSizePx);
+  }, [persistIconSize, sliderIconSizePx]);
 
   const updateGlowColor = useCallback(
     (index: number, value: string) => {
@@ -194,6 +253,57 @@ export function SettingsWindow() {
       </header>
 
       <section className="divide-y divide-zinc-800 rounded-xl border border-zinc-800 bg-zinc-900/60 px-4">
+        <SettingsRow
+          title="Размер иконок"
+          descriptionClassName="max-w-sm"
+          description="Ползунок и пресеты меняют размер иконок, отступы и высоту панели согласованно; окно остаётся по центру экрана."
+        >
+          <div className="flex w-full max-w-[280px] flex-col items-end gap-3">
+            <div className="w-full">
+              <div className="mb-1.5 flex justify-between text-[10px] text-zinc-500">
+                <span>Компакт</span>
+                <span>Крупный</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={ICON_SIZE_MIN_PX}
+                  max={ICON_SIZE_MAX_PX}
+                  step={1}
+                  value={sliderIconSizePx}
+                  onChange={(event) =>
+                    handleIconSizeSliderChange(
+                      clampIconSizePx(Number(event.target.value)),
+                    )
+                  }
+                  onPointerUp={handleIconSizeSliderRelease}
+                  onKeyUp={handleIconSizeSliderRelease}
+                  className="w-full accent-indigo-500"
+                  aria-label="Размер иконок"
+                />
+                <span className="w-10 shrink-0 text-right text-xs tabular-nums text-zinc-400">
+                  {sliderIconSizePx}px
+                </span>
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {ICON_SIZE_PRESETS.map((preset) => (
+                <StylePresetButton
+                  key={preset.id}
+                  preset={preset}
+                  selected={sliderIconSizePx === preset.iconSizePx}
+                  onSelect={() => {
+                    setSliderIconSizePx(preset.iconSizePx);
+                    queueIconSizePreview(preset.iconSizePx);
+                    clearTimeout(persistSizeTimerRef.current);
+                    persistIconSize(preset.iconSizePx, preset.id);
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        </SettingsRow>
+
         <SettingsRow
           title="Анимации рамки"
           description="Переливающаяся RGB-рамка и пульсация LED — увеличение иконок при наведении и перетаскивание не затрагиваются."

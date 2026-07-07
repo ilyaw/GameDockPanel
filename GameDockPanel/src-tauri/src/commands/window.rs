@@ -3,15 +3,16 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use crate::commands::apps::AppsState;
 use crate::platform;
 
-/// Resizes the native window to fit the measured pill width (inner size +
-/// magnify/glow margins). Call before `sync_vibrancy_pill` when the pill
-/// width may have changed — then re-measure the DOM after layout settles.
+/// Resizes the native window to fit the measured pill width/height (inner
+/// size + magnify/glow margins), re-centering it in the same call. Call
+/// before `sync_vibrancy_pill` when the pill size may have changed — then
+/// re-measure the DOM after layout settles.
 #[tauri::command]
-pub fn resize_dock_window(app: AppHandle, pill_width: f64) -> Result<bool, String> {
+pub fn resize_dock_window(app: AppHandle, pill_width: f64, pill_height: f64) -> Result<bool, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-    platform::resize_dock_window_for_pill(&window, pill_width)
+    platform::resize_dock_window_for_pill(&window, pill_width, pill_height)
 }
 
 /// Aligns the native vibrancy blur mask to the pill's measured DOM box.
@@ -61,8 +62,8 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     // picks the UI to render from `getCurrentWebviewWindow().label`.
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("GameDockPanel — Настройки")
-        .inner_size(480.0, 680.0)
-        .min_inner_size(400.0, 480.0)
+        .inner_size(560.0, 680.0)
+        .min_inner_size(480.0, 480.0)
         .resizable(true)
         .decorations(true)
         .build()

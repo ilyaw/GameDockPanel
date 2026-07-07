@@ -84,4 +84,10 @@ export interface DockSettings {
   /** 0..1 — flow speed; mapped to an animation duration via
    * `backgroundSpeedToDurationS`. */
   backgroundSpeed: number;
+  /** Id into `ICON_SIZE_PRESETS` (constants.ts) — quick snap buttons in
+   * settings; geometry itself is driven by `iconSizePx`. */
+  iconSizePreset: string;
+  /** Icon edge length in logical px (44–72) — single input every dock layout
+   * number derives from via `getSizeMetrics`. */
+  iconSizePx: number;
 }

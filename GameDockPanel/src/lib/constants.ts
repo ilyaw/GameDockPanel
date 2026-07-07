@@ -3,43 +3,117 @@ import type { DockSettings } from "./types";
 /**
  * Dock layout numbers — single source of truth for JS magnify math and for
  * keeping Rust window sizing / hit-testing (platform/macos.rs) in sync.
+ * Everything that scales with icon size flows through `getSizeMetrics`
+ * (fed by `DockSettings.iconSizePx`) instead of being a fixed module-level
+ * constant.
  */
 
-/** Mirrors `h-14 w-14` on the icon image/fallback badge. */
-export const ICON_SIZE_PX = 56;
+/** Continuous icon-size slider bounds — presets snap to the endpoints and middle. */
+export const ICON_SIZE_MIN_PX = 44;
+export const ICON_SIZE_MAX_PX = 72;
+export const DEFAULT_ICON_SIZE_PX = 56;
 
-/** Mirrors `gap-2` between icons in the dock pill. */
-export const DOCK_GAP_PX = 8;
+/** macOS-like squircle proportion — scales with `iconSizePx` so compact icons
+ * don't keep an oversized fixed corner radius that looks soft/blurry. */
+export const ICON_CORNER_RADIUS_RATIO = 0.22;
 
-/** Mirrors `px-5` on the dock pill. */
-export const DOCK_PADDING_X_PX = 20;
+/**
+ * Selectable icon sizes — `id` round-trips through
+ * `DockSettings.iconSizePreset`; `iconSizePx` is the single number
+ * `getSizeMetrics` scales every other layout value from. `medium` (56) is
+ * the original fixed size this dock shipped with, kept as the default so
+ * existing installs don't visually change until the user picks another one.
+ */
+export interface IconSizePreset {
+  id: string;
+  label: string;
+  /** Matches `BorderStylePreset`/`PanelEffectPreset`'s shape so the settings
+   * UI can reuse the same `StylePresetButton` for all three preset rows. */
+  description: string;
+  iconSizePx: number;
+}
 
-/** Mirrors `py-3` on the dock pill (rest vertical padding). */
-export const DOCK_PADDING_Y_PX = 12;
+export const ICON_SIZE_PRESETS: IconSizePreset[] = [
+  {
+    id: "small",
+    label: "Компакт",
+    description: "Маленькие иконки — более компактная и плотная панель.",
+    iconSizePx: 44,
+  },
+  {
+    id: "medium",
+    label: "Стандарт",
+    description: "Исходный размер панели.",
+    iconSizePx: 56,
+  },
+  {
+    id: "large",
+    label: "Крупный",
+    description: "Крупные иконки — просторнее и проще попасть курсором.",
+    iconSizePx: 72,
+  },
+];
 
-/** Upper bound for hover-magnify scale (`origin-bottom` on the icon). */
+/** Falls back to `medium` for an unrecognized id — same "future config,
+ * older build" guard as `getBackgroundPreset`. */
+export function getIconSizePreset(id: string): IconSizePreset {
+  return ICON_SIZE_PRESETS.find((preset) => preset.id === id) ?? ICON_SIZE_PRESETS[1];
+}
+
+/** Maps a legacy preset id to its canonical px — used when loading older
+ * `dock-settings.json` files that predate `iconSizePx`. */
+export function iconSizePxFromPreset(id: string): number {
+  return getIconSizePreset(id).iconSizePx;
+}
+
+/** Clamps a raw slider/commit value into the allowed icon-size range. */
+export function clampIconSizePx(px: number): number {
+  return Math.round(Math.min(ICON_SIZE_MAX_PX, Math.max(ICON_SIZE_MIN_PX, px)));
+}
+
+/** Reference icon size the scale-dependent constants below were originally
+ * tuned against (the dock's pre-preset fixed size) — `getSizeMetrics`
+ * scales them by `iconSizePx / BASE_ICON_SIZE_PX`. */
+const BASE_ICON_SIZE_PX = 56;
+/** Mirrors the original `gap-2` between icons in the dock pill. */
+const BASE_DOCK_GAP_PX = 8;
+/** Mirrors the original `px-5` on the dock pill. */
+const BASE_DOCK_PADDING_X_PX = 20;
+/** Mirrors the original `py-3` on the dock pill (rest vertical padding). */
+const BASE_DOCK_PADDING_Y_PX = 12;
+/** Mirrors the original `gap-2` between icon and LED. */
+const BASE_ICON_LED_GAP_PX = 8;
+
+/**
+ * Upper bound for hover-magnify scale (`origin-bottom` on the icon) — a
+ * ratio, not a pixel value, so it applies unchanged at every preset. The
+ * *pixel* amplitude it produces (`magnifyHeightOverflowPx` in
+ * `SizeMetrics`) already scales on its own because it multiplies against
+ * `iconSizePx`, so this doesn't need its own per-preset value.
+ */
 export const MAGNIFY_MAX_SCALE = 1.4;
 
-/** How far a peak-magnified icon grows above its rest top (`origin-bottom`). */
-export const MAGNIFY_HEIGHT_OVERFLOW_PX = Math.ceil(
-  ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1),
-);
-
-/** Mirrors `pb-2` — gap between pill and the window bottom edge. */
+/**
+ * Fixed across every icon-size preset — like the real macOS Dock, whose
+ * own size slider doesn't change the pill's corner shape, its margin to
+ * the screen edge, glow bleed, divider thickness, or the LED indicator
+ * (already independent of `ICON_SIZE_PX` before presets existed), only the
+ * icon content. Tooltip/context-menu row heights are fixed for the same
+ * reason as LED size: their font size doesn't scale with icon size.
+ */
 export const DOCK_BOTTOM_INSET_PX = 8;
-
-/** Mirrors `gap-2` between icon and LED. */
-export const ICON_LED_GAP_PX = 8;
-
-/** LED bar height (`h-[3px]`). */
 export const LED_HEIGHT_PX = 3;
-
+/** Mirrors the vertical divider between the app icons and the settings
+ * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
+export const DOCK_DIVIDER_WIDTH_PX = 9;
+/** Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx). */
+export const PILL_CORNER_RADIUS_PX = 28;
+/** Horizontal glow bleed (~14px box-shadow each side). */
+export const WINDOW_GLOW_BLEED_PX = 32;
 /** Gap between tooltip/menu bottom edge and icon top (`margin-bottom` on both). */
 export const TOOLTIP_GAP_PX = 16;
-
 /** Approximate rendered height of the hover name tooltip (`text-xs` + `py-1`). */
 export const TOOLTIP_HEIGHT_PX = 28;
-
 /**
  * Approximate rendered height of one context-menu row (`DockIcon.tsx`) —
  * `text-xs` row with an icon, `py-1.5` (taller than the tooltip's `py-1`).
@@ -48,27 +122,17 @@ export const TOOLTIP_HEIGHT_PX = 28;
  * with no visible error (see `CONTEXT_MENU_HEIGHT_PX`).
  */
 export const CONTEXT_MENU_ROW_HEIGHT_PX = 30;
-
 /** Thin `h-px` divider above Quit (only rendered while the app is running). */
 export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
-
 /**
  * Tallest the icon context menu ever gets: Show in Finder + Remove from Dock
  * + divider + Quit (Quit and the divider only render while the app is
- * running). Must be
- * accounted for in `PILL_TOP_RESERVE_PX` same as the tooltip — the menu
- * renders `bottom-full` off the same anchor, and the window has no scroll,
- * so anything past its fixed height is simply not drawn.
+ * running). Must be accounted for in `pillTopReservePx` same as the
+ * tooltip — the menu renders `bottom-full` off the same anchor, and the
+ * window has no scroll, so anything past its height is simply not drawn.
  */
 export const CONTEXT_MENU_HEIGHT_PX =
   CONTEXT_MENU_ROW_HEIGHT_PX * 3 + CONTEXT_MENU_DIVIDER_HEIGHT_PX;
-
-/**
- * Cursor-to-icon-center distance (px, viewport coords) beyond which magnify
- * falls back to rest scale (1). Spans roughly two neighboring icons on each
- * side of the one closest to the cursor.
- */
-export const MAGNIFY_INFLUENCE_RADIUS_PX = (ICON_SIZE_PX + DOCK_GAP_PX) * 2;
 
 /**
  * Soft ceiling on total dock entries (seeded + manually added) — mirrors
@@ -77,73 +141,109 @@ export const MAGNIFY_INFLUENCE_RADIUS_PX = (ICON_SIZE_PX + DOCK_GAP_PX) * 2;
  */
 export const MAX_APPS = 15;
 
-/** Pill outer height at rest: py + icon + gap + LED — fixed; magnify overflows above. */
-export const PILL_HEIGHT_PX =
-  DOCK_PADDING_Y_PX * 2 + ICON_SIZE_PX + ICON_LED_GAP_PX + LED_HEIGHT_PX;
-
-/** Native hit-test band above the fixed pill (magnify overflow, not CSS pill height). */
-export const PILL_HEIGHT_HOVER_PX =
-  PILL_HEIGHT_PX + MAGNIFY_HEIGHT_OVERFLOW_PX;
-
 /**
- * Transparent band above the fixed pill inside the window — big enough for
- * whichever thing currently pokes highest above the pill: a magnified icon,
- * the hover tooltip, or the (taller) context menu. These never show at the
- * same time (menu replaces tooltip; magnify is suppressed while the menu is
- * open — see `isHovered || menuOpen` / dragging guards in `DockIcon.tsx`),
- * so `max`, not a sum, is the right combinator — summing would reserve far
- * more transparent dead space above the dock than anything ever needs.
+ * Every dock layout number that DOES depend on icon size, computed from one
+ * input by `getSizeMetrics`. Kept as one object (instead of a dozen loose
+ * module-level consts, as before presets existed) so Rust's `size_metrics`
+ * in `platform/macos.rs` can mirror it field-for-field.
  */
-export const PILL_TOP_RESERVE_PX =
-  Math.max(
-    MAGNIFY_HEIGHT_OVERFLOW_PX,
-    TOOLTIP_GAP_PX + TOOLTIP_HEIGHT_PX,
-    TOOLTIP_GAP_PX + CONTEXT_MENU_HEIGHT_PX,
-  ) - DOCK_PADDING_Y_PX;
+export interface SizeMetrics {
+  iconSizePx: number;
+  /** Proportional squircle radius for app icons and the settings gear slot. */
+  iconCornerRadiusPx: number;
+  dockGapPx: number;
+  dockPaddingXPx: number;
+  dockPaddingYPx: number;
+  iconLedGapPx: number;
+  /** How far a peak-magnified icon grows above its rest top (`origin-bottom`). */
+  magnifyHeightOverflowPx: number;
+  /** Cursor-to-icon-center distance (px, viewport coords) beyond which
+   * magnify falls back to rest scale (1). Spans roughly two neighboring
+   * icons on each side of the one closest to the cursor. */
+  magnifyInfluenceRadiusPx: number;
+  /** Pill outer height at rest: py + icon + gap + LED; magnify overflows above. */
+  pillHeightPx: number;
+  /** Native hit-test band above the pill (magnify overflow, not CSS pill height). */
+  pillHeightHoverPx: number;
+  /**
+   * Transparent band above the pill inside the window — big enough for
+   * whichever thing currently pokes highest above it: a magnified icon,
+   * the hover tooltip, or the (taller) context menu. These never show at
+   * the same time (menu replaces tooltip; magnify is suppressed while the
+   * menu is open), so `max`, not a sum, is the right combinator.
+   */
+  pillTopReservePx: number;
+  /** Tauri window logical height — keep in sync with `window_height_dip`
+   * in src-tauri/src/platform/macos.rs and tauri.conf.json. */
+  windowHeightDip: number;
+}
+
+export function getSizeMetrics(iconSizePx: number): SizeMetrics {
+  const scale = iconSizePx / BASE_ICON_SIZE_PX;
+  const dockGapPx = BASE_DOCK_GAP_PX * scale;
+  const dockPaddingXPx = BASE_DOCK_PADDING_X_PX * scale;
+  const dockPaddingYPx = BASE_DOCK_PADDING_Y_PX * scale;
+  const iconLedGapPx = BASE_ICON_LED_GAP_PX * scale;
+
+  const magnifyHeightOverflowPx = iconSizePx * (MAGNIFY_MAX_SCALE - 1);
+  const magnifyInfluenceRadiusPx = (iconSizePx + dockGapPx) * 2;
+
+  const pillHeightPx = dockPaddingYPx * 2 + iconSizePx + iconLedGapPx + LED_HEIGHT_PX;
+  const pillHeightHoverPx = pillHeightPx + magnifyHeightOverflowPx;
+
+  const pillTopReservePx =
+    Math.max(
+      magnifyHeightOverflowPx,
+      TOOLTIP_GAP_PX + TOOLTIP_HEIGHT_PX,
+      TOOLTIP_GAP_PX + CONTEXT_MENU_HEIGHT_PX,
+    ) - dockPaddingYPx;
+
+  const windowHeightDip = DOCK_BOTTOM_INSET_PX + pillHeightPx + pillTopReservePx;
+
+  return {
+    iconSizePx,
+    iconCornerRadiusPx: iconSizePx * ICON_CORNER_RADIUS_RATIO,
+    dockGapPx,
+    dockPaddingXPx,
+    dockPaddingYPx,
+    iconLedGapPx,
+    magnifyHeightOverflowPx,
+    magnifyInfluenceRadiusPx,
+    pillHeightPx,
+    pillHeightHoverPx,
+    pillTopReservePx,
+    windowHeightDip,
+  };
+}
 
 /**
- * Tauri window logical size — keep in sync with `WINDOW_HEIGHT_DIP` in
- * src-tauri/src/platform/macos.rs and tauri.conf.json. Height never depends
- * on app count — only width does (see `pillWidthPx`/`windowWidthDip` below).
- */
-export const WINDOW_HEIGHT_DIP =
-  DOCK_BOTTOM_INSET_PX + PILL_HEIGHT_PX + PILL_TOP_RESERVE_PX;
-
-/** Horizontal glow bleed (~14px box-shadow each side). */
-export const WINDOW_GLOW_BLEED_PX = 32;
-
-/** Mirrors the vertical divider between the app icons and the settings
- * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
-export const DOCK_DIVIDER_WIDTH_PX = 9;
-
-/**
- * Pill outer width at rest for `appCount` icons (padding + icons + gaps) —
- * the CSS pill itself is content-driven (no explicit width is ever set in
- * JSX, flex sizes it from its children), so nothing in the frontend
- * actually calls this at runtime. It exists purely as the documented
- * formula that `pill_width_dip`/`window_width_dip` in
+ * Pill outer width at rest for `appCount` icons at the given icon size
+ * (padding + icons + gaps) — the CSS pill itself is content-driven (no
+ * explicit width is ever set in JSX, flex sizes it from its children), so
+ * nothing in the frontend actually calls this at runtime. It exists purely
+ * as the documented formula that `pill_width_dip`/`window_width_dip` in
  * src-tauri/src/platform/macos.rs mirror for native window/vibrancy/
- * hit-test sizing — kept here, parametrized by count instead of a fixed
- * `APP_COUNT`, so the two sides stay provably in sync. The actual
+ * hit-test sizing — kept here, parametrized by count and icon size instead
+ * of fixed constants, so the two sides stay provably in sync. The actual
  * on-screen pill's vibrancy blur mask is independently corrected from the
  * measured DOM rect at runtime (see `sync_vibrancy_pill` /
  * `commands/window.rs`) — this formula only has to get the *native window
  * frame* wide enough to avoid clipping it.
  */
-export function pillWidthPx(appCount: number): number {
-  const appsWidth =
-    appCount * ICON_SIZE_PX + (appCount - 1) * DOCK_GAP_PX;
+export function pillWidthPx(appCount: number, iconSizePx: number): number {
+  const metrics = getSizeMetrics(iconSizePx);
+  const appsWidth = appCount * iconSizePx + (appCount - 1) * metrics.dockGapPx;
   // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
   const settingsSlot =
-    DOCK_GAP_PX + DOCK_DIVIDER_WIDTH_PX + DOCK_GAP_PX + ICON_SIZE_PX;
-  return DOCK_PADDING_X_PX * 2 + appsWidth + settingsSlot;
+    metrics.dockGapPx + DOCK_DIVIDER_WIDTH_PX + metrics.dockGapPx + iconSizePx;
+  return metrics.dockPaddingXPx * 2 + appsWidth + settingsSlot;
 }
 
 /** See `pillWidthPx` — same "documented formula, not called at runtime" note. */
-export function windowWidthDip(appCount: number): number {
+export function windowWidthDip(appCount: number, iconSizePx: number): number {
   return (
-    pillWidthPx(appCount) +
-    Math.ceil(ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1)) +
+    pillWidthPx(appCount, iconSizePx) +
+    Math.ceil(iconSizePx * (MAGNIFY_MAX_SCALE - 1)) +
     WINDOW_GLOW_BLEED_PX
   );
 }
@@ -353,4 +453,6 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   backgroundIntensity: 0.7,
   backgroundVisibility: 0.45,
   backgroundSpeed: 0.4,
+  iconSizePreset: "medium",
+  iconSizePx: DEFAULT_ICON_SIZE_PX,
 };

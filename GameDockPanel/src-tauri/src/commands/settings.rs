@@ -51,6 +51,53 @@ pub struct DockSettings {
     /// 0.0..=1.0 — flow speed, mapped to an animation duration on the
     /// frontend.
     pub background_speed: f64,
+    /// Id into the frontend's `ICON_SIZE_PRESETS` table (constants.ts) —
+    /// the single input every dock layout number derives from
+    /// (`getSizeMetrics` on the frontend, `size_metrics` in
+    /// `platform::macos`). Same "id-only, frontend owns the fallback"
+    /// pattern as `background_preset`, except this id is also read on the
+    /// Rust side (`icon_size_dip_for_preset`) to compute window geometry
+    /// before the DOM has measured anything (startup, add/remove fallback).
+    /// `#[serde(default)]` — unlike every other field here, this one is new
+    /// in a version that shipped after users could already have a
+    /// `dock-settings.json` on disk without it; without a default, that
+    /// missing field would fail deserialization of the *entire* file and
+    /// silently reset every other already-customized setting back to
+    /// defaults too (see `load_or_default_settings`'s corrupt-file path).
+    #[serde(default = "default_icon_size_preset")]
+    pub icon_size_preset: String,
+    /// Continuous icon edge length in logical px (44–72) — the single input
+    /// every dock layout number derives from (`getSizeMetrics` on the frontend,
+    /// `size_metrics` in `platform::macos`). Read on the Rust side to compute
+    /// window geometry before the DOM has measured anything.
+    /// `#[serde(default)]` — configs written before this field existed only
+    /// had `icon_size_preset`; `load_or_default_settings` back-fills from
+    /// that id when `iconSizePx` is absent in the JSON.
+    #[serde(default = "default_icon_size_px")]
+    pub icon_size_px: f64,
+}
+
+fn default_icon_size_preset() -> String {
+    "medium".to_string()
+}
+
+fn default_icon_size_px() -> f64 {
+    56.0
+}
+
+const ICON_SIZE_MIN_PX: f64 = 44.0;
+const ICON_SIZE_MAX_PX: f64 = 72.0;
+
+fn icon_size_px_from_preset(preset: &str) -> f64 {
+    match preset {
+        "small" => 44.0,
+        "large" => 72.0,
+        _ => 56.0,
+    }
+}
+
+fn clamp_icon_size_px(px: f64) -> f64 {
+    px.round().clamp(ICON_SIZE_MIN_PX, ICON_SIZE_MAX_PX)
 }
 
 impl Default for DockSettings {
@@ -74,6 +121,8 @@ impl Default for DockSettings {
             background_intensity: 0.7,
             background_visibility: 0.45,
             background_speed: 0.4,
+            icon_size_preset: "medium".to_string(),
+            icon_size_px: 56.0,
         }
     }
 }
@@ -96,14 +145,23 @@ fn load_or_default_settings(app: &AppHandle) -> Result<DockSettings, String> {
     let path = config_file_path(app)?;
 
     if let Ok(contents) = std::fs::read_to_string(&path) {
-        match serde_json::from_str::<DockSettings>(&contents) {
-            Ok(settings) => return Ok(settings),
-            Err(err) => {
-                eprintln!(
-                    "GameDockPanel: {} is corrupt ({err}), resetting to defaults",
-                    path.display()
-                );
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Ok(mut settings) = serde_json::from_value::<DockSettings>(value.clone()) {
+                if value.get("iconSizePx").is_none() {
+                    settings.icon_size_px = icon_size_px_from_preset(&settings.icon_size_preset);
+                }
+                settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
+                return Ok(settings);
             }
+            eprintln!(
+                "GameDockPanel: {} is corrupt (invalid dock settings), resetting to defaults",
+                path.display()
+            );
+        } else {
+            eprintln!(
+                "GameDockPanel: {} is corrupt (invalid JSON), resetting to defaults",
+                path.display()
+            );
         }
     }
 
@@ -154,6 +212,7 @@ pub fn update_dock_settings(
     settings.background_intensity = settings.background_intensity.clamp(0.0, 1.0);
     settings.background_visibility = settings.background_visibility.clamp(0.0, 1.0);
     settings.background_speed = settings.background_speed.clamp(0.0, 1.0);
+    settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
 
     let path = config_file_path(&app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;
@@ -166,6 +225,21 @@ pub fn update_dock_settings(
         *guard = settings.clone();
     }
 
+    // Window geometry during icon-size changes is driven by the dock
+    // webview's measured DOM + spring animation (ResizeObserver →
+    // `resize_dock_window`), not a formula snap here — an immediate native
+    // resize would fight the CSS transition and look like a jump.
+
     let _ = app.emit("dock-settings-changed", settings);
+    Ok(())
+}
+
+/// Live icon-size preview while the settings slider is dragged — emits only,
+/// no disk write. The dock springs toward this value; `update_dock_settings`
+/// persists the final size on release / debounced commit.
+#[tauri::command]
+pub fn preview_dock_icon_size(app: AppHandle, icon_size_px: f64) -> Result<(), String> {
+    let px = clamp_icon_size_px(icon_size_px);
+    let _ = app.emit("dock-icon-size-preview", px);
     Ok(())
 }

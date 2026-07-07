@@ -23,6 +23,7 @@ pub fn run() {
             commands::window::open_settings,
             commands::settings::get_dock_settings,
             commands::settings::update_dock_settings,
+            commands::settings::preview_dock_icon_size,
         ])
         .setup(|app| {
             // Populate AppsState.entries (persisted list, or first-run seed)

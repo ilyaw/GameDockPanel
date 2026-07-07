@@ -7,15 +7,13 @@ import { DockIcon } from "./DockIcon";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
-  PILL_HEIGHT_PX,
-  ICON_SIZE_PX,
-  MAGNIFY_INFLUENCE_RADIUS_PX,
   MAGNIFY_MAX_SCALE,
   TOOLTIP_GAP_PX,
   getBackgroundPreset,
   backgroundSpeedToDurationS,
   getBorderStylePreset,
   getPanelEffectPreset,
+  getSizeMetrics,
 } from "../lib/constants";
 import type { DockApp } from "../lib/types";
 
@@ -57,6 +55,8 @@ const REJECT_PULSE_MS = 400;
 const SETTLE_DEBOUNCE_MS = 40;
 
 const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
+/** Softer than magnify — panel height/width while dragging the size slider. */
+const ICON_SIZE_SPRING = { mass: 2.2, stiffness: 26, damping: 11 };
 
 interface DockCursorPayload {
   x: number;
@@ -108,7 +108,66 @@ export function DockPanel() {
     showInFinder,
     quitApp,
   } = useDockApps();
-  const { settings } = useDockSettings();
+  const { settings, hydrated } = useDockSettings();
+  const iconSizeMotion = useMotionValue(settings.iconSizePx);
+  const iconSizeAnimated = useSpring(iconSizeMotion, ICON_SIZE_SPRING);
+  const iconSizeSyncedRef = useRef(false);
+  const geometrySyncRafRef = useRef(0);
+  /** Static layout numbers for the first paint — guarantees a non-zero pill
+   * rect before Motion spring values land in the DOM. */
+  const restMetrics = useMemo(
+    () => getSizeMetrics(settings.iconSizePx),
+    [settings.iconSizePx],
+  );
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    if (!iconSizeSyncedRef.current) {
+      iconSizeMotion.jump(settings.iconSizePx);
+      iconSizeSyncedRef.current = true;
+      return;
+    }
+
+    iconSizeMotion.set(settings.iconSizePx);
+  }, [settings.iconSizePx, hydrated, iconSizeMotion]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void listen<number>("dock-icon-size-preview", (event) => {
+      iconSizeMotion.set(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [iconSizeMotion]);
+
+  const pillHeightPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).pillHeightPx);
+  const pillGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
+  const pillPaddingInlinePx = useTransform(
+    iconSizeAnimated,
+    (px) => getSizeMetrics(px).dockPaddingXPx,
+  );
+  const pillPaddingBlockPx = useTransform(
+    iconSizeAnimated,
+    (px) => getSizeMetrics(px).dockPaddingYPx,
+  );
+  const iconRowGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
+  const dividerHeightPx = useTransform(iconSizeAnimated, (px) => px * 0.55);
+  const settingsSlotSizePx = useTransform(iconSizeAnimated, (px) => px);
+  const settingsCornerRadiusPx = useTransform(
+    iconSizeAnimated,
+    (px) => getSizeMetrics(px).iconCornerRadiusPx,
+  );
+  const settingsMagnifyRadiusPx = useTransform(
+    iconSizeAnimated,
+    (px) => getSizeMetrics(px).magnifyInfluenceRadiusPx,
+  );
+  const settingsIconSizePx = useTransform(iconSizeAnimated, (px) => px / 2);
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [isSettingsHovered, setIsSettingsHovered] = useState(false);
   const [hoverSessionId, setHoverSessionId] = useState(0);
@@ -146,7 +205,7 @@ export function DockPanel() {
   const dockHoveredRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
-  const pillRef = useRef<HTMLDivElement>(null);
+  const pillRef = useRef<HTMLDivElement | null>(null);
   const settingsSlotRef = useRef<HTMLDivElement>(null);
   const settingsCenterX = useMotionValue(0);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
@@ -364,13 +423,27 @@ export function DockPanel() {
     const el = pillRef.current;
     if (!el) return;
 
-    let cancelled = false;
+    let alive = true;
+    let measureRetries = 0;
 
     const measurePill = () => el.getBoundingClientRect();
 
-    const syncVibrancyFromDom = async () => {
+    const syncDockGeometry = () => {
+      if (!alive) return;
+
       const rect = measurePill();
-      await invoke("sync_vibrancy_pill", {
+      if ((rect.width < 1 || rect.height < 1) && measureRetries < 12) {
+        measureRetries += 1;
+        requestAnimationFrame(syncDockGeometry);
+        return;
+      }
+      if (rect.width < 1 || rect.height < 1) return;
+
+      void invoke("resize_dock_window", {
+        pillWidth: rect.width,
+        pillHeight: rect.height,
+      });
+      void invoke("sync_vibrancy_pill", {
         x: rect.x,
         y: rect.y,
         width: rect.width,
@@ -378,39 +451,45 @@ export function DockPanel() {
       });
     };
 
-    const syncDockGeometry = async () => {
-      await new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      );
-      if (cancelled) return;
-      const rect = measurePill();
-      await invoke("resize_dock_window", { pillWidth: rect.width });
-      if (cancelled) return;
-      await new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      );
-      if (cancelled) return;
-      await syncVibrancyFromDom();
+    const scheduleGeometrySync = () => {
+      if (geometrySyncRafRef.current) return;
+      geometrySyncRafRef.current = requestAnimationFrame(() => {
+        geometrySyncRafRef.current = 0;
+        syncDockGeometry();
+      });
     };
 
-    void syncDockGeometry();
+    scheduleGeometrySync();
 
     let lastPillWidth = measurePill().width;
+    let lastPillHeight = measurePill().height;
     const observer = new ResizeObserver(() => {
-      const width = measurePill().width;
-      if (Math.abs(width - lastPillWidth) > 0.5) {
-        lastPillWidth = width;
-        void syncDockGeometry();
-      } else {
-        void syncVibrancyFromDom();
+      const rect = measurePill();
+      const widthChanged = Math.abs(rect.width - lastPillWidth) > 0.5;
+      const heightChanged = Math.abs(rect.height - lastPillHeight) > 0.5;
+      if (widthChanged || heightChanged) {
+        lastPillWidth = rect.width;
+        lastPillHeight = rect.height;
+        scheduleGeometrySync();
       }
     });
     observer.observe(el);
+
+    const onIconSizeFrame = () => {
+      scheduleGeometrySync();
+    };
+    const unsubscribeIconSize = iconSizeAnimated.on("change", onIconSizeFrame);
+
     return () => {
-      cancelled = true;
+      alive = false;
+      unsubscribeIconSize();
+      if (geometrySyncRafRef.current) {
+        cancelAnimationFrame(geometrySyncRafRef.current);
+        geometrySyncRafRef.current = 0;
+      }
       observer.disconnect();
     };
-  }, [apps]);
+  }, [apps, iconSizeAnimated]);
 
   useLayoutEffect(() => {
     const el = settingsSlotRef.current;
@@ -427,17 +506,15 @@ export function DockPanel() {
     return () => observer.disconnect();
   }, [settingsCenterX, apps, hoverSessionId, reorderSettledId]);
 
-  const settingsDistance = useTransform(
-    [settingsMouseX, settingsCenterX],
-    ([mx, cx]: number[]) => {
-      if (!Number.isFinite(mx)) return Infinity;
-      return mx - cx;
-    },
-  );
   const settingsScaleRaw = useTransform(
-    settingsDistance,
-    [-MAGNIFY_INFLUENCE_RADIUS_PX, 0, MAGNIFY_INFLUENCE_RADIUS_PX],
-    [1, MAGNIFY_MAX_SCALE, 1],
+    [settingsMouseX, settingsCenterX, settingsMagnifyRadiusPx],
+    ([mx, cx, radius]: number[]) => {
+      if (!Number.isFinite(mx)) return 1;
+      const distance = mx - cx;
+      const t = Math.abs(distance) / radius;
+      if (t >= 1) return 1;
+      return 1 + (MAGNIFY_MAX_SCALE - 1) * (1 - t);
+    },
   );
   const settingsScale = useSpring(settingsScaleRaw, MAGNIFY_SPRING);
 
@@ -486,7 +563,6 @@ export function DockPanel() {
         `color-mix(in srgb, ${color} ${Math.round(settings.backgroundIntensity * 100)}%, black)`,
     );
     return {
-      height: PILL_HEIGHT_PX,
       borderColor: showScanRing ? "transparent" : settings.staticGlowColor,
       boxShadow: showScanRing
         ? "none"
@@ -526,7 +602,7 @@ export function DockPanel() {
 
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
-      <div
+      <motion.div
         ref={pillRef}
         onMouseEnter={enterDock}
         onMouseMove={(event) => {
@@ -538,8 +614,16 @@ export function DockPanel() {
           lastNativeMoveAt.current = 0;
           leaveDock();
         }}
-        style={pillStyle}
-        className={`pointer-events-auto relative mx-auto m-0 flex shrink-0 items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
+        style={{
+          ...pillStyle,
+          height: pillHeightPx,
+          gap: pillGapPx,
+          paddingInline: pillPaddingInlinePx,
+          paddingBlock: pillPaddingBlockPx,
+          // Static fallback until Motion values commit on the first frame.
+          minHeight: restMetrics.pillHeightPx,
+        }}
+        className={`pointer-events-auto relative mx-auto m-0 flex shrink-0 items-end overflow-visible rounded-[28px] border transition-colors ${
           isRejecting
             ? "animate-reject-pulse"
             : settings.animationsEnabled && !showScanRing
@@ -583,7 +667,8 @@ export function DockPanel() {
           axis="x"
           values={apps}
           onReorder={handleReorder}
-          className="m-0 flex list-none items-end gap-2"
+          style={{ gap: iconRowGapPx }}
+          className="m-0 flex list-none items-end"
           as="ul"
         >
         {apps.map((app) => (
@@ -615,6 +700,7 @@ export function DockPanel() {
           >
             <DockIcon
               app={app}
+              iconSizePx={iconSizeAnimated}
               registerRef={registerIconRef}
               mouseX={mouseX}
               isHovered={
@@ -632,19 +718,20 @@ export function DockPanel() {
           </Reorder.Item>
         ))}
         </Reorder.Group>
-        <div
+        <motion.div
           aria-hidden
           className="mx-1 mb-3 w-px shrink-0 self-end bg-zinc-600/80"
-          style={{ height: ICON_SIZE_PX * 0.55 }}
+          style={{ height: dividerHeightPx }}
         />
         {/* Matches DockIcon's own `flex-col items-center gap-2` shape (icon +
             gap + LED) with an invisible spacer standing in for the LED — the
             pill row is `items-end`, so without this the button's bottom
             (and thus its glyph) lands 11px lower than every app icon's. */}
         <div className="flex shrink-0 flex-col items-center gap-2">
-          <div
+          <motion.div
             ref={settingsSlotRef}
-            className={`relative h-14 w-14 shrink-0 ${
+            style={{ height: settingsSlotSizePx, width: settingsSlotSizePx }}
+            className={`relative shrink-0 ${
               isSettingsHovered && !isDragging && !isReorderSettling ? "z-10" : ""
             }`}
           >
@@ -662,25 +749,30 @@ export function DockPanel() {
               style={{ scale: isDragging || isReorderSettling ? 1 : settingsScale }}
               className="h-full w-full origin-bottom"
             >
-              <button
+              <motion.button
                 type="button"
                 aria-label="Настройки"
                 onClick={() => {
                   void invoke("open_settings");
                 }}
-                style={
-                  {
-                    "--settings-accent": settings.staticGlowColor,
-                    borderColor: `color-mix(in srgb, ${settings.staticGlowColor} 34%, transparent)`,
-                    boxShadow: `inset 0 1px 0 0 rgb(255 255 255 / 0.08), 0 0 12px -2px color-mix(in srgb, ${settings.staticGlowColor} 16%, transparent)`,
-                  } as React.CSSProperties & Record<"--settings-accent", string>
-                }
-                className="flex h-full w-full items-center justify-center rounded-2xl border bg-zinc-950/40 text-zinc-400 transition-[color,background-color,box-shadow,border-color] duration-200 hover:border-[color-mix(in_srgb,var(--settings-accent)_48%,transparent)] hover:bg-zinc-900/55 hover:text-zinc-100 hover:shadow-[inset_0_1px_0_0_rgb(255_255_255/0.12),0_0_16px_0_color-mix(in_srgb,var(--settings-accent)_26%,transparent)]"
+                style={{
+                  borderColor: `color-mix(in srgb, ${settings.staticGlowColor} 34%, transparent)`,
+                  boxShadow: `inset 0 1px 0 0 rgb(255 255 255 / 0.08), 0 0 12px -2px color-mix(in srgb, ${settings.staticGlowColor} 16%, transparent)`,
+                  borderRadius: settingsCornerRadiusPx,
+                  // Custom property for hover Tailwind arbitrary values below.
+                  ["--settings-accent" as string]: settings.staticGlowColor,
+                }}
+                className="flex h-full w-full items-center justify-center border bg-zinc-950/40 text-zinc-400 transition-[color,background-color,box-shadow,border-color] duration-200 hover:border-[color-mix(in_srgb,var(--settings-accent)_48%,transparent)] hover:bg-zinc-900/55 hover:text-zinc-100 hover:shadow-[inset_0_1px_0_0_rgb(255_255_255/0.12),0_0_16px_0_color-mix(in_srgb,var(--settings-accent)_26%,transparent)]"
               >
-                <Settings className="h-7 w-7" strokeWidth={1.75} />
-              </button>
+                <motion.div
+                  className="flex items-center justify-center"
+                  style={{ width: settingsIconSizePx, height: settingsIconSizePx }}
+                >
+                  <Settings className="h-full w-full" strokeWidth={1.75} />
+                </motion.div>
+              </motion.button>
             </motion.div>
-          </div>
+          </motion.div>
           <span aria-hidden className="h-[3px] w-6" />
         </div>
         {showPanelEffect && (
@@ -699,7 +791,7 @@ export function DockPanel() {
             />
           </div>
         )}
-      </div>
+      </motion.div>
     </div>
   );
 }

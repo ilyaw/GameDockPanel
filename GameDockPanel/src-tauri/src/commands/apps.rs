@@ -166,12 +166,13 @@ pub struct AppIconUpdatePayload {
 ///
 /// `entries` is the persisted, user-configurable roster (order = dock
 /// order) — the single source of truth `running`/`icons` are keyed against.
-/// `pill_width_dip` mirrors the last width applied by
-/// `sync_vibrancy_pill_from_web` (measured DOM rect); hit-testing reads it
-/// directly instead of a compile-time constant now that width changes at
-/// runtime. It lives here rather than in a separate managed state because
-/// it's derived straight from the pill footprint and only ever changes
-/// alongside `entries`.
+/// `pill_width_dip`/`pill_height_dip` mirror the last width/height applied
+/// by `sync_vibrancy_pill_from_web` (measured DOM rect); hit-testing reads
+/// them directly instead of compile-time constants now that both vary at
+/// runtime — width with app count, height with the icon-size preset. They
+/// live here rather than in a separate managed state because they're
+/// derived straight from the pill footprint and only ever change alongside
+/// `entries` (width) or `DockSettings.icon_size_preset` (height).
 ///
 /// `menu_overlay_height_dip` is 0.0 while no `DockIcon` context menu is
 /// open, or the open menu's measured DOM height (`getBoundingClientRect()`,
@@ -189,6 +190,7 @@ pub struct AppsState {
     pub running: Mutex<HashMap<String, bool>>,
     pub icons: Mutex<HashMap<String, Option<String>>>,
     pub pill_width_dip: Mutex<f64>,
+    pub pill_height_dip: Mutex<f64>,
     pub menu_overlay_height_dip: Mutex<f64>,
 }
 
