@@ -1,3 +1,5 @@
+import type { DockSettings } from "./types";
+
 /**
  * Dock layout numbers — single source of truth for JS magnify math and for
  * keeping Rust window sizing / hit-testing (platform/macos.rs) in sync.
@@ -125,11 +127,11 @@ export const WINDOW_GLOW_BLEED_PX = 32;
  * frame* wide enough to avoid clipping it.
  */
 export function pillWidthPx(appCount: number): number {
-  return (
-    DOCK_PADDING_X_PX * 2 +
-    appCount * ICON_SIZE_PX +
-    (appCount - 1) * DOCK_GAP_PX
-  );
+  const appsWidth =
+    appCount * ICON_SIZE_PX + (appCount - 1) * DOCK_GAP_PX;
+  // Trailing settings gear in DockPanel — one gap + one icon slot.
+  const settingsSlot = DOCK_GAP_PX + ICON_SIZE_PX;
+  return DOCK_PADDING_X_PX * 2 + appsWidth + settingsSlot;
 }
 
 /** See `pillWidthPx` — same "documented formula, not called at runtime" note. */
@@ -140,3 +142,18 @@ export function windowWidthDip(appCount: number): number {
     WINDOW_GLOW_BLEED_PX
   );
 }
+
+/**
+ * Mirrors `DockSettings::default()` in `src-tauri/src/commands/settings.rs`
+ * — used as `useDockSettings`'s initial state so the very first render
+ * already matches what the backend will report a moment later for a user
+ * who has never touched settings, instead of flashing some other filler
+ * value before the async `get_dock_settings` round-trip resolves.
+ */
+export const DEFAULT_DOCK_SETTINGS: DockSettings = {
+  animationsEnabled: true,
+  rgbGlowColors: ["#ff3b6b", "#ff9d3b", "#e9ff3b", "#3bffb0", "#3bb0ff", "#b03bff"],
+  staticGlowColor: "#ff3b6b",
+  tintColor: "#09090b",
+  tintOpacity: 0.8,
+};

@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::commands::apps::AppsState;
 use crate::platform;
@@ -34,4 +34,33 @@ pub fn set_menu_overlay(state: State<AppsState>, active: bool, height: f64) -> R
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *overlay_height = if active { height.max(0.0) } else { 0.0 };
     Ok(())
+}
+
+/// Opens the settings window — shared by the tray icon and the dock's
+/// settings button. Lazily creates the window on first call.
+pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // Ordinary framed utility window — not the dock's transparent/overlay
+    // styling. Points at the same `index.html` bundle as the dock; `App.tsx`
+    // picks the UI to render from `getCurrentWebviewWindow().label`.
+    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+        .title("GameDockPanel — Settings")
+        .inner_size(460.0, 560.0)
+        .min_inner_size(380.0, 440.0)
+        .resizable(true)
+        .decorations(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn open_settings(app: AppHandle) -> Result<(), String> {
+    open_settings_window(&app)
 }

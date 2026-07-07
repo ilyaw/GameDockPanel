@@ -53,6 +53,10 @@ interface DockIconProps {
   onQuit?: (bundleId: string) => void;
   /** While an icon is being drag-reordered, magnify is suppressed. */
   isDragging?: boolean;
+  /** Mirrors `DockSettings.animationsEnabled` — gates only the LED's
+   * "breathing" pulse keyframe, not its on/off (active/inactive) state,
+   * which is a functional signal, not decoration. */
+  animationsEnabled?: boolean;
 }
 
 export function DockIcon({
@@ -66,6 +70,7 @@ export function DockIcon({
   onShowInFinder,
   onQuit,
   isDragging = false,
+  animationsEnabled = true,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -321,7 +326,11 @@ export function DockIcon({
       <span
         className={`h-[3px] w-6 rounded-full bg-current transition-all duration-300 ease-out ${
           app.isActive
-            ? `${app.color} animate-led-pulse opacity-100`
+            ? `${app.color} opacity-100 ${
+                animationsEnabled
+                  ? "animate-led-pulse"
+                  : "shadow-[0_0_10px_2px_currentColor]"
+              }`
             : "scale-0 text-transparent opacity-0"
         }`}
       />

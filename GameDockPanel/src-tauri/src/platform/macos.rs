@@ -52,9 +52,11 @@ const MENU_OVERLAY_GAP_DIP: f64 = 16.0;
 const ICON_EXPORT_PX: f64 = 256.0;
 
 fn pill_width_dip(app_count: usize) -> f64 {
-    DOCK_PADDING_X_DIP * 2.0
-        + app_count as f64 * ICON_SIZE_DIP
-        + app_count.saturating_sub(1) as f64 * DOCK_GAP_DIP
+    let apps_width = app_count as f64 * ICON_SIZE_DIP
+        + app_count.saturating_sub(1) as f64 * DOCK_GAP_DIP;
+    // Trailing settings gear in DockPanel — one gap + one icon slot.
+    let settings_slot = DOCK_GAP_DIP + ICON_SIZE_DIP;
+    DOCK_PADDING_X_DIP * 2.0 + apps_width + settings_slot
 }
 
 fn window_width_dip(pill_width_dip: f64) -> f64 {

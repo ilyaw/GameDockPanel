@@ -1,11 +1,21 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Reorder, useMotionValue } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Settings } from "lucide-react";
 import { DockIcon } from "./DockIcon";
 import { useDockApps } from "../hooks/useDockApps";
-import { PILL_HEIGHT_PX } from "../lib/constants";
+import { useDockSettings } from "../hooks/useDockSettings";
+import { PILL_HEIGHT_PX, ICON_SIZE_PX } from "../lib/constants";
 import type { DockApp } from "../lib/types";
+
+/**
+ * React only types `style` as known CSS properties — custom properties
+ * (`--dock-glow-N`) are still valid inline style keys at runtime, just not
+ * in that type. This narrow alias documents that gap at the one place it's
+ * needed instead of reaching for a broader `any`.
+ */
+type StyleWithGlowVars = React.CSSProperties & Record<`--dock-glow-${number}`, string>;
 
 /** How long the pill's reject-pulse border stays applied — mirrors the
  * `--animate-reject-pulse` duration in `index.css`; kept here instead of
@@ -15,6 +25,15 @@ const REJECT_PULSE_MS = 400;
 interface DockCursorPayload {
   x: number;
   y: number;
+}
+
+function pointInRect(
+  x: number,
+  y: number,
+  el: HTMLElement,
+): boolean {
+  const rect = el.getBoundingClientRect();
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 function hitTestIcon(
@@ -53,6 +72,7 @@ export function DockPanel() {
     showInFinder,
     quitApp,
   } = useDockApps();
+  const { settings } = useDockSettings();
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [hoverSessionId, setHoverSessionId] = useState(0);
   /**
@@ -75,7 +95,8 @@ export function DockPanel() {
   const dockHoveredRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
-  const pillRef = useRef<HTMLUListElement>(null);
+  const pillRef = useRef<HTMLDivElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
@@ -187,6 +208,11 @@ export function DockPanel() {
         await listen<DockCursorPayload>("dock-click", (event) => {
           if (isDraggingRef.current) return;
           const { x, y } = event.payload;
+          const settingsEl = settingsButtonRef.current;
+          if (settingsEl && pointInRect(x, y, settingsEl)) {
+            void invoke("open_settings");
+            return;
+          }
           const id = hitTestIcon(iconRefs.current, x, y);
           if (id) activateApp(id);
         }),
@@ -234,13 +260,50 @@ export function DockPanel() {
     return () => observer.disconnect();
   }, [apps]);
 
+  /**
+   * Static border/shadow (from `staticGlowColor`) sit alongside the CSS
+   * custom properties the animated cycle reads (`--dock-glow-1..6`).
+   * Both live in the same inline style rather than switching classes: a
+   * running CSS animation (`animate-rgb-glow` / `animate-reject-pulse`)
+   * always outranks a plain inline declaration on the same property per
+   * the cascade, so these static values simply show through whenever
+   * neither animation class is applied (`animationsEnabled` off, not
+   * rejecting) — no extra branching needed to pick which one "wins".
+   */
+  const pillStyle = useMemo<StyleWithGlowVars>(() => {
+    const style: StyleWithGlowVars = {
+      height: PILL_HEIGHT_PX,
+      borderColor: settings.staticGlowColor,
+      boxShadow: `0 0 14px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
+      "--dock-glow-1": settings.rgbGlowColors[0],
+      "--dock-glow-2": settings.rgbGlowColors[1],
+      "--dock-glow-3": settings.rgbGlowColors[2],
+      "--dock-glow-4": settings.rgbGlowColors[3],
+      "--dock-glow-5": settings.rgbGlowColors[4],
+      "--dock-glow-6": settings.rgbGlowColors[5],
+    };
+    // The drag-over cue (`border-zinc-400 bg-zinc-900/90` classes below)
+    // relies on a plain utility class for its background — an inline
+    // `backgroundColor` always beats that regardless of source order, so
+    // only apply the tint here while a drop isn't in progress.
+    if (!fileDragOver) {
+      style.backgroundColor = `color-mix(in srgb, ${settings.tintColor} ${Math.round(
+        settings.tintOpacity * 100,
+      )}%, transparent)`;
+    }
+    return style;
+  }, [
+    fileDragOver,
+    settings.staticGlowColor,
+    settings.rgbGlowColors,
+    settings.tintColor,
+    settings.tintOpacity,
+  ]);
+
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
-      <Reorder.Group
+      <div
         ref={pillRef}
-        axis="x"
-        values={apps}
-        onReorder={handleReorder}
         onMouseEnter={enterDock}
         onMouseMove={(event) => {
           lastNativeMoveAt.current = performance.now();
@@ -251,15 +314,26 @@ export function DockPanel() {
           lastNativeMoveAt.current = 0;
           leaveDock();
         }}
-        style={{ height: PILL_HEIGHT_PX }}
-        className={`pointer-events-auto mx-auto m-0 flex shrink-0 list-none items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
-          isRejecting ? "animate-reject-pulse" : "animate-rgb-glow"
+        style={pillStyle}
+        className={`pointer-events-auto mx-auto m-0 flex shrink-0 items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
+          isRejecting
+            ? "animate-reject-pulse"
+            : settings.animationsEnabled
+              ? "animate-rgb-glow"
+              : ""
         } ${
           fileDragOver
             ? "border-zinc-400 bg-zinc-900/90"
-            : "border-transparent bg-zinc-950/80"
+            : "border-transparent"
         }`}
       >
+        <Reorder.Group
+          axis="x"
+          values={apps}
+          onReorder={handleReorder}
+          className="m-0 flex list-none items-end gap-2"
+          as="ul"
+        >
         {apps.map((app) => (
           // Dragging an icon out of the pill and releasing just snaps it
           // back into its (possibly reordered) slot — a deliberate decision,
@@ -295,13 +369,32 @@ export function DockPanel() {
               hoverSessionId={hoverSessionId}
               reorderSettledId={reorderSettledId}
               isDragging={isDragging}
+              animationsEnabled={settings.animationsEnabled}
               onRemove={removeApp}
               onShowInFinder={showInFinder}
               onQuit={quitApp}
             />
           </Reorder.Item>
         ))}
-      </Reorder.Group>
+        </Reorder.Group>
+        <div
+          aria-hidden
+          className="mx-1 mb-3 w-px shrink-0 self-end bg-zinc-600/80"
+          style={{ height: ICON_SIZE_PX * 0.55 }}
+        />
+        <button
+          ref={settingsButtonRef}
+          type="button"
+          title="Settings"
+          aria-label="Settings"
+          onClick={() => {
+            void invoke("open_settings");
+          }}
+          className="mb-0 flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-zinc-400 transition-colors hover:bg-zinc-800/60 hover:text-zinc-100"
+        >
+          <Settings className="h-7 w-7" strokeWidth={1.75} />
+        </button>
+      </div>
     </div>
   );
 }

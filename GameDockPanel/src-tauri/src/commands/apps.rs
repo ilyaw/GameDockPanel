@@ -286,25 +286,13 @@ impl AppsState {
 }
 
 fn config_file_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("dock-apps.json"))
+    crate::persistence::app_data_file(app, "dock-apps.json")
 }
 
-/// Writes `entries` to disk atomically: a crash or force-quit mid-write
-/// leaves the previous, still-valid file in place instead of a truncated
-/// one — write to a sibling `.tmp` file, then `rename` (atomic on the same
-/// filesystem) over the real path.
+/// Writes `entries` to disk atomically — see `persistence::write_json_atomic`.
 fn save_entries(app: &AppHandle, entries: &[AppEntry]) -> Result<(), String> {
     let path = config_file_path(app)?;
-    let tmp_path = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp_path, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::persistence::write_json_atomic(&path, &entries)
 }
 
 /// Builds the first-run dock from `SEED_POOL`: walks it in priority order,

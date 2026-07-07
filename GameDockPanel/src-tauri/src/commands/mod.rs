@@ -3,4 +3,5 @@
 //! only owns the cross-platform data shape and command surface.
 
 pub mod apps;
+pub mod settings;
 pub mod window;

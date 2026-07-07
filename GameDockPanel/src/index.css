@@ -40,36 +40,40 @@ img {
 /*
   Razer-Chroma-style perimeter light. Cycles border-color AND a matching
   soft glow through the spectrum. Applied to the dock pill via
-  `animate-rgb-glow`.
+  `animate-rgb-glow`. Colors come from `--dock-glow-1..6` custom properties
+  (set inline by DockPanel.tsx from user-picked settings, see DockSettings
+  in commands/settings.rs) rather than being hardcoded here — `color-mix()`
+  derives the glow's alpha-blended shadow color from the same variable, so
+  each stop only has to be declared once.
 */
 @keyframes rgb-glow {
   0% {
-    border-color: #ff3b6b;
-    box-shadow: 0 0 14px 0 rgb(255 59 107 / 40%);
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-1) 40%, transparent);
   }
   16.6% {
-    border-color: #ff9d3b;
-    box-shadow: 0 0 14px 0 rgb(255 157 59 / 40%);
+    border-color: var(--dock-glow-2);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-2) 40%, transparent);
   }
   33.3% {
-    border-color: #e9ff3b;
-    box-shadow: 0 0 14px 0 rgb(233 255 59 / 40%);
+    border-color: var(--dock-glow-3);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-3) 40%, transparent);
   }
   50% {
-    border-color: #3bffb0;
-    box-shadow: 0 0 14px 0 rgb(59 255 176 / 40%);
+    border-color: var(--dock-glow-4);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-4) 40%, transparent);
   }
   66.6% {
-    border-color: #3bb0ff;
-    box-shadow: 0 0 14px 0 rgb(59 176 255 / 40%);
+    border-color: var(--dock-glow-5);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-5) 40%, transparent);
   }
   83.3% {
-    border-color: #b03bff;
-    box-shadow: 0 0 14px 0 rgb(176 59 255 / 40%);
+    border-color: var(--dock-glow-6);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-6) 40%, transparent);
   }
   100% {
-    border-color: #ff3b6b;
-    box-shadow: 0 0 14px 0 rgb(255 59 107 / 40%);
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-1) 40%, transparent);
   }
 }
 

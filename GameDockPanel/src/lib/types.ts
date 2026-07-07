@@ -35,3 +35,27 @@ export interface AppIconUpdate {
   id: string;
   iconUrl: string | null;
 }
+
+/**
+ * Live-tunable dock visuals — mirrors `DockSettings` in
+ * `src-tauri/src/commands/settings.rs`. Read by the dock window to render,
+ * read+written by the settings window (`get_dock_settings` /
+ * `update_dock_settings`, kept in sync via `dock-settings-changed`).
+ */
+export interface DockSettings {
+  /** Master toggle for decorative-only animation: RGB frame cycle + LED
+   * pulse. Does not affect hover-magnify or drag-reorder's layout
+   * animation — those are functional interactions, not decoration. */
+  animationsEnabled: boolean;
+  /** Exactly 6 hex colors — the RGB frame's cycle stops (`--dock-glow-1..6`
+   * in `src/index.css`). */
+  rgbGlowColors: string[];
+  /** Frame color shown when `animationsEnabled` is off, instead of a
+   * random freeze-frame of the cycle. */
+  staticGlowColor: string;
+  /** Tint layer color under the icons — painted on top of the native
+   * vibrancy blur, not a substitute for it. */
+  tintColor: string;
+  /** Alpha (0..1) of the tint layer. */
+  tintOpacity: number;
+}
