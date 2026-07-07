@@ -12,9 +12,12 @@ import {
   MAGNIFY_MAX_SCALE,
   MAX_SEPARATORS,
   TOOLTIP_GAP_PX,
+  BG_ANIMATION_CLASSES,
+  FLOW_RING_ANIMATION_CLASSES,
   getBackgroundPreset,
-  backgroundSpeedToDurationS,
+  backgroundPresetToDurationS,
   getBorderStylePreset,
+  getFlowRingVariant,
   getPanelEffectPreset,
   getSizeMetrics,
 } from "../lib/constants";
@@ -27,7 +30,9 @@ import { countDockSeparators, isDockAppItem } from "../lib/types";
  * in that type. This narrow alias documents that gap at the one place it's
  * needed instead of reaching for a broader `any`.
  */
-type StyleWithGlowVars = React.CSSProperties & Record<`--dock-glow-${number}`, string>;
+type StyleWithGlowVars = React.CSSProperties &
+  Record<`--dock-glow-${number}`, string> &
+  Record<"--dock-glow-angle", string>;
 
 /** Same gap as `StyleWithGlowVars`, for the background gradient layer's own
  * custom properties (`--dock-bg-1..6`, `--dock-bg-duration`). Set on the
@@ -35,7 +40,9 @@ type StyleWithGlowVars = React.CSSProperties & Record<`--dock-glow-${number}`, s
  * inheritance — the panel-effect overlay tints itself from `--dock-bg-1`
  * the same way the flow layer does, without needing its own color config. */
 type StyleWithBgVars = Record<`--dock-bg-${number}`, string> &
-  Record<"--dock-bg-duration", string>;
+  Record<"--dock-bg-duration", string> &
+  Record<"--dock-bg-angle", string> &
+  Record<"--gradient-angle", string>;
 
 type PillStyle = StyleWithGlowVars & StyleWithBgVars;
 
@@ -703,10 +710,13 @@ export function DockPanel() {
   const settingsScale = useSpring(settingsScaleRaw, MAGNIFY_SPRING);
 
   const activeBorderStyle = getBorderStylePreset(settings.borderStyle);
+  const activeBgPreset = getBackgroundPreset(settings.backgroundPreset);
+  const flowRingVariant = getFlowRingVariant(activeBorderStyle.id);
   /**
    * "Scan" doesn't animate `border-color`/`box-shadow` like the other three
    * styles — it gets a dedicated conic-gradient ring overlay instead (see
-   * `.dock-border-scan-ring` in index.css). Suppressed during a reject
+   * `.dock-border-scan-ring` in index.css). Spotlight-style `flow-*` styles
+   * use `.dock-border-flow-ring` the same way. Suppressed during a reject
    * flash or an active file drag-over, same as the other border styles,
    * since both of those already communicate their own state through the
    * pill's real border.
@@ -716,6 +726,16 @@ export function DockPanel() {
     activeBorderStyle.id === "scan" &&
     !isRejecting &&
     !fileDragOver;
+
+  const showFlowRing =
+    settings.animationsEnabled &&
+    flowRingVariant !== null &&
+    !isRejecting &&
+    !fileDragOver;
+
+  const showGradientRing = showScanRing || showFlowRing;
+
+  const bgAnimClasses = BG_ANIMATION_CLASSES[activeBgPreset.animation];
 
   const activePanelEffect = getPanelEffectPreset(settings.panelEffect);
   const panelEffectClasses = PANEL_EFFECT_CLASSES[activePanelEffect.id];
@@ -741,14 +761,14 @@ export function DockPanel() {
    * underneath it.
    */
   const pillStyle = useMemo<PillStyle>(() => {
-    const preset = getBackgroundPreset(settings.backgroundPreset);
+    const preset = activeBgPreset;
     const mixed = preset.colors.map(
       (color) =>
         `color-mix(in srgb, ${color} ${Math.round(settings.backgroundIntensity * 100)}%, black)`,
     );
     return {
-      borderColor: showScanRing ? "transparent" : settings.staticGlowColor,
-      boxShadow: showScanRing
+      borderColor: showGradientRing ? "transparent" : settings.staticGlowColor,
+      boxShadow: showGradientRing
         ? "none"
         : `0 0 14px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
       "--dock-glow-1": settings.rgbGlowColors[0],
@@ -757,21 +777,24 @@ export function DockPanel() {
       "--dock-glow-4": settings.rgbGlowColors[3],
       "--dock-glow-5": settings.rgbGlowColors[4],
       "--dock-glow-6": settings.rgbGlowColors[5],
+      "--dock-glow-angle": `${preset.angle}deg`,
       "--dock-bg-1": mixed[0],
       "--dock-bg-2": mixed[1],
       "--dock-bg-3": mixed[2],
       "--dock-bg-4": mixed[3],
       "--dock-bg-5": mixed[4],
       "--dock-bg-6": mixed[5],
-      "--dock-bg-duration": `${backgroundSpeedToDurationS(settings.backgroundSpeed)}s`,
+      "--dock-bg-angle": `${preset.angle}deg`,
+      "--gradient-angle": `${preset.angle}deg`,
+      "--dock-bg-duration": `${backgroundPresetToDurationS(preset, settings.backgroundSpeed)}s`,
     };
   }, [
+    activeBgPreset,
     settings.staticGlowColor,
     settings.rgbGlowColors,
-    settings.backgroundPreset,
     settings.backgroundIntensity,
     settings.backgroundSpeed,
-    showScanRing,
+    showGradientRing,
   ]);
 
   /** Just the flow layer's own opacity now — its color/duration custom
@@ -810,7 +833,7 @@ export function DockPanel() {
         className={`pointer-events-auto relative mx-auto m-0 flex shrink-0 items-end overflow-visible rounded-[28px] border transition-colors ${
           isRejecting
             ? "animate-reject-pulse"
-            : settings.animationsEnabled && !showScanRing
+            : settings.animationsEnabled && !showGradientRing
               ? activeBorderStyle.animationClass
               : ""
         } ${
@@ -829,6 +852,12 @@ export function DockPanel() {
             className="dock-border-scan-ring animate-border-scan-rotate pointer-events-none absolute -inset-px -z-10 rounded-[28px]"
           />
         )}
+        {showFlowRing && flowRingVariant && (
+          <div
+            aria-hidden
+            className={`dock-border-flow-ring ${FLOW_RING_ANIMATION_CLASSES[flowRingVariant]} pointer-events-none absolute -inset-px -z-10 rounded-[28px]`}
+          />
+        )}
         {settings.backgroundAnimationEnabled && !fileDragOver && (
           // Negative z-index puts this behind the icons/button below
           // automatically (static in-flow siblings paint above negative-
@@ -842,7 +871,7 @@ export function DockPanel() {
             className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-[28px]"
           >
             <div
-              className="dock-bg-flow animate-rgb-bg-flow absolute -inset-8 blur-2xl"
+              className={`${bgAnimClasses} absolute -inset-8 blur-2xl`}
               style={bgFlowStyle}
             />
           </div>

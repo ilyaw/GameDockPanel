@@ -39,6 +39,10 @@ img {
      fallback only covers the sliver of time before DockPanel's inline
      style sets `--dock-bg-duration` on mount. */
   --animate-rgb-bg-flow: rgb-bg-flow var(--dock-bg-duration, 14s) linear infinite;
+  /* Spotlight-style engines (background + flow-ring border styles). */
+  --animate-rgb-spin: rgb-spin var(--dock-bg-duration, 14s) linear infinite;
+  --animate-rgb-sweep: rgb-sweep var(--dock-bg-duration, 14s) linear infinite;
+  --animate-neon-pulse: neon-pulse calc(var(--dock-bg-duration, 14s) * 1.5) ease-in-out infinite;
   /* Alternate `BORDER_STYLE_PRESETS` animations (constants.ts) — one of
      these replaces `animate-rgb-glow` on the pill, never combined with it. */
   --animate-border-pulse: border-pulse 2.4s ease-in-out infinite;
@@ -185,9 +189,42 @@ img {
   initial-value: 0deg;
 }
 
+/* Spotlight-style conic rotation — shared by bg spin/pulse and flow-ring
+   border styles. Separate from `--dock-scan-angle` (radar sweep only). */
+@property --gradient-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
 @keyframes border-scan-rotate {
   to {
     --dock-scan-angle: 360deg;
+  }
+}
+
+@keyframes rgb-spin {
+  to {
+    --gradient-angle: 360deg;
+  }
+}
+
+@keyframes rgb-sweep {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+@keyframes neon-pulse {
+  0%,
+  100% {
+    filter: brightness(1) saturate(1);
+  }
+  50% {
+    filter: brightness(1.35) saturate(1.5);
   }
 }
 
@@ -208,6 +245,69 @@ img {
     linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
+}
+
+/*
+  Spotlight-style flow-ring border styles (`flow-*` in BORDER_STYLE_PRESETS).
+  Same mask-composite ring trick as `.dock-border-scan-ring` above, but the
+  gradient fills the full perimeter instead of a radar highlight wedge.
+  Colors come from `--dock-glow-1..3`; angle from `--dock-glow-angle`.
+*/
+.dock-border-flow-ring {
+  padding: 2px;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.dock-border-flow-static {
+  background: linear-gradient(
+    var(--dock-glow-angle, 135deg),
+    var(--dock-glow-1),
+    var(--dock-glow-2)
+  );
+}
+
+.dock-border-flow-spin {
+  background: conic-gradient(
+    from var(--gradient-angle),
+    var(--dock-glow-1),
+    var(--dock-glow-2),
+    var(--dock-glow-1)
+  );
+}
+
+.dock-border-flow-spin-tri {
+  background: conic-gradient(
+    from var(--gradient-angle),
+    var(--dock-glow-1),
+    var(--dock-glow-2),
+    var(--dock-glow-3),
+    var(--dock-glow-1)
+  );
+}
+
+.dock-border-flow-sweep {
+  background: linear-gradient(
+    var(--dock-glow-angle, 135deg),
+    var(--dock-glow-1),
+    var(--dock-glow-2),
+    var(--dock-glow-3),
+    var(--dock-glow-1)
+  );
+  background-size: 200% 200%;
+}
+
+.dock-border-flow-pulse {
+  background: conic-gradient(
+    from var(--gradient-angle),
+    var(--dock-glow-1),
+    var(--dock-glow-2),
+    var(--dock-glow-3),
+    var(--dock-glow-1)
+  );
 }
 
 /*
@@ -329,20 +429,17 @@ img {
 }
 
 /*
-  Animated background gradient behind the dock icons (DockPanel.tsx). The
-  `@theme` block above only generates the `animation` shorthand utility —
-  composing 6 user-picked color stops (`--dock-bg-1..6`, from the active
-  `BackgroundPreset`) into an actual `linear-gradient()` needs a real
-  declaration, which Tailwind utilities can't express, hence the plain
-  class here rather than something purely theme-driven. The gradient
-  repeats its first stop as its last so animating `background-position`
-  loops seamlessly instead of visibly jumping at the wrap-around; the
-  oversized `background-size` is what gives the position animation room
-  to move through before it has to repeat.
+  Animated background gradient behind the dock icons (DockPanel.tsx).
+  `.dock-bg-anim-*` classes pick the gradient shape; the paired
+  `animate-rgb-*` utility drives motion. Color stops come from
+  `--dock-bg-1..6` and angle from `--dock-bg-angle` (set inline from the
+  active `BackgroundPreset`). The old `.dock-bg-flow` name is kept as an
+  alias for sweep for any stale references.
 */
+.dock-bg-anim-sweep,
 .dock-bg-flow {
   background-image: linear-gradient(
-    100deg,
+    var(--dock-bg-angle, 100deg),
     var(--dock-bg-1),
     var(--dock-bg-2),
     var(--dock-bg-3),
@@ -352,6 +449,44 @@ img {
     var(--dock-bg-1)
   );
   background-size: 220% 220%;
+}
+
+.dock-bg-anim-spin {
+  background-image: conic-gradient(
+    from var(--gradient-angle),
+    var(--dock-bg-1),
+    var(--dock-bg-2),
+    var(--dock-bg-1)
+  );
+}
+
+.dock-bg-anim-spin-tri {
+  background-image: conic-gradient(
+    from var(--gradient-angle),
+    var(--dock-bg-1),
+    var(--dock-bg-2),
+    var(--dock-bg-3),
+    var(--dock-bg-1)
+  );
+}
+
+.dock-bg-anim-pulse {
+  background-image: conic-gradient(
+    from var(--gradient-angle),
+    var(--dock-bg-1),
+    var(--dock-bg-2),
+    var(--dock-bg-3),
+    var(--dock-bg-1)
+  );
+}
+
+.dock-bg-anim-static {
+  background-image: linear-gradient(
+    var(--dock-bg-angle, 100deg),
+    var(--dock-bg-1),
+    var(--dock-bg-2),
+    var(--dock-bg-3)
+  );
 }
 
 @keyframes rgb-bg-flow {

@@ -99,8 +99,8 @@ function PresetSwatch({
   return (
     <button
       type="button"
-      title={preset.label}
-      aria-label={preset.label}
+      title={`${preset.label} (${preset.animation})`}
+      aria-label={`${preset.label}, анимация ${preset.animation}`}
       aria-pressed={selected}
       disabled={disabled}
       onClick={onSelect}
@@ -360,10 +360,10 @@ export function SettingsWindow() {
 
         <SettingsRow
           title="Стиль рамки"
-          description="Как именно анимируется RGB-рамка, пока анимации включены — от плавного спектра до киберпанк-глитча и сканирующего луча."
+          description="Как анимируется RGB-рамка: классические спектр/глитч/скан или spotlight-потоки (вращение, sweep, неон-пульс)."
         >
           <div
-            className={`flex max-w-[220px] flex-wrap justify-end gap-1.5 transition-opacity ${
+            className={`flex max-w-[280px] flex-wrap justify-end gap-1.5 transition-opacity ${
               settings.animationsEnabled ? "" : "opacity-40"
             }`}
           >
@@ -475,10 +475,10 @@ export function SettingsWindow() {
 
         <SettingsRow
           title="Пресет фона"
-          description="Готовые цветовые комбинации для потока — выберите стиль вместо ручной настройки цветов."
+          description="Готовые цветовые комбинации и тип анимации (sweep, spin, pulse) — каждый пресет задаёт свой движок потока."
         >
           <div
-            className={`flex max-w-[200px] flex-wrap justify-end gap-2 transition-opacity ${
+            className={`flex max-w-[240px] flex-wrap justify-end gap-2 transition-opacity ${
               settings.backgroundAnimationEnabled ? "" : "opacity-40"
             }`}
           >

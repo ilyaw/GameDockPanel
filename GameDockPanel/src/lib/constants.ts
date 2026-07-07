@@ -289,6 +289,34 @@ export function windowWidthDip(items: DockItem[], iconSizePx: number): number {
 }
 
 /**
+ * CSS animation engine for a background preset — ported from spotlight-app's
+ * `RgbPresetAnimation`. Each preset picks one; the border flow-ring styles
+ * reuse the same engines independently via `BORDER_STYLE_PRESETS`.
+ */
+export type BackgroundAnimation = "static" | "spin" | "spin-tri" | "sweep" | "pulse";
+
+/** Maps a `BackgroundAnimation` to the CSS classes applied on `.dock-bg-flow`
+ * in DockPanel — kept here so settings UI never needs CSS implementation
+ * details. */
+export const BG_ANIMATION_CLASSES: Record<BackgroundAnimation, string> = {
+  static: "dock-bg-anim-static",
+  spin: "dock-bg-anim-spin animate-rgb-spin",
+  "spin-tri": "dock-bg-anim-spin-tri animate-rgb-spin",
+  sweep: "dock-bg-anim-sweep animate-rgb-sweep",
+  pulse: "dock-bg-anim-pulse animate-rgb-spin animate-neon-pulse",
+};
+
+/** Spotlight-style 3-stop palette expanded to 6 for `rgbGlowColors` /
+ * `--dock-bg-*` custom-property convention. */
+function tripleToSix(
+  c1: string,
+  c2: string,
+  c3: string,
+): [string, string, string, string, string, string] {
+  return [c1, c2, c3, c1, c2, c3];
+}
+
+/**
  * A ready-made gamer-style RGB/gradient combo for the dock's animated
  * background layer — picked by id in `DockSettings.backgroundPreset`.
  * Fixed at 6 stops, mirroring the border cycle's own `rgbGlowColors`
@@ -301,6 +329,12 @@ export interface BackgroundPreset {
   id: string;
   label: string;
   colors: [string, string, string, string, string, string];
+  /** Which CSS animation engine drives this preset's flow layer. */
+  animation: BackgroundAnimation;
+  /** Linear-gradient angle in degrees (sweep/static) or conic base angle. */
+  angle: number;
+  /** Cycle duration in seconds at `backgroundSpeed` = 0.5; 0 for static. */
+  baseDuration: number;
 }
 
 export const BACKGROUND_PRESETS: BackgroundPreset[] = [
@@ -308,61 +342,161 @@ export const BACKGROUND_PRESETS: BackgroundPreset[] = [
     id: "chroma",
     label: "Chroma",
     colors: ["#ff3b6b", "#ff9d3b", "#e9ff3b", "#3bffb0", "#3bb0ff", "#b03bff"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
+  },
+  {
+    id: "static",
+    label: "Статичный",
+    colors: tripleToSix("#7928ca", "#7928ca", "#7928ca"),
+    animation: "static",
+    angle: 135,
+    baseDuration: 0,
+  },
+  {
+    id: "two-color",
+    label: "Двухцветный",
+    colors: tripleToSix("#00f0ff", "#ff00aa", "#ff00aa"),
+    animation: "spin",
+    angle: 135,
+    baseDuration: 4,
+  },
+  {
+    id: "rainbow",
+    label: "Радуга",
+    colors: tripleToSix("#ff0080", "#7928ca", "#0070f3"),
+    animation: "sweep",
+    angle: 90,
+    baseDuration: 4,
   },
   {
     id: "cyberpunk",
     label: "Cyberpunk",
-    colors: ["#ff2ec4", "#8b2fff", "#2f6bff", "#00e5ff", "#39ffd8", "#ff2ec4"],
+    colors: tripleToSix("#00f0ff", "#ff00aa", "#ffe600"),
+    animation: "spin-tri",
+    angle: 135,
+    baseDuration: 3,
   },
   {
     id: "toxic",
     label: "Toxic",
-    colors: ["#caff3f", "#39ff14", "#0aff99", "#00e6b8", "#7bff3f", "#caff3f"],
+    colors: tripleToSix("#39ff14", "#00ff88", "#b8ff00"),
+    animation: "spin-tri",
+    angle: 90,
+    baseDuration: 2.5,
   },
   {
     id: "inferno",
     label: "Inferno",
     colors: ["#ff003c", "#ff6a00", "#ffb700", "#ff2e00", "#ff8a00", "#ff003c"],
+    animation: "sweep",
+    angle: 45,
+    baseDuration: 14,
+  },
+  {
+    id: "sunset",
+    label: "Закат",
+    colors: tripleToSix("#ff6b35", "#f72585", "#7209b7"),
+    animation: "sweep",
+    angle: 120,
+    baseDuration: 5,
+  },
+  {
+    id: "ocean",
+    label: "Океан",
+    colors: tripleToSix("#00d4ff", "#0099ff", "#7b2ff7"),
+    animation: "sweep",
+    angle: 160,
+    baseDuration: 4,
+  },
+  {
+    id: "lava",
+    label: "Лава",
+    colors: tripleToSix("#ff4500", "#ff006e", "#ffbe0b"),
+    animation: "sweep",
+    angle: 45,
+    baseDuration: 3.5,
   },
   {
     id: "aurora",
     label: "Aurora",
-    colors: ["#00ffd5", "#4dd0ff", "#6a5cff", "#c66aff", "#ff6ec7", "#00ffd5"],
+    colors: tripleToSix("#00ff87", "#60efff", "#a855f7"),
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 6,
+  },
+  {
+    id: "synthwave",
+    label: "Синтвейв",
+    colors: tripleToSix("#ff00de", "#7b2ff7", "#00f5ff"),
+    animation: "spin-tri",
+    angle: 180,
+    baseDuration: 4,
+  },
+  {
+    id: "neon-pulse",
+    label: "Неон-пульс",
+    colors: tripleToSix("#ff006e", "#8338ec", "#3a86ff"),
+    animation: "pulse",
+    angle: 180,
+    baseDuration: 2,
   },
   {
     id: "frost",
     label: "Frost",
     colors: ["#0072ff", "#00c6ff", "#7de2fc", "#c2f5ff", "#66d9ff", "#0072ff"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
   {
     id: "vapor",
     label: "Vaporwave",
     colors: ["#ff71ce", "#b967ff", "#01cdfe", "#05ffa1", "#fffb96", "#ff71ce"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
   {
     id: "matrix",
     label: "Matrix",
     colors: ["#003b00", "#008f11", "#00ff41", "#39ff14", "#00ff41", "#008f11"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
   {
     id: "plasma",
     label: "Plasma",
     colors: ["#7b2ff7", "#f107a3", "#ff6b6b", "#feca57", "#f107a3", "#7b2ff7"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
   {
     id: "bloodmoon",
     label: "Blood Moon",
     colors: ["#1a0000", "#8b0000", "#ff0000", "#ff4500", "#8b0000", "#1a0000"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
   {
     id: "neon-noir",
     label: "Neon Noir",
     colors: ["#ff00ff", "#8000ff", "#0080ff", "#ff00aa", "#4b0082", "#ff00ff"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
   {
     id: "solar",
     label: "Solar Flare",
     colors: ["#ffd700", "#ffae00", "#ff7b00", "#fff2cc", "#ffae00", "#ffd700"],
+    animation: "sweep",
+    angle: 100,
+    baseDuration: 14,
   },
 ];
 
@@ -373,15 +507,56 @@ export function getBackgroundPreset(id: string): BackgroundPreset {
   return BACKGROUND_PRESETS.find((preset) => preset.id === id) ?? BACKGROUND_PRESETS[0];
 }
 
+/** Per-preset duration derived from spotlight's `speedToDuration`, mapped
+ * onto the dock's 0..1 `backgroundSpeed` slider — at speed 0.5 the cycle
+ * equals `preset.baseDuration`; faster speeds shorten it proportionally. */
+export function backgroundPresetToDurationS(
+  preset: BackgroundPreset,
+  speed: number,
+): number {
+  if (preset.animation === "static" || preset.baseDuration === 0) return 0;
+  const clampedSpeed = Math.max(0.05, Math.min(1, speed));
+  return preset.baseDuration / (clampedSpeed / 0.5);
+}
+
+/** Variant of the gradient flow-ring overlay for spotlight-style border
+ * styles — separate from `BackgroundAnimation` because border and background
+ * presets are chosen independently in dock settings. */
+export type FlowRingVariant = "static" | "spin" | "spin-tri" | "sweep" | "pulse";
+
+/** CSS classes for `.dock-border-flow-ring` per variant — mirrors
+ * `BG_ANIMATION_CLASSES` but reads `--dock-glow-*` instead of `--dock-bg-*`. */
+export const FLOW_RING_ANIMATION_CLASSES: Record<FlowRingVariant, string> = {
+  static: "dock-border-flow-static",
+  spin: "dock-border-flow-spin animate-rgb-spin",
+  "spin-tri": "dock-border-flow-spin-tri animate-rgb-spin",
+  sweep: "dock-border-flow-sweep animate-rgb-sweep",
+  pulse: "dock-border-flow-pulse animate-rgb-spin animate-neon-pulse",
+};
+
+const FLOW_RING_VARIANT_BY_BORDER_STYLE: Record<string, FlowRingVariant> = {
+  "flow-static": "static",
+  "flow-spin": "spin",
+  "flow-spin-tri": "spin-tri",
+  "flow-sweep": "sweep",
+  "flow-neon-pulse": "pulse",
+};
+
+/** Returns the flow-ring variant for spotlight-style border styles, or
+ * `null` for styles that use border-color keyframes / scan ring instead. */
+export function getFlowRingVariant(borderStyleId: string): FlowRingVariant | null {
+  return FLOW_RING_VARIANT_BY_BORDER_STYLE[borderStyleId] ?? null;
+}
+
 /**
  * A cyberpunk-styled animation driving the pill's RGB frame while
  * `DockSettings.animationsEnabled` is on — picked by id in
  * `DockSettings.borderStyle`. `animationClass` names a Tailwind
- * `--animate-*` utility registered in `src/index.css`; `"scan"` is the one
- * exception — it renders no border-color keyframe of its own and instead
- * gets a dedicated rotating conic-gradient ring overlay in `DockPanel.tsx`
- * (see `dock-border-scan-ring` in index.css), so its `animationClass` is
- * left empty.
+ * `--animate-*` utility registered in `src/index.css`; `"scan"` and the
+ * `flow-*` styles are exceptions — they render no border-color keyframe
+ * of their own and instead get a dedicated gradient ring overlay in
+ * `DockPanel.tsx` (see `dock-border-scan-ring` / `dock-border-flow-ring`
+ * in index.css), so their `animationClass` is left empty.
  */
 export interface BorderStylePreset {
   id: string;
@@ -413,6 +588,36 @@ export const BORDER_STYLE_PRESETS: BorderStylePreset[] = [
     id: "scan",
     label: "Скан",
     description: "Луч радара, вращающийся по периметру рамки.",
+    animationClass: "",
+  },
+  {
+    id: "flow-sweep",
+    label: "Поток",
+    description: "Линейный градиент, плавно текущий по периметру рамки.",
+    animationClass: "",
+  },
+  {
+    id: "flow-spin",
+    label: "Вращение",
+    description: "Двухцветный конический градиент, вращающийся по рамке.",
+    animationClass: "",
+  },
+  {
+    id: "flow-spin-tri",
+    label: "Трёхцветное",
+    description: "Трёхцветный конический градиент, вращающийся по рамке.",
+    animationClass: "",
+  },
+  {
+    id: "flow-neon-pulse",
+    label: "Неон-пульс",
+    description: "Вращающийся градиент с пульсирующей яркостью неона.",
+    animationClass: "",
+  },
+  {
+    id: "flow-static",
+    label: "Статичный",
+    description: "Неподвижный градиент по периметру рамки.",
     animationClass: "",
   },
 ];
