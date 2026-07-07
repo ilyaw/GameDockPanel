@@ -54,6 +54,9 @@ const REJECT_PULSE_MS = 400;
  * resumes — batches N neighbor completions into one `centerX` refresh. */
 const SETTLE_DEBOUNCE_MS = 40;
 
+/** Fallback if `onLayoutAnimationComplete` never fires after a reorder drop. */
+const SETTLE_SAFETY_MS = 500;
+
 const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
 /** Critically damped, ~100 ms settle — interpolates between rapid slider
  * steps without the old soft spring's ~1.8 s lag or jump()'s 1 px stutter. */
@@ -97,6 +100,76 @@ function hitTestIcon(
   return bestId;
 }
 
+/** macOS Dock-style slot: insert before the first icon whose center is
+ * right of the cursor; otherwise append before settings. */
+function resolveInsertIndex(
+  apps: DockApp[],
+  refs: Map<string, HTMLElement>,
+  pillEl: HTMLElement | null,
+  x: number,
+  y: number,
+): number {
+  if (pillEl && !pointInRect(x, y, pillEl)) {
+    return apps.length;
+  }
+
+  for (let i = 0; i < apps.length; i++) {
+    const el = refs.get(apps[i].id);
+    if (!el) continue;
+    const rect = el.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    if (x < centerX) return i;
+  }
+  return apps.length;
+}
+
+function getInsertMarkerMetrics(
+  apps: DockApp[],
+  refs: Map<string, HTMLElement>,
+  pillEl: HTMLElement,
+  insertIndex: number,
+): { left: number; top: number; height: number } | null {
+  const pillRect = pillEl.getBoundingClientRect();
+  let markerX: number | null = null;
+  let markerTop = 0;
+  let markerHeight = 0;
+
+  if (insertIndex <= 0) {
+    const first = apps[0] ? refs.get(apps[0].id) : null;
+    if (first) {
+      const rect = first.getBoundingClientRect();
+      markerX = rect.left;
+      markerTop = rect.top;
+      markerHeight = rect.height;
+    }
+  } else if (insertIndex >= apps.length) {
+    const last = apps[apps.length - 1] ? refs.get(apps[apps.length - 1].id) : null;
+    if (last) {
+      const rect = last.getBoundingClientRect();
+      markerX = rect.right;
+      markerTop = rect.top;
+      markerHeight = rect.height;
+    }
+  } else {
+    const prev = refs.get(apps[insertIndex - 1].id);
+    const next = refs.get(apps[insertIndex].id);
+    if (prev && next) {
+      const prevRect = prev.getBoundingClientRect();
+      const nextRect = next.getBoundingClientRect();
+      markerX = (prevRect.right + nextRect.left) / 2;
+      markerTop = Math.min(prevRect.top, nextRect.top);
+      markerHeight = Math.max(prevRect.height, nextRect.height);
+    }
+  }
+
+  if (markerX === null || markerHeight < 1) return null;
+  return {
+    left: markerX - pillRect.left,
+    top: markerTop - pillRect.top,
+    height: markerHeight,
+  };
+}
+
 export function DockPanel() {
   const {
     apps,
@@ -105,6 +178,8 @@ export function DockPanel() {
     commitReorder,
     removeApp,
     fileDragOver,
+    fileDragInsertIndex,
+    resolveInsertIndexRef,
     rejectPulseKey,
     showInFinder,
     quitApp,
@@ -188,14 +263,19 @@ export function DockPanel() {
   const isDraggingRef = useRef(false);
   const [isReorderSettling, setIsReorderSettling] = useState(false);
   const isReorderSettlingRef = useRef(false);
-  const draggedAppIdRef = useRef<string | null>(null);
   const orderAtDragStartRef = useRef<string[]>([]);
-  const layoutCompleteSeenRef = useRef(false);
   const settleDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
-  const lastCursorRef = useRef({ x: Infinity, y: Infinity });
+  const settleSafetyRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const [isRejecting, setIsRejecting] = useState(false);
+  const [insertMarker, setInsertMarker] = useState<{
+    left: number;
+    top: number;
+    height: number;
+  } | null>(null);
 
   const mouseX = useMotionValue(Infinity);
   /** Separate cursor channel for the settings slot — when the pointer is over
@@ -216,6 +296,27 @@ export function DockPanel() {
   };
 
   useEffect(() => {
+    resolveInsertIndexRef.current = (x, y) =>
+      resolveInsertIndex(apps, iconRefs.current, pillRef.current, x, y);
+  }, [apps, resolveInsertIndexRef]);
+
+  useLayoutEffect(() => {
+    const pillEl = pillRef.current;
+    if (!fileDragOver || fileDragInsertIndex === null || !pillEl) {
+      setInsertMarker(null);
+      return;
+    }
+
+    const metrics = getInsertMarkerMetrics(
+      apps,
+      iconRefs.current,
+      pillEl,
+      fileDragInsertIndex,
+    );
+    setInsertMarker(metrics);
+  }, [apps, fileDragOver, fileDragInsertIndex, iconSizeAnimated]);
+
+  useEffect(() => {
     isDraggingRef.current = isDragging;
   }, [isDragging]);
 
@@ -224,12 +325,14 @@ export function DockPanel() {
   }, [isReorderSettling]);
 
   useEffect(() => {
-    return () => clearTimeout(settleDebounceRef.current);
+    return () => {
+      clearTimeout(settleDebounceRef.current);
+      clearTimeout(settleSafetyRef.current);
+    };
   }, []);
 
   const applyCursor = useCallback(
     (x: number, y: number) => {
-      lastCursorRef.current = { x, y };
       if (isDraggingRef.current || isReorderSettlingRef.current) return;
       const settingsEl = settingsSlotRef.current;
       if (settingsEl && pointInRect(x, y, settingsEl)) {
@@ -249,7 +352,6 @@ export function DockPanel() {
 
   const leaveDock = useCallback(() => {
     dockHoveredRef.current = false;
-    lastCursorRef.current = { x: Infinity, y: Infinity };
     mouseX.set(Infinity);
     settingsMouseX.set(Infinity);
     setHoveredIconId(null);
@@ -276,10 +378,9 @@ export function DockPanel() {
   const finishReorderSettle = useCallback(() => {
     if (!isReorderSettlingRef.current) return;
     clearTimeout(settleDebounceRef.current);
+    clearTimeout(settleSafetyRef.current);
     isReorderSettlingRef.current = false;
     setIsReorderSettling(false);
-    draggedAppIdRef.current = null;
-    layoutCompleteSeenRef.current = false;
     setReorderSettledId((id) => id + 1);
 
     mouseX.set(Infinity);
@@ -295,18 +396,14 @@ export function DockPanel() {
     }, SETTLE_DEBOUNCE_MS);
   }, [finishReorderSettle]);
 
-  const beginDrag = useCallback(
-    (appId: string) => {
-      draggedAppIdRef.current = appId;
-      orderAtDragStartRef.current = apps.map((app) => app.id);
-      setIsDragging(true);
-      mouseX.set(Infinity);
-      settingsMouseX.set(Infinity);
-      setHoveredIconId(null);
-      setIsSettingsHovered(false);
-    },
-    [apps, mouseX, settingsMouseX],
-  );
+  const beginDrag = useCallback(() => {
+    orderAtDragStartRef.current = apps.map((app) => app.id);
+    setIsDragging(true);
+    mouseX.set(Infinity);
+    settingsMouseX.set(Infinity);
+    setHoveredIconId(null);
+    setIsSettingsHovered(false);
+  }, [apps, mouseX, settingsMouseX]);
 
   /** The one discrete "drop" event — persists the final order exactly once
    * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
@@ -315,7 +412,6 @@ export function DockPanel() {
     isDraggingRef.current = false;
     setIsReorderSettling(true);
     isReorderSettlingRef.current = true;
-    layoutCompleteSeenRef.current = false;
     void commitReorder();
 
     const orderChanged =
@@ -326,6 +422,11 @@ export function DockPanel() {
           finishReorderSettle();
         });
       });
+    } else {
+      clearTimeout(settleSafetyRef.current);
+      settleSafetyRef.current = setTimeout(() => {
+        finishReorderSettle();
+      }, SETTLE_SAFETY_MS);
     }
   }, [apps, commitReorder, finishReorderSettle]);
 
@@ -337,7 +438,6 @@ export function DockPanel() {
    */
   const handleItemLayoutAnimationComplete = useCallback(() => {
     if (!isReorderSettlingRef.current) return;
-    layoutCompleteSeenRef.current = true;
     scheduleFinishSettle();
   }, [scheduleFinishSettle]);
 
@@ -352,7 +452,6 @@ export function DockPanel() {
             enterDock();
           } else {
             dockHoveredRef.current = false;
-            lastCursorRef.current = { x: Infinity, y: Infinity };
             mouseX.set(Infinity);
             settingsMouseX.set(Infinity);
             setHoveredIconId(null);
@@ -708,6 +807,17 @@ export function DockPanel() {
             />
           </div>
         )}
+        {insertMarker && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute z-30 w-0.5 -translate-x-1/2 rounded-full bg-zinc-200/90 shadow-[0_0_8px_2px_rgb(255_255_255/0.35)]"
+            style={{
+              left: insertMarker.left,
+              top: insertMarker.top,
+              height: insertMarker.height,
+            }}
+          />
+        )}
         <Reorder.Group
           axis="x"
           values={apps}
@@ -739,7 +849,7 @@ export function DockPanel() {
             layout="position"
             className="relative list-none"
             whileDrag={{ zIndex: 20 }}
-            onDragStart={() => beginDrag(app.id)}
+            onDragStart={beginDrag}
             onDragEnd={endDrag}
             onLayoutAnimationComplete={handleItemLayoutAnimationComplete}
           >

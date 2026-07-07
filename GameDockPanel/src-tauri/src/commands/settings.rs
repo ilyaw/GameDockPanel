@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::commands::apps::{refresh_icon_cache, AppsState};
+
 /// Live-tunable visual settings for the dock, persisted to
 /// `dock-settings.json` and broadcast to every webview on change (see
 /// `update_dock_settings`). Field defaults below mirror the values that
@@ -214,6 +216,16 @@ pub fn update_dock_settings(
     settings.background_speed = settings.background_speed.clamp(0.0, 1.0);
     settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
 
+    let previous_icon_size_px = {
+        let guard = state
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.icon_size_px
+    };
+    let icon_size_changed =
+        (previous_icon_size_px - settings.icon_size_px).abs() >= 0.5;
+
     let path = config_file_path(&app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;
 
@@ -229,6 +241,11 @@ pub fn update_dock_settings(
     // webview's measured DOM + spring animation (ResizeObserver →
     // `resize_dock_window`), not a formula snap here — an immediate native
     // resize would fight the CSS transition and look like a jump.
+
+    if icon_size_changed {
+        let apps_state = app.state::<AppsState>();
+        refresh_icon_cache(&app, &apps_state);
+    }
 
     let _ = app.emit("dock-settings-changed", settings);
     Ok(())

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { PhysicalPosition } from "@tauri-apps/api/dpi";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { AppIconUpdate, AppRunningUpdate, DockApp } from "../lib/types";
 import { MAX_APPS } from "../lib/constants";
@@ -28,6 +29,8 @@ function isAppBundlePath(path: string): boolean {
   return path.endsWith(".app") || path.includes(".app/");
 }
 
+export type InsertIndexResolver = (x: number, y: number) => number;
+
 /**
  * Owns the dock's app list and every IPC touchpoint around it: initial
  * snapshot, running/icon/list-membership push events, reorder, and
@@ -38,6 +41,9 @@ function isAppBundlePath(path: string): boolean {
 export function useDockApps() {
   const [apps, setApps] = useState<DockApp[]>([]);
   const [fileDragOver, setFileDragOver] = useState(false);
+  const [fileDragInsertIndex, setFileDragInsertIndex] = useState<number | null>(
+    null,
+  );
   /**
    * Bumped on any add-app rejection — invalid file type on drop, duplicate
    * bundle ID, or a full dock. One counter, not a boolean, so `DockPanel`
@@ -47,10 +53,32 @@ export function useDockApps() {
    */
   const [rejectPulseKey, setRejectPulseKey] = useState(0);
   const appsRef = useRef<DockApp[]>([]);
+  /** Filled by `DockPanel` — maps drag cursor coords to a dock insert slot. */
+  const resolveInsertIndexRef = useRef<InsertIndexResolver | null>(null);
+  const dragScaleFactorRef = useRef(1);
 
   const reportReject = useCallback(() => {
     setRejectPulseKey((key) => key + 1);
   }, []);
+
+  const resolveInsertIndexFromPosition = useCallback(
+    (position: PhysicalPosition): number => {
+      const logical = position.toLogical(dragScaleFactorRef.current);
+      return (
+        resolveInsertIndexRef.current?.(logical.x, logical.y) ??
+        appsRef.current.length
+      );
+    },
+    [],
+  );
+
+  const updateFileDragInsertIndex = useCallback(
+    (position: PhysicalPosition) => {
+      const index = resolveInsertIndexFromPosition(position);
+      setFileDragInsertIndex(index);
+    },
+    [resolveInsertIndexFromPosition],
+  );
 
   /**
    * Single entry point into `add_app_from_path` — same duplicate/`MAX_APPS`
@@ -58,9 +86,12 @@ export function useDockApps() {
    * frontend either way (see `rejectPulseKey`).
    */
   const addAppPath = useCallback(
-    async (path: string) => {
+    async (path: string, insertIndex?: number) => {
       try {
-        await invoke("add_app_from_path", { path });
+        await invoke("add_app_from_path", {
+          path,
+          insertIndex: insertIndex ?? null,
+        });
       } catch (error) {
         reportReject();
         throw error;
@@ -121,16 +152,37 @@ export function useDockApps() {
         return;
       }
 
+      const webview = getCurrentWebviewWindow();
+
       unlisteners.push(
-        await getCurrentWebviewWindow().onDragDropEvent((event) => {
-          if (event.payload.type === "enter" || event.payload.type === "over") {
+        await webview.onDragDropEvent((event) => {
+          if (event.payload.type === "enter") {
+            void webview.scaleFactor().then((scaleFactor) => {
+              dragScaleFactorRef.current = scaleFactor;
+            });
             setFileDragOver(true);
+            updateFileDragInsertIndex(event.payload.position);
+            return;
           }
-          if (event.payload.type === "leave" || event.payload.type === "drop") {
+
+          if (event.payload.type === "over") {
+            setFileDragOver(true);
+            updateFileDragInsertIndex(event.payload.position);
+            return;
+          }
+
+          if (event.payload.type === "leave") {
             setFileDragOver(false);
+            setFileDragInsertIndex(null);
+            return;
           }
 
           if (event.payload.type !== "drop") return;
+
+          setFileDragOver(false);
+          const insertIndex = resolveInsertIndexFromPosition(event.payload.position);
+          setFileDragInsertIndex(null);
+
           if (appsRef.current.length >= MAX_APPS) {
             console.error("dock is full");
             reportReject();
@@ -146,7 +198,7 @@ export function useDockApps() {
             return;
           }
 
-          addAppPath(appPath).catch((error: unknown) => {
+          addAppPath(appPath, insertIndex).catch((error: unknown) => {
             console.error("Failed to add app from drop:", error);
           });
         }),
@@ -165,7 +217,7 @@ export function useDockApps() {
         unlisten();
       }
     };
-  }, []);
+  }, [addAppPath, reportReject, resolveInsertIndexFromPosition, updateFileDragInsertIndex]);
 
   const activateApp = useCallback((id: string) => {
     const app = appsRef.current.find((candidate) => candidate.id === id);
@@ -246,6 +298,8 @@ export function useDockApps() {
     commitReorder,
     removeApp,
     fileDragOver,
+    fileDragInsertIndex,
+    resolveInsertIndexRef,
     rejectPulseKey,
     showInFinder,
     quitApp,

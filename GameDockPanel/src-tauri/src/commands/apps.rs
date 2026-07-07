@@ -8,6 +8,24 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::platform;
 
+fn icon_metrics_for_app(app: &AppHandle) -> (f64, f64) {
+    use crate::commands::settings::SettingsState;
+
+    let icon_size_dip = {
+        let state = app.state::<SettingsState>();
+        let guard = state
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.icon_size_px
+    };
+    let scale_factor = app
+        .get_webview_window("main")
+        .and_then(|window| window.scale_factor().ok())
+        .unwrap_or(2.0);
+    (icon_size_dip, scale_factor)
+}
+
 /// One dock entry — persisted to disk and used as the live runtime roster.
 /// `id` and `bundle_id` are always equal: a bundle ID is the only stable
 /// identifier an arbitrary user-added app has, so there's no value in also
@@ -383,7 +401,12 @@ pub fn launch_or_activate_app(app: AppHandle, bundle_id: String) -> Result<(), S
 /// rather than returning the new list directly, matching the event-driven
 /// pattern already used for running/icon updates.
 #[tauri::command]
-pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) -> Result<(), String> {
+pub fn add_app_from_path(
+    app: AppHandle,
+    state: State<AppsState>,
+    path: String,
+    insert_index: Option<usize>,
+) -> Result<(), String> {
     let bundle_id = platform::resolve_bundle_id_from_path(&path)?;
 
     {
@@ -411,7 +434,8 @@ pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) 
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        entries.push(entry);
+        let idx = insert_index.unwrap_or(entries.len()).min(entries.len());
+        entries.insert(idx, entry);
     }
 
     {
@@ -426,20 +450,19 @@ pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) 
             .icons
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        icons.insert(bundle_id.clone(), platform::resolve_app_icon(&bundle_id));
+        let (icon_size_dip, scale_factor) = icon_metrics_for_app(&app);
+        icons.insert(
+            bundle_id.clone(),
+            platform::resolve_app_icon(&bundle_id, icon_size_dip, scale_factor),
+        );
     }
 
-    let app_count = {
+    {
         let entries = state
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         save_entries(&app, &entries)?;
-        entries.len()
-    };
-
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = platform::resize_dock_window_for_app_count(&window, app_count);
     }
 
     let _ = app.emit("apps-list-changed", state.snapshot());
@@ -479,21 +502,22 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
         icons.remove(&bundle_id);
     }
 
-    let app_count = {
+    {
         let entries = state
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         save_entries(&app, &entries)?;
-        entries.len()
-    };
-
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = platform::resize_dock_window_for_app_count(&window, app_count);
     }
 
     let _ = app.emit("apps-list-changed", state.snapshot());
     Ok(())
+}
+
+/// Re-rasterizes cached icons at the current display metrics — used when
+/// `iconSizePx` changes so Retina PNGs stay sharp.
+pub(crate) fn refresh_icon_cache(app: &AppHandle, state: &AppsState) {
+    platform::refresh_dock_icons(app, state);
 }
 
 /// Reveals the installed `.app` for `bundle_id` in Finder. Purely a

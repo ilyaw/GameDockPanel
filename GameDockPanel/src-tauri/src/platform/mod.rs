@@ -7,9 +7,10 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
     activate_or_launch_app, is_app_installed, is_bundle_running, quit_app,
-    resolve_bundle_id_from_path, resolve_icon_data_url as resolve_app_icon,
-    reveal_app_in_finder,     resize_dock_window_for_app_count, resize_dock_window_for_pill,
-    setup_dock_window, start_apps_monitoring, sync_vibrancy_pill_from_web,
+    refresh_dock_icons, resolve_bundle_id_from_path,
+    resolve_icon_data_url as resolve_app_icon, reveal_app_in_finder,
+    resize_dock_window_for_pill, setup_dock_window, start_apps_monitoring,
+    sync_vibrancy_pill_from_web,
 };
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
@@ -51,9 +52,16 @@ pub fn resolve_bundle_id_from_path(_path: &str) -> Result<String, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn resolve_app_icon(_bundle_id: &str) -> Option<String> {
+pub fn resolve_app_icon(
+    _bundle_id: &str,
+    _icon_size_dip: f64,
+    _scale_factor: f64,
+) -> Option<String> {
     None
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn refresh_dock_icons(_app: &tauri::AppHandle, _state: &crate::commands::apps::AppsState) {}
 
 #[cfg(not(target_os = "macos"))]
 pub fn resize_dock_window_for_pill(

@@ -26,6 +26,22 @@ struct DockCursorPayload {
 /// geometry call site below instead of threading an extra parameter through
 /// each one (mirrors how `pill_width_dip`/`pill_height_dip` are already read
 /// from `AppsState` rather than passed around).
+fn icon_export_px(icon_size_dip: f64, scale_factor: f64) -> f64 {
+    (icon_size_dip * MAGNIFY_MAX_SCALE * scale_factor)
+        .ceil()
+        .clamp(ICON_EXPORT_MIN_PX, ICON_EXPORT_MAX_PX)
+}
+
+fn sync_icon_size_preview(window: &WebviewWindow, icon_size_dip: f64) {
+    let clamped = icon_size_dip.round().clamp(44.0, 72.0);
+    let settings_state = window.state::<SettingsState>();
+    let mut guard = settings_state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.icon_size_px = clamped;
+}
+
 fn current_icon_size_dip(window: &WebviewWindow) -> f64 {
     let state = window.state::<SettingsState>();
     let guard = state
@@ -71,10 +87,10 @@ const CLICK_POLL_MS: u64 = 50;
 /// menu itself (see `AppsState::menu_overlay_height_dip`).
 const MENU_OVERLAY_GAP_DIP: f64 = 16.0;
 
-/// Raster size for native icon export — `NSWorkspace.iconForFile` defaults to
-/// 32×32; upscaling that in the dock looks blocky. Comfortably above the
-/// largest on-screen icon footprint across every preset (72 × 1.4 × 2 ≈ 202).
-const ICON_EXPORT_PX: f64 = 256.0;
+/// Raster export cap for native icon PNGs — sized from icon display metrics
+/// via `icon_export_px`, not a fixed constant.
+const ICON_EXPORT_MAX_PX: f64 = 512.0;
+const ICON_EXPORT_MIN_PX: f64 = 128.0;
 
 /// Mirrors `SizeMetrics`/`getSizeMetrics` in src/lib/constants.ts — trimmed
 /// to just the fields Rust itself reads (window sizing / hit-testing).
@@ -387,6 +403,8 @@ pub fn resize_dock_window_for_pill(
     pill_height: f64,
     icon_size_dip: f64,
 ) -> Result<bool, String> {
+    sync_icon_size_preview(window, icon_size_dip);
+
     let target_width = window_width_dip(pill_width, icon_size_dip);
     let target_height = window_height_dip(pill_height, icon_size_dip);
     let changed = set_window_frame_instant(window, target_width, target_height)?;
@@ -410,11 +428,10 @@ pub fn resize_dock_window_for_pill(
     Ok(changed)
 }
 
-/// Formula-based resize when the DOM has not measured yet — used from
-/// `add_app_from_path` / `remove_app` (app count changed) and from
-/// `update_dock_settings` (icon-size preset changed) as a belt-and-
-/// suspenders path ahead of the frontend's own measured-DOM resize.
+/// Formula-based resize when the DOM has not measured yet — kept as a
+/// belt-and-suspenders fallback for future call sites.
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub fn resize_dock_window_for_app_count(
     window: &WebviewWindow,
     app_count: usize,
@@ -920,8 +937,13 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
             .icons
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let icon_size_dip = current_icon_size_dip_from_app(&app_handle);
+        let scale_factor = dock_window_scale_factor(&app_handle);
         for entry in entries.iter() {
-            icons.insert(entry.bundle_id.clone(), resolve_icon_data_url(&entry.bundle_id));
+            icons.insert(
+                entry.bundle_id.clone(),
+                resolve_icon_data_url(&entry.bundle_id, icon_size_dip, scale_factor),
+            );
         }
     }
 
@@ -1025,7 +1047,11 @@ fn handle_workspace_notification(
             icons.get(&bundle_id).cloned().flatten().is_none()
         };
         if needs_resolve {
-            if let Some(icon_url) = resolve_icon_data_url(&bundle_id) {
+            let icon_size_dip = current_icon_size_dip_from_app(app);
+            let scale_factor = dock_window_scale_factor(app);
+            if let Some(icon_url) =
+                resolve_icon_data_url(&bundle_id, icon_size_dip, scale_factor)
+            {
                 let mut icons = state
                     .icons
                     .lock()
@@ -1056,6 +1082,31 @@ fn emit_apps_icons_updated(app: &AppHandle, updates: Vec<crate::commands::apps::
     let _ = app.emit("apps-icons-updated", updates);
 }
 
+/// Re-rasterizes every dock icon at the current display metrics — called
+/// when `iconSizePx` changes so cached PNGs stay sharp on Retina.
+#[cfg(target_os = "macos")]
+pub fn refresh_dock_icons(app: &AppHandle, state: &AppsState) {
+    let icon_size_dip = current_icon_size_dip_from_app(app);
+    let scale_factor = dock_window_scale_factor(app);
+    let entries = state
+        .entries
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut icons = state
+        .icons
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    for entry in entries.iter() {
+        icons.insert(
+            entry.bundle_id.clone(),
+            resolve_icon_data_url(&entry.bundle_id, icon_size_dip, scale_factor),
+        );
+    }
+
+    emit_apps_icons_updated(app, state.icons_snapshot());
+}
+
 /// Resolves a bundle ID to its installed `.app`'s icon and renders it as a
 /// `data:image/png;base64,...` URL. Returns `None` if the app isn't
 /// installed or the icon can't be encoded — the frontend falls back to an
@@ -1063,7 +1114,11 @@ fn emit_apps_icons_updated(app: &AppHandle, updates: Vec<crate::commands::apps::
 /// to `commands::apps` (as `resolve_app_icon`) via `platform::mod` for the
 /// add-app-from-dialog flow.
 #[cfg(target_os = "macos")]
-pub fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
+pub fn resolve_icon_data_url(
+    bundle_id: &str,
+    icon_size_dip: f64,
+    scale_factor: f64,
+) -> Option<String> {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::NSString;
 
@@ -1072,7 +1127,29 @@ pub fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
     let app_url = workspace.URLForApplicationWithBundleIdentifier(&ns_bundle_id)?;
     let path = app_url.path()?;
     let icon = workspace.iconForFile(&path);
-    icon_to_png_data_url(&icon)
+    let export_px = icon_export_px(icon_size_dip, scale_factor);
+    icon_to_png_data_url(&icon, export_px)
+}
+
+#[cfg(target_os = "macos")]
+fn current_icon_size_dip_from_app(app: &AppHandle) -> f64 {
+    if let Some(window) = app.get_webview_window("main") {
+        return current_icon_size_dip(&window);
+    }
+
+    let state = app.state::<SettingsState>();
+    let guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.icon_size_px
+}
+
+#[cfg(target_os = "macos")]
+fn dock_window_scale_factor(app: &AppHandle) -> f64 {
+    app.get_webview_window("main")
+        .and_then(|window| window.scale_factor().ok())
+        .unwrap_or(2.0)
 }
 
 /// `NSImage` → PNG bytes via `CGImage`, not manual `.icns`/`Info.plist`
@@ -1080,21 +1157,50 @@ pub fn resolve_icon_data_url(bundle_id: &str) -> Option<String> {
 /// expose a modern direct-to-PNG method, so the standard AppKit route is
 /// `NSImage` → `CGImage` → `NSBitmapImageRep` → PNG `NSData`.
 #[cfg(target_os = "macos")]
-fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage) -> Option<String> {
+fn icon_to_png_data_url(icon: &objc2_app_kit::NSImage, export_px: f64) -> Option<String> {
     use base64::Engine as _;
     use objc2::AnyThread;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
     use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize};
 
-    // Pick the best embedded representation (512/256/128…) for dock display.
-    let export_size = NSSize::new(ICON_EXPORT_PX, ICON_EXPORT_PX);
+    let properties = NSDictionary::new();
+    let min_pixels = (export_px * 0.75).floor() as i64;
+    let mut best_png: Option<Vec<u8>> = None;
+    let mut best_pixels: i64 = 0;
+
+    for rep in icon.representations().iter() {
+        let Some(bitmap) = rep.downcast_ref::<NSBitmapImageRep>() else {
+            continue;
+        };
+        let px = bitmap.pixelsWide().max(bitmap.pixelsHigh()) as i64;
+        if px <= best_pixels {
+            continue;
+        }
+        if let Some(png_data) = unsafe {
+            bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
+        } {
+            best_pixels = px;
+            best_png = Some(png_data.to_vec());
+        }
+    }
+
+    if let Some(png_bytes) = best_png {
+        if best_pixels >= min_pixels {
+            return Some(format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png_bytes)
+            ));
+        }
+    }
+
+    // Fallback: rasterize at the target export size via CGImage.
+    let export_size = NSSize::new(export_px, export_px);
     icon.setSize(export_size);
     let mut proposed_rect = NSRect::new(NSPoint::new(0.0, 0.0), export_size);
     let cg_image =
         unsafe { icon.CGImageForProposedRect_context_hints(&mut proposed_rect, None, None) }?;
 
     let bitmap = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg_image);
-    let properties = NSDictionary::new();
     let png_data = unsafe {
         bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties)
     }?;
