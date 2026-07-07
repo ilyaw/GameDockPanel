@@ -189,6 +189,36 @@ export const BACKGROUND_PRESETS: BackgroundPreset[] = [
     label: "Frost",
     colors: ["#0072ff", "#00c6ff", "#7de2fc", "#c2f5ff", "#66d9ff", "#0072ff"],
   },
+  {
+    id: "vapor",
+    label: "Vaporwave",
+    colors: ["#ff71ce", "#b967ff", "#01cdfe", "#05ffa1", "#fffb96", "#ff71ce"],
+  },
+  {
+    id: "matrix",
+    label: "Matrix",
+    colors: ["#003b00", "#008f11", "#00ff41", "#39ff14", "#00ff41", "#008f11"],
+  },
+  {
+    id: "plasma",
+    label: "Plasma",
+    colors: ["#7b2ff7", "#f107a3", "#ff6b6b", "#feca57", "#f107a3", "#7b2ff7"],
+  },
+  {
+    id: "bloodmoon",
+    label: "Blood Moon",
+    colors: ["#1a0000", "#8b0000", "#ff0000", "#ff4500", "#8b0000", "#1a0000"],
+  },
+  {
+    id: "neon-noir",
+    label: "Neon Noir",
+    colors: ["#ff00ff", "#8000ff", "#0080ff", "#ff00aa", "#4b0082", "#ff00ff"],
+  },
+  {
+    id: "solar",
+    label: "Solar Flare",
+    colors: ["#ffd700", "#ffae00", "#ff7b00", "#fff2cc", "#ffae00", "#ffd700"],
+  },
 ];
 
 /** Falls back to the first preset for an unrecognized id — e.g. a config
@@ -196,6 +226,94 @@ export const BACKGROUND_PRESETS: BackgroundPreset[] = [
  * about yet, rather than rendering nothing. */
 export function getBackgroundPreset(id: string): BackgroundPreset {
   return BACKGROUND_PRESETS.find((preset) => preset.id === id) ?? BACKGROUND_PRESETS[0];
+}
+
+/**
+ * A cyberpunk-styled animation driving the pill's RGB frame while
+ * `DockSettings.animationsEnabled` is on — picked by id in
+ * `DockSettings.borderStyle`. `animationClass` names a Tailwind
+ * `--animate-*` utility registered in `src/index.css`; `"scan"` is the one
+ * exception — it renders no border-color keyframe of its own and instead
+ * gets a dedicated rotating conic-gradient ring overlay in `DockPanel.tsx`
+ * (see `dock-border-scan-ring` in index.css), so its `animationClass` is
+ * left empty.
+ */
+export interface BorderStylePreset {
+  id: string;
+  label: string;
+  description: string;
+  animationClass: string;
+}
+
+export const BORDER_STYLE_PRESETS: BorderStylePreset[] = [
+  {
+    id: "spectrum",
+    label: "Спектр",
+    description: "Плавный перелив всех 6 цветов по кругу.",
+    animationClass: "animate-rgb-glow",
+  },
+  {
+    id: "pulse",
+    label: "Пульс",
+    description: "Неоновое дыхание — рамка разгорается и затухает в такт.",
+    animationClass: "animate-border-pulse",
+  },
+  {
+    id: "glitch",
+    label: "Глитч",
+    description: "Рваные скачки цвета и короткие обрывы сигнала.",
+    animationClass: "animate-border-glitch",
+  },
+  {
+    id: "scan",
+    label: "Скан",
+    description: "Луч радара, вращающийся по периметру рамки.",
+    animationClass: "",
+  },
+];
+
+/** Falls back to the first preset for an unrecognized id — same
+ * "future config, older build" guard as `getBackgroundPreset`. */
+export function getBorderStylePreset(id: string): BorderStylePreset {
+  return BORDER_STYLE_PRESETS.find((preset) => preset.id === id) ?? BORDER_STYLE_PRESETS[0];
+}
+
+/**
+ * A decorative overlay animation for the pill body itself (not just its
+ * frame) — picked by id in `DockSettings.panelEffect`, gated by
+ * `DockSettings.panelEffectEnabled`. Tinted at render time from the active
+ * `BackgroundPreset`'s colors (`--dock-bg-*` custom properties already set
+ * on the pill for the background flow layer), so it never needs its own
+ * separate color config.
+ */
+export interface PanelEffectPreset {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export const PANEL_EFFECT_PRESETS: PanelEffectPreset[] = [
+  { id: "none", label: "Нет", description: "Без дополнительного слоя поверх панели." },
+  {
+    id: "scanline",
+    label: "Скан-линии",
+    description: "Тонкие горизонтальные линии в стиле ЭЛТ-монитора — без блика по иконкам.",
+  },
+  {
+    id: "grid",
+    label: "HUD-сетка",
+    description: "Тонкая киберпанк-сетка, медленно смещающаяся по панели.",
+  },
+  {
+    id: "flicker",
+    label: "Голограмма",
+    description: "Мерцание в стиле нестабильной голографической проекции.",
+  },
+];
+
+/** Same fallback convention as `getBackgroundPreset`/`getBorderStylePreset`. */
+export function getPanelEffectPreset(id: string): PanelEffectPreset {
+  return PANEL_EFFECT_PRESETS.find((preset) => preset.id === id) ?? PANEL_EFFECT_PRESETS[0];
 }
 
 /** Animation-duration bounds for the background flow, in seconds — the
@@ -222,6 +340,9 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   animationsEnabled: true,
   rgbGlowColors: ["#ff3b6b", "#ff9d3b", "#e9ff3b", "#3bffb0", "#3bb0ff", "#b03bff"],
   staticGlowColor: "#ff3b6b",
+  borderStyle: "spectrum",
+  panelEffectEnabled: true,
+  panelEffect: "grid",
   backgroundAnimationEnabled: true,
   backgroundPreset: "chroma",
   backgroundIntensity: 0.7,

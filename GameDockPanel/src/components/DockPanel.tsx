@@ -11,6 +11,8 @@ import {
   ICON_SIZE_PX,
   getBackgroundPreset,
   backgroundSpeedToDurationS,
+  getBorderStylePreset,
+  getPanelEffectPreset,
 } from "../lib/constants";
 import type { DockApp } from "../lib/types";
 
@@ -23,10 +25,24 @@ import type { DockApp } from "../lib/types";
 type StyleWithGlowVars = React.CSSProperties & Record<`--dock-glow-${number}`, string>;
 
 /** Same gap as `StyleWithGlowVars`, for the background gradient layer's own
- * custom properties (`--dock-bg-1..6`, `--dock-bg-duration`). */
-type StyleWithBgVars = React.CSSProperties &
-  Record<`--dock-bg-${number}`, string> &
+ * custom properties (`--dock-bg-1..6`, `--dock-bg-duration`). Set on the
+ * pill itself (not just the flow layer) so any descendant can read them by
+ * inheritance — the panel-effect overlay tints itself from `--dock-bg-1`
+ * the same way the flow layer does, without needing its own color config. */
+type StyleWithBgVars = Record<`--dock-bg-${number}`, string> &
   Record<"--dock-bg-duration", string>;
+
+type PillStyle = StyleWithGlowVars & StyleWithBgVars;
+
+/** Maps a `PANEL_EFFECT_PRESETS` id to its `index.css` overlay class + the
+ * `--animate-panel-*` utility that drives it — kept here rather than on the
+ * preset objects themselves since these are CSS implementation details the
+ * settings UI never needs. */
+const PANEL_EFFECT_CLASSES: Record<string, { overlay: string; animation: string }> = {
+  scanline: { overlay: "dock-panel-scanline", animation: "animate-panel-scanline" },
+  grid: { overlay: "dock-panel-grid", animation: "animate-panel-grid" },
+  flicker: { overlay: "dock-panel-hologram", animation: "animate-panel-flicker" },
+};
 
 /** How long the pill's reject-pulse border stays applied — mirrors the
  * `--animate-reject-pulse` duration in `index.css`; kept here instead of
@@ -271,49 +287,62 @@ export function DockPanel() {
     return () => observer.disconnect();
   }, [apps]);
 
+  const activeBorderStyle = getBorderStylePreset(settings.borderStyle);
   /**
-   * Static border/shadow (from `staticGlowColor`) sit alongside the CSS
-   * custom properties the animated cycle reads (`--dock-glow-1..6`).
-   * Both live in the same inline style rather than switching classes: a
-   * running CSS animation (`animate-rgb-glow` / `animate-reject-pulse`)
-   * always outranks a plain inline declaration on the same property per
-   * the cascade, so these static values simply show through whenever
-   * neither animation class is applied (`animationsEnabled` off, not
-   * rejecting) — no extra branching needed to pick which one "wins".
+   * "Scan" doesn't animate `border-color`/`box-shadow` like the other three
+   * styles — it gets a dedicated conic-gradient ring overlay instead (see
+   * `.dock-border-scan-ring` in index.css). Suppressed during a reject
+   * flash or an active file drag-over, same as the other border styles,
+   * since both of those already communicate their own state through the
+   * pill's real border.
    */
-  const pillStyle = useMemo<StyleWithGlowVars>(
-    () => ({
-      height: PILL_HEIGHT_PX,
-      borderColor: settings.staticGlowColor,
-      boxShadow: `0 0 14px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
-      "--dock-glow-1": settings.rgbGlowColors[0],
-      "--dock-glow-2": settings.rgbGlowColors[1],
-      "--dock-glow-3": settings.rgbGlowColors[2],
-      "--dock-glow-4": settings.rgbGlowColors[3],
-      "--dock-glow-5": settings.rgbGlowColors[4],
-      "--dock-glow-6": settings.rgbGlowColors[5],
-    }),
-    [settings.staticGlowColor, settings.rgbGlowColors],
-  );
+  const showScanRing =
+    settings.animationsEnabled &&
+    activeBorderStyle.id === "scan" &&
+    !isRejecting &&
+    !fileDragOver;
+
+  const activePanelEffect = getPanelEffectPreset(settings.panelEffect);
+  const panelEffectClasses = PANEL_EFFECT_CLASSES[activePanelEffect.id];
+  const showPanelEffect =
+    settings.panelEffectEnabled && !!panelEffectClasses && !fileDragOver;
 
   /**
-   * The animated RGB/gradient background layer (see `.dock-bg-flow` /
-   * `@keyframes rgb-bg-flow` in index.css) — `backgroundIntensity` mixes
-   * each preset color toward black (same `color-mix()` technique as the
-   * border glow's shadow above), `backgroundVisibility` becomes this
-   * layer's own `opacity` rather than baking alpha into each color stop
-   * so the gradient's relative color balance stays constant as the
-   * slider moves, and `backgroundSpeed` maps to a duration consumed by
-   * `--animate-rgb-bg-flow`'s `var(--dock-bg-duration, ...)` fallback.
+   * Static border/shadow (from `staticGlowColor`) sit alongside the CSS
+   * custom properties the animated cycle reads (`--dock-glow-1..6`) and
+   * the background flow's own (`--dock-bg-1..6`/`--dock-bg-duration`) —
+   * the latter live here (not just on the flow layer below) so the
+   * panel-effect overlay can read them too, by inheritance, without a
+   * second copy. Border custom properties live in the same inline style
+   * rather than switching classes: a running CSS animation
+   * (`animate-rgb-glow`/`animate-border-pulse`/etc., or
+   * `animate-reject-pulse`) always outranks a plain inline declaration on
+   * the same property per the cascade, so these static values simply show
+   * through whenever no animation class is applied (`animationsEnabled`
+   * off, not rejecting) — no extra branching needed to pick which one
+   * "wins". The scan ring is the one exception: it fully replaces the
+   * visible border, so `borderColor`/`boxShadow` are forced transparent
+   * while it's showing instead of leaving a static color to peek through
+   * underneath it.
    */
-  const bgFlowStyle = useMemo<StyleWithBgVars>(() => {
+  const pillStyle = useMemo<PillStyle>(() => {
     const preset = getBackgroundPreset(settings.backgroundPreset);
     const mixed = preset.colors.map(
       (color) =>
         `color-mix(in srgb, ${color} ${Math.round(settings.backgroundIntensity * 100)}%, black)`,
     );
     return {
-      opacity: settings.backgroundVisibility,
+      height: PILL_HEIGHT_PX,
+      borderColor: showScanRing ? "transparent" : settings.staticGlowColor,
+      boxShadow: showScanRing
+        ? "none"
+        : `0 0 14px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
+      "--dock-glow-1": settings.rgbGlowColors[0],
+      "--dock-glow-2": settings.rgbGlowColors[1],
+      "--dock-glow-3": settings.rgbGlowColors[2],
+      "--dock-glow-4": settings.rgbGlowColors[3],
+      "--dock-glow-5": settings.rgbGlowColors[4],
+      "--dock-glow-6": settings.rgbGlowColors[5],
       "--dock-bg-1": mixed[0],
       "--dock-bg-2": mixed[1],
       "--dock-bg-3": mixed[2],
@@ -323,11 +352,23 @@ export function DockPanel() {
       "--dock-bg-duration": `${backgroundSpeedToDurationS(settings.backgroundSpeed)}s`,
     };
   }, [
+    settings.staticGlowColor,
+    settings.rgbGlowColors,
     settings.backgroundPreset,
     settings.backgroundIntensity,
-    settings.backgroundVisibility,
     settings.backgroundSpeed,
+    showScanRing,
   ]);
+
+  /** Just the flow layer's own opacity now — its color/duration custom
+   * properties moved onto `pillStyle` above so other overlays can share
+   * them. `backgroundVisibility` stays this layer's own `opacity` (not
+   * baked into each color stop) so the gradient's relative color balance
+   * stays constant as the slider moves. */
+  const bgFlowStyle = useMemo<React.CSSProperties>(
+    () => ({ opacity: settings.backgroundVisibility }),
+    [settings.backgroundVisibility],
+  );
 
   return (
     <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
@@ -347,8 +388,8 @@ export function DockPanel() {
         className={`pointer-events-auto relative mx-auto m-0 flex shrink-0 items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
           isRejecting
             ? "animate-reject-pulse"
-            : settings.animationsEnabled
-              ? "animate-rgb-glow"
+            : settings.animationsEnabled && !showScanRing
+              ? activeBorderStyle.animationClass
               : ""
         } ${
           fileDragOver
@@ -356,6 +397,16 @@ export function DockPanel() {
             : "border-transparent bg-black/40"
         }`}
       >
+        {showScanRing && (
+          // Separate overlay, not a class on the pill itself — see the
+          // "scan" branch note on `showScanRing`/`activeBorderStyle` above
+          // for why a rotating gradient can't just replace `border-color`
+          // like the other three styles do.
+          <div
+            aria-hidden
+            className="dock-border-scan-ring animate-border-scan-rotate pointer-events-none absolute -inset-px -z-10 rounded-[28px]"
+          />
+        )}
         {settings.backgroundAnimationEnabled && !fileDragOver && (
           // Negative z-index puts this behind the icons/button below
           // automatically (static in-flow siblings paint above negative-
@@ -437,8 +488,8 @@ export function DockPanel() {
           <button
             ref={settingsButtonRef}
             type="button"
-            title="Settings"
-            aria-label="Settings"
+            title="Настройки"
+            aria-label="Настройки"
             onClick={() => {
               void invoke("open_settings");
             }}
@@ -448,6 +499,22 @@ export function DockPanel() {
           </button>
           <span aria-hidden className="h-[3px] w-6" />
         </div>
+        {showPanelEffect && (
+          // Painted above the icon row (see `.dock-panel-scanline`/
+          // `.dock-panel-hologram`'s `mix-blend-mode: screen` in
+          // index.css) so it reads as ambient light sweeping across the
+          // glass rather than a shadow under it — screen mode only ever
+          // adds light, so it never hides an icon underneath it, even
+          // where the two visually overlap.
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 z-[5] overflow-hidden rounded-[28px]"
+          >
+            <div
+              className={`h-full w-full ${panelEffectClasses.overlay} ${panelEffectClasses.animation}`}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

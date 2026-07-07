@@ -39,6 +39,17 @@ img {
      fallback only covers the sliver of time before DockPanel's inline
      style sets `--dock-bg-duration` on mount. */
   --animate-rgb-bg-flow: rgb-bg-flow var(--dock-bg-duration, 14s) linear infinite;
+  /* Alternate `BORDER_STYLE_PRESETS` animations (constants.ts) — one of
+     these replaces `animate-rgb-glow` on the pill, never combined with it. */
+  --animate-border-pulse: border-pulse 2.4s ease-in-out infinite;
+  --animate-border-glitch: border-glitch 5s steps(1) infinite;
+  --animate-border-scan-rotate: border-scan-rotate 3s linear infinite;
+  /* `PANEL_EFFECT_PRESETS` overlays — layered above the icons, tinted from
+     the active background preset, independent of the border/background
+     toggles above. */
+  --animate-panel-scanline: panel-scanline-drift 6s linear infinite;
+  --animate-panel-grid: panel-grid-scroll 10s linear infinite;
+  --animate-panel-flicker: panel-hologram-flicker 4s steps(1) infinite;
 }
 
 /*
@@ -78,6 +89,219 @@ img {
   100% {
     border-color: var(--dock-glow-1);
     box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-1) 40%, transparent);
+  }
+}
+
+/*
+  "Pulse" border style (BORDER_STYLE_PRESETS) — a single-hue neon sign
+  breathing in and out, rather than cycling through the full palette.
+  Deliberately only reads `--dock-glow-1` (the first cycle stop): a
+  breathing effect reads as "alive", cycling *and* breathing at once reads
+  as noisy, so this style trades the rest of the palette for a calmer,
+  more focused neon look.
+*/
+@keyframes border-pulse {
+  0%,
+  100% {
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 10px 0 color-mix(in srgb, var(--dock-glow-1) 35%, transparent);
+  }
+  50% {
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 30px 6px color-mix(in srgb, var(--dock-glow-1) 75%, transparent);
+  }
+}
+
+/*
+  "Glitch" border style — abrupt, unevenly-timed jumps between cycle stops
+  with brief signal-loss blackouts, using `steps(1)` (see the
+  `--animate-border-glitch` timing function) so each keyframe stop snaps
+  instantly instead of interpolating like `rgb-glow` — interpolation would
+  read as a smooth cycle, not a glitch.
+*/
+@keyframes border-glitch {
+  0%,
+  100% {
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 16px 0 color-mix(in srgb, var(--dock-glow-1) 50%, transparent);
+  }
+  3% {
+    border-color: transparent;
+    box-shadow: none;
+  }
+  6% {
+    border-color: var(--dock-glow-3);
+    box-shadow: 0 0 22px 2px color-mix(in srgb, var(--dock-glow-3) 60%, transparent);
+  }
+  9%,
+  40% {
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 16px 0 color-mix(in srgb, var(--dock-glow-1) 50%, transparent);
+  }
+  42% {
+    border-color: transparent;
+    box-shadow: none;
+  }
+  44% {
+    border-color: var(--dock-glow-5);
+    box-shadow: 0 0 24px 3px color-mix(in srgb, var(--dock-glow-5) 65%, transparent);
+  }
+  47%,
+  70% {
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 16px 0 color-mix(in srgb, var(--dock-glow-1) 50%, transparent);
+  }
+  72% {
+    border-color: transparent;
+    box-shadow: none;
+  }
+  74% {
+    border-color: var(--dock-glow-2);
+    box-shadow: 0 0 20px 2px color-mix(in srgb, var(--dock-glow-2) 55%, transparent);
+  }
+  76% {
+    border-color: var(--dock-glow-1);
+    box-shadow: 0 0 16px 0 color-mix(in srgb, var(--dock-glow-1) 50%, transparent);
+  }
+}
+
+/*
+  "Scan" border style — a radar-style sweep rotating around the frame.
+  Unlike the other three styles, this one isn't a `border-color`/
+  `box-shadow` keyframe applied to the pill itself: a rotating highlight
+  needs an actual gradient, and animating the pill's own `background`
+  would collide with its vibrancy tint / drag-over state (see
+  `pillStyle`/`fileDragOver` in DockPanel.tsx). Instead `DockPanel` renders
+  a separate absolutely-positioned `.dock-border-scan-ring` overlay sized
+  to the pill: `@property --dock-scan-angle` lets `border-scan-rotate`
+  animate the conic gradient's rotation smoothly (plain custom properties
+  can't be interpolated), and the two masks combined with
+  `mask-composite: exclude` clip that gradient down to just a ring the
+  width of `padding` below — the classic CSS "gradient border" trick.
+*/
+@property --dock-scan-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes border-scan-rotate {
+  to {
+    --dock-scan-angle: 360deg;
+  }
+}
+
+.dock-border-scan-ring {
+  padding: 2px;
+  background: conic-gradient(
+    from var(--dock-scan-angle),
+    transparent 0deg,
+    transparent 296deg,
+    color-mix(in srgb, var(--dock-glow-1) 65%, transparent) 328deg,
+    var(--dock-glow-1) 344deg,
+    #fff 352deg,
+    var(--dock-glow-1) 358deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+/*
+  Panel-body overlays (PANEL_EFFECT_PRESETS) — layered above the icons in
+  DockPanel.tsx, tinted from `--dock-bg-1` (already set for the background
+  flow layer, see `bgFlowStyle`) so they never need their own color config.
+  `mix-blend-mode: screen` on the hologram overlay makes it add light onto
+  the dark glass instead of painting an opaque patch over the icons
+  underneath. Scanlines and grid stay as low-opacity layers without blend.
+*/
+.dock-panel-scanline {
+  /*
+    Real CRT-style horizontal scanlines — thin repeating rows tinted from
+    the RGB frame (`--dock-glow-1`). The old version was a wide vertical
+    shimmer band sliding left-to-right over the icons, which read as an
+    ugly white stripe; this replaces it with a static-feeling retro overlay
+    that only drifts vertically by one line-height per cycle.
+  */
+  opacity: 0.28;
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent 0,
+    transparent 2px,
+    color-mix(in srgb, var(--dock-glow-1, #3bb0ff) 35%, transparent) 2px,
+    color-mix(in srgb, var(--dock-glow-1, #3bb0ff) 35%, transparent) 3px
+  );
+  background-size: 100% 3px;
+}
+
+@keyframes panel-scanline-drift {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 0 3px;
+  }
+}
+
+.dock-panel-grid {
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--dock-bg-1, #fff) 45%, transparent) 0 1px,
+      transparent 1px 18px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--dock-bg-1, #fff) 45%, transparent) 0 1px,
+      transparent 1px 18px
+    );
+  opacity: 0.5;
+}
+
+@keyframes panel-grid-scroll {
+  0% {
+    background-position:
+      0 0,
+      0 0;
+  }
+  100% {
+    background-position:
+      0 18px,
+      18px 0;
+  }
+}
+
+.dock-panel-hologram {
+  background: color-mix(in srgb, var(--dock-bg-1, #fff) 16%, transparent);
+  mix-blend-mode: screen;
+}
+
+@keyframes panel-hologram-flicker {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  4% {
+    opacity: 0.5;
+  }
+  6% {
+    opacity: 0.1;
+  }
+  8% {
+    opacity: 0.45;
+  }
+  10%,
+  60% {
+    opacity: 0.15;
+  }
+  62% {
+    opacity: 0.55;
+  }
+  64% {
+    opacity: 0.12;
   }
 }
 

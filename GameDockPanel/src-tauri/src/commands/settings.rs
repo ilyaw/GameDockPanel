@@ -25,6 +25,16 @@ pub struct DockSettings {
     /// Frame color shown when `animations_enabled` is off — a static
     /// picture, not a random freeze-frame of the cycle.
     pub static_glow_color: String,
+    /// Id into the frontend's `BORDER_STYLE_PRESETS` table — same
+    /// "id-only, frontend owns the data" pattern as `background_preset`.
+    /// Selects which keyframe animation drives the RGB frame: spectrum
+    /// cycle, neon pulse, glitch flicker, or a rotating scan ring.
+    pub border_style: String,
+    /// Master toggle for the panel-body decorative overlay (scanlines /
+    /// HUD grid / hologram flicker), independent of `background_animation_enabled`.
+    pub panel_effect_enabled: bool,
+    /// Id into the frontend's `PANEL_EFFECT_PRESETS` table.
+    pub panel_effect: String,
     /// Master toggle for the animated RGB/gradient background layer under
     /// the icons, painted on top of the native vibrancy blur. Independent
     /// of `animations_enabled` (border cycle + LED pulse only) — this is a
@@ -56,6 +66,9 @@ impl Default for DockSettings {
                 "#b03bff".to_string(),
             ],
             static_glow_color: "#ff3b6b".to_string(),
+            border_style: "spectrum".to_string(),
+            panel_effect_enabled: true,
+            panel_effect: "grid".to_string(),
             background_animation_enabled: true,
             background_preset: "chroma".to_string(),
             background_intensity: 0.7,

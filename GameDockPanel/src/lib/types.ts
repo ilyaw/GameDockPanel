@@ -53,6 +53,20 @@ export interface DockSettings {
   /** Frame color shown when `animationsEnabled` is off, instead of a
    * random freeze-frame of the cycle. */
   staticGlowColor: string;
+  /** Id into `BORDER_STYLE_PRESETS` (constants.ts) — picks which keyframe
+   * animation drives the RGB frame while `animationsEnabled` is on:
+   * smooth spectrum cycle, neon breathing pulse, glitch flicker, or a
+   * rotating radar-style scan ring. Falls back to the first preset for an
+   * unrecognized id, same convention as `backgroundPreset`. */
+  borderStyle: string;
+  /** Master toggle for the panel-body decorative overlay (scanlines / HUD
+   * grid / hologram flicker) — independent of the border cycle and the
+   * background gradient flow, each of which has its own on/off. */
+  panelEffectEnabled: boolean;
+  /** Id into `PANEL_EFFECT_PRESETS` (constants.ts) — which overlay
+   * animation plays across the pill body, tinted from the active
+   * background preset's colors. */
+  panelEffect: string;
   /** Master toggle for the animated RGB/gradient background layer under
    * the icons (painted on top of the native vibrancy blur). Independent
    * of `animationsEnabled`, which only ever covered the border cycle + LED

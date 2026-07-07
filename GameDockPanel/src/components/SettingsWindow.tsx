@@ -1,7 +1,14 @@
 import { useCallback, type ReactNode } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { useDockSettings } from "../hooks/useDockSettings";
-import { BACKGROUND_PRESETS, type BackgroundPreset } from "../lib/constants";
+import {
+  BACKGROUND_PRESETS,
+  BORDER_STYLE_PRESETS,
+  PANEL_EFFECT_PRESETS,
+  type BackgroundPreset,
+  type BorderStylePreset,
+  type PanelEffectPreset,
+} from "../lib/constants";
 import type { DockSettings } from "../lib/types";
 
 /** Minimal accessible on/off switch — no toggle primitive in lucide-react,
@@ -96,6 +103,38 @@ function PresetSwatch({
   );
 }
 
+/** Named text pill for a small, description-bearing preset list (border
+ * style / panel effect) — unlike `PresetSwatch`, these presets aren't
+ * colors, so a label reads better than a swatch here. */
+function StylePresetButton({
+  preset,
+  selected,
+  disabled,
+  onSelect,
+}: {
+  preset: BorderStylePreset | PanelEffectPreset;
+  selected: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={preset.description}
+      aria-pressed={selected}
+      disabled={disabled}
+      onClick={onSelect}
+      className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        selected
+          ? "border-indigo-400 bg-indigo-500/20 text-indigo-200"
+          : "border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+      }`}
+    >
+      {preset.label}
+    </button>
+  );
+}
+
 function SettingsRow({
   title,
   description,
@@ -140,17 +179,24 @@ export function SettingsWindow() {
     [settings.rgbGlowColors, update],
   );
 
+  const applyGlowPalette = useCallback(
+    (preset: BackgroundPreset) => {
+      update({ rgbGlowColors: [...preset.colors], staticGlowColor: preset.colors[0] });
+    },
+    [update],
+  );
+
   return (
     <div className="h-screen w-full overflow-y-auto bg-zinc-950 px-6 py-6 text-zinc-100">
       <header className="mb-4 flex items-center gap-2">
         <SlidersHorizontal className="h-5 w-5 text-zinc-400" />
-        <h1 className="text-lg font-semibold">Dock Settings</h1>
+        <h1 className="text-lg font-semibold">Настройки дока</h1>
       </header>
 
       <section className="divide-y divide-zinc-800 rounded-xl border border-zinc-800 bg-zinc-900/60 px-4">
         <SettingsRow
-          title="Animations"
-          description="Cycling RGB frame and LED pulse only — hover-magnify and drag-reorder are unaffected."
+          title="Анимации рамки"
+          description="Переливающаяся RGB-рамка и пульсация LED — увеличение иконок при наведении и перетаскивание не затрагиваются."
         >
           <ToggleSwitch
             checked={settings.animationsEnabled}
@@ -159,45 +205,113 @@ export function SettingsWindow() {
         </SettingsRow>
 
         <SettingsRow
-          title="RGB frame colors"
-          description="Cycle stops for the animated frame. Dimmed while animations are off — they're not visible until re-enabled."
+          title="Стиль рамки"
+          description="Как именно анимируется RGB-рамка, пока анимации включены — от плавного спектра до киберпанк-глитча и сканирующего луча."
         >
           <div
-            className={`flex gap-2 transition-opacity ${
+            className={`flex max-w-[220px] flex-wrap justify-end gap-1.5 transition-opacity ${
               settings.animationsEnabled ? "" : "opacity-40"
             }`}
           >
-            {settings.rgbGlowColors.map((color, index) => (
-              <input
-                // Fixed 6-stop palette — index is a stable identity here.
-                key={index}
-                type="color"
-                value={color}
+            {BORDER_STYLE_PRESETS.map((preset) => (
+              <StylePresetButton
+                key={preset.id}
+                preset={preset}
+                selected={settings.borderStyle === preset.id}
                 disabled={!settings.animationsEnabled}
-                onChange={(event) => updateGlowColor(index, event.target.value)}
-                className={colorInputClass}
-                aria-label={`RGB frame color ${index + 1}`}
+                onSelect={() => update({ borderStyle: preset.id })}
               />
             ))}
           </div>
         </SettingsRow>
 
         <SettingsRow
-          title="Static frame color"
-          description="Shown instead of the cycle when animations are off."
+          title="Цвета RGB-рамки"
+          description="Опорные цвета переливающейся рамки. Затемнено, пока анимации выключены — они не видны, пока анимации не включены снова."
+        >
+          <div className="flex flex-col items-end gap-2">
+            <div
+              className={`flex gap-2 transition-opacity ${
+                settings.animationsEnabled ? "" : "opacity-40"
+              }`}
+            >
+              {settings.rgbGlowColors.map((color, index) => (
+                <input
+                  // Fixed 6-stop palette — index is a stable identity here.
+                  key={index}
+                  type="color"
+                  value={color}
+                  disabled={!settings.animationsEnabled}
+                  onChange={(event) => updateGlowColor(index, event.target.value)}
+                  className={colorInputClass}
+                  aria-label={`Цвет рамки ${index + 1}`}
+                />
+              ))}
+            </div>
+            <div
+              className={`flex max-w-[200px] flex-wrap justify-end gap-1.5 transition-opacity ${
+                settings.animationsEnabled ? "" : "opacity-40"
+              }`}
+            >
+              {BACKGROUND_PRESETS.map((preset) => (
+                <PresetSwatch
+                  key={preset.id}
+                  preset={preset}
+                  selected={
+                    settings.animationsEnabled &&
+                    settings.rgbGlowColors.every((color, i) => color === preset.colors[i])
+                  }
+                  disabled={!settings.animationsEnabled}
+                  onSelect={() => applyGlowPalette(preset)}
+                />
+              ))}
+            </div>
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title="Статичный цвет рамки"
+          description="Отображается вместо переливания, когда анимации выключены."
         >
           <input
             type="color"
             value={settings.staticGlowColor}
             onChange={(event) => update({ staticGlowColor: event.target.value })}
             className={colorInputClass}
-            aria-label="Static frame color"
+            aria-label="Статичный цвет рамки"
           />
         </SettingsRow>
 
         <SettingsRow
-          title="Background animation"
-          description="Flowing RGB/gradient layer under the icons, painted on top of the native glass blur."
+          title="Эффект панели"
+          description="Дополнительный киберпанк-слой поверх панели: горизонтальные ЭЛТ-линии, HUD-сетка или мерцание голограммы."
+        >
+          <div className="flex flex-col items-end gap-2">
+            <ToggleSwitch
+              checked={settings.panelEffectEnabled}
+              onChange={(value) => update({ panelEffectEnabled: value })}
+            />
+            <div
+              className={`flex max-w-[220px] flex-wrap justify-end gap-1.5 transition-opacity ${
+                settings.panelEffectEnabled ? "" : "opacity-40"
+              }`}
+            >
+              {PANEL_EFFECT_PRESETS.map((preset) => (
+                <StylePresetButton
+                  key={preset.id}
+                  preset={preset}
+                  selected={settings.panelEffect === preset.id}
+                  disabled={!settings.panelEffectEnabled}
+                  onSelect={() => update({ panelEffect: preset.id })}
+                />
+              ))}
+            </div>
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title="Анимация фона"
+          description="Текущий RGB/градиентный слой под иконками, отрисованный поверх нативного стеклянного блюра."
         >
           <ToggleSwitch
             checked={settings.backgroundAnimationEnabled}
@@ -206,8 +320,8 @@ export function SettingsWindow() {
         </SettingsRow>
 
         <SettingsRow
-          title="Preset"
-          description="Ready-made color combos for the flow — pick a look instead of individual colors."
+          title="Пресет фона"
+          description="Готовые цветовые комбинации для потока — выберите стиль вместо ручной настройки цветов."
         >
           <div
             className={`flex max-w-[200px] flex-wrap justify-end gap-2 transition-opacity ${
@@ -227,38 +341,38 @@ export function SettingsWindow() {
         </SettingsRow>
 
         <SettingsRow
-          title="Intensity"
-          description="How vivid the flow's colors are — low mixes them toward black, high is full brightness."
+          title="Интенсивность"
+          description="Насколько насыщены цвета потока — низкое значение подмешивает чёрный, высокое — полная яркость."
         >
           <PercentSlider
             value={settings.backgroundIntensity}
             onChange={(value) => update({ backgroundIntensity: value })}
             disabled={!settings.backgroundAnimationEnabled}
-            ariaLabel="Background intensity"
+            ariaLabel="Интенсивность фона"
           />
         </SettingsRow>
 
         <SettingsRow
-          title="Visibility"
-          description="Opacity of the whole flow layer over the glass — low keeps it a subtle wash."
+          title="Видимость"
+          description="Непрозрачность всего слоя потока поверх стекла — низкое значение оставляет лишь лёгкий оттенок."
         >
           <PercentSlider
             value={settings.backgroundVisibility}
             onChange={(value) => update({ backgroundVisibility: value })}
             disabled={!settings.backgroundAnimationEnabled}
-            ariaLabel="Background visibility"
+            ariaLabel="Видимость фона"
           />
         </SettingsRow>
 
         <SettingsRow
-          title="Speed"
-          description="How fast the gradient flows — low is a slow drift, high cycles quickly."
+          title="Скорость"
+          description="Как быстро движется градиент — низкое значение — медленный дрейф, высокое — быстрый цикл."
         >
           <PercentSlider
             value={settings.backgroundSpeed}
             onChange={(value) => update({ backgroundSpeed: value })}
             disabled={!settings.backgroundAnimationEnabled}
-            ariaLabel="Background flow speed"
+            ariaLabel="Скорость потока фона"
           />
         </SettingsRow>
       </section>

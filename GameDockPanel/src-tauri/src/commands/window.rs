@@ -49,7 +49,7 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     // styling. Points at the same `index.html` bundle as the dock; `App.tsx`
     // picks the UI to render from `getCurrentWebviewWindow().label`.
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
-        .title("GameDockPanel — Settings")
+        .title("GameDockPanel — Настройки")
         .inner_size(480.0, 680.0)
         .min_inner_size(400.0, 480.0)
         .resizable(true)
