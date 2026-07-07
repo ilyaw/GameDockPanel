@@ -26,6 +26,15 @@ interface DockIconProps {
    * that gap cheaply, without adding a `mousemove`-frequency cost.
    */
   hoverSessionId?: number;
+  /**
+   * Bumped by `DockPanel` once per `Reorder.Item` whose layout box finished
+   * animating into its post-reorder position. A reorder-drag starts and
+   * ends while the cursor never leaves the pill, so it triggers neither
+   * `ResizeObserver` (position, not size, changed) nor a new hover session
+   * — this closes that gap the same way `hoverSessionId` closes the
+   * layout-shift gap above, see the recalculation effect below.
+   */
+  reorderSettledId?: number;
   /** Right-click → "Remove from Dock" — mirrors the real macOS Dock pattern
    * (context menu item, not a separate "edit mode"). */
   onRemove?: (bundleId: string) => void;
@@ -45,6 +54,7 @@ export function DockIcon({
   mouseX,
   isHovered = false,
   hoverSessionId = 0,
+  reorderSettledId = 0,
   onRemove,
   onShowInFinder,
   onQuit,
@@ -103,10 +113,10 @@ export function DockIcon({
 
   useLayoutEffect(() => {
     const el = buttonRef.current;
-    if (!el || hoverSessionId === 0) return;
+    if (!el || (hoverSessionId === 0 && reorderSettledId === 0)) return;
     const rect = el.getBoundingClientRect();
     centerX.set(rect.left + rect.width / 2);
-  }, [hoverSessionId, centerX]);
+  }, [hoverSessionId, reorderSettledId, centerX]);
 
   const distance = useTransform([mouseX, centerX], ([mx, cx]: number[]) => {
     if (!Number.isFinite(mx)) return Infinity;

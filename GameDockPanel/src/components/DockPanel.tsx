@@ -46,6 +46,7 @@ export function DockPanel() {
     apps,
     activateApp,
     reorderApps,
+    commitReorder,
     removeApp,
     fileDragOver,
     rejectPulseKey,
@@ -54,6 +55,17 @@ export function DockPanel() {
   } = useDockApps();
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [hoverSessionId, setHoverSessionId] = useState(0);
+  /**
+   * Bumped once per `Reorder.Item` whose layout box actually finished
+   * animating into its new position after a drag-reorder. `hoverSessionId`
+   * alone doesn't cover this: a reorder-drag starts and ends while the
+   * cursor never leaves the pill, so no new hover session begins, and
+   * `ResizeObserver` in `DockIcon` only reacts to size, not position — so
+   * without this, magnify would score distance against a stale pre-reorder
+   * `centerX` until some unrelated later hover-session start. Consumed by
+   * the same recalculation effect as `hoverSessionId` in `DockIcon`.
+   */
+  const [reorderSettledId, setReorderSettledId] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const isDraggingRef = useRef(false);
   const [isRejecting, setIsRejecting] = useState(false);
@@ -93,9 +105,14 @@ export function DockPanel() {
     setHoverSessionId((id) => id + 1);
   }, []);
 
+  /**
+   * Local-only — fires on every neighbor the dragged icon crosses, not just
+   * once at drop (see `reorderApps` in `useDockApps`). Persistence is a
+   * separate, single call from `endDrag` below.
+   */
   const handleReorder = useCallback(
     (newOrder: DockApp[]) => {
-      void reorderApps(newOrder);
+      reorderApps(newOrder);
     },
     [reorderApps],
   );
@@ -106,8 +123,23 @@ export function DockPanel() {
     setHoveredIconId(null);
   }, [mouseX]);
 
+  /** The one discrete "drop" event — persists the final order exactly once
+   * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
   const endDrag = useCallback(() => {
     setIsDragging(false);
+    void commitReorder();
+  }, [commitReorder]);
+
+  /**
+   * `onLayoutAnimationComplete` on a `Reorder.Item` fires once that item's
+   * layout box has actually finished animating into its post-reorder
+   * position — after the DOM has visually settled, not mid-flight. Bumping
+   * on every completion (not just the first) is deliberate: it's cheap
+   * (a `getBoundingClientRect()` per icon in `DockIcon`, not a per-frame
+   * cost), and the last completion to fire always leaves `centerX` correct.
+   */
+  const handleItemLayoutAnimationComplete = useCallback(() => {
+    setReorderSettledId((id) => id + 1);
   }, []);
 
   useEffect(() => {
@@ -229,6 +261,13 @@ export function DockPanel() {
         }`}
       >
         {apps.map((app) => (
+          // Dragging an icon out of the pill and releasing just snaps it
+          // back into its (possibly reordered) slot — a deliberate decision,
+          // not an unexamined default: Framer Motion hardcodes
+          // `dragSnapToOrigin: true` inside `Reorder.Item` (spread after
+          // `...props`, so it can't be overridden via a prop anyway), and a
+          // "drag out to remove" gesture was explicitly considered and
+          // rejected as out of scope for this pass.
           <Reorder.Item
             key={app.id}
             value={app}
@@ -236,6 +275,7 @@ export function DockPanel() {
             whileDrag={{ zIndex: 20, scale: 1.08 }}
             onDragStart={beginDrag}
             onDragEnd={endDrag}
+            onLayoutAnimationComplete={handleItemLayoutAnimationComplete}
           >
             <DockIcon
               app={app}
@@ -243,6 +283,7 @@ export function DockPanel() {
               mouseX={mouseX}
               isHovered={!isDragging && hoveredIconId === app.id}
               hoverSessionId={hoverSessionId}
+              reorderSettledId={reorderSettledId}
               isDragging={isDragging}
               onRemove={removeApp}
               onShowInFinder={showInFinder}

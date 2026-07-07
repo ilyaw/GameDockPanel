@@ -177,16 +177,39 @@ export function useDockApps() {
     );
   }, []);
 
-  const reorderApps = useCallback(async (newOrder: DockApp[]) => {
-    const previous = appsRef.current;
+  /**
+   * Local-only reorder — Framer Motion's `Reorder.Group.onReorder` fires this
+   * once per neighbor the dragged icon crosses, i.e. potentially many times
+   * during a single drag gesture, not just once at drop. Only updating React
+   * state here (no IPC) keeps the on-screen reorder smooth without turning
+   * every intermediate swap into a disk write; see `commitReorder` below for
+   * the actual persistence, which runs exactly once per drag.
+   */
+  const reorderApps = useCallback((newOrder: DockApp[]) => {
     setApps(newOrder);
+  }, []);
+
+  /**
+   * Persists the current order — called once from `DockPanel`'s drag-end
+   * handler, never from `onReorder` directly (see `reorderApps` above; also
+   * avoids N concurrent `invoke` calls whose completion order isn't
+   * guaranteed to match the drag's swap order). On failure, re-fetches the
+   * canonical snapshot rather than trying to reconstruct "the order before
+   * the last of N swaps" — simpler and always correct.
+   */
+  const commitReorder = useCallback(async () => {
     try {
       await invoke("reorder_apps", {
-        orderedBundleIds: newOrder.map((app) => app.bundleId),
+        orderedBundleIds: appsRef.current.map((app) => app.bundleId),
       });
     } catch (error) {
-      console.error("Failed to reorder dock:", error);
-      setApps(previous);
+      console.error("Failed to persist dock reorder:", error);
+      try {
+        const snapshot = await invoke<DockApp[]>("get_apps_snapshot");
+        setApps(snapshot);
+      } catch (resyncError) {
+        console.error("Failed to resync dock after reorder failure:", resyncError);
+      }
     }
   }, []);
 
@@ -220,6 +243,7 @@ export function useDockApps() {
     appsRef,
     activateApp,
     reorderApps,
+    commitReorder,
     removeApp,
     fileDragOver,
     rejectPulseKey,
