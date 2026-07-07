@@ -49,7 +49,7 @@ img {
      toggles above. */
   --animate-panel-scanline: panel-scanline-drift 6s linear infinite;
   --animate-panel-grid: panel-grid-scroll 10s linear infinite;
-  --animate-panel-flicker: panel-hologram-flicker 4s steps(1) infinite;
+  --animate-panel-flicker: panel-hologram-flicker 4s ease-in-out infinite;
 }
 
 /*
@@ -279,29 +279,52 @@ img {
   mix-blend-mode: screen;
 }
 
+/*
+  Deliberately NOT `steps(1)` with a long flat plateau between two abrupt
+  spikes (the original version) — that read as "calm... jerky flash...
+  calm" rather than a living flicker, since a `steps(1)` timing function
+  snaps instantly at each stop and CSS animations still interpolate
+  linearly across whatever gap sits between two consecutive stops
+  regardless of how far apart their percentages are. `ease-in-out` (see
+  `--animate-panel-flicker`) plus stops spread every ~9% of the cycle keeps
+  the opacity drifting continuously in a moderate band — still reads as an
+  unstable hologram, without a jarring on/off pop or a multi-second dead
+  gap in between.
+*/
 @keyframes panel-hologram-flicker {
   0%,
   100% {
-    opacity: 0.15;
-  }
-  4% {
-    opacity: 0.5;
-  }
-  6% {
-    opacity: 0.1;
+    opacity: 0.22;
   }
   8% {
-    opacity: 0.45;
+    opacity: 0.32;
   }
-  10%,
-  60% {
-    opacity: 0.15;
+  17% {
+    opacity: 0.18;
+  }
+  26% {
+    opacity: 0.34;
+  }
+  35% {
+    opacity: 0.2;
+  }
+  44% {
+    opacity: 0.36;
+  }
+  53% {
+    opacity: 0.19;
   }
   62% {
-    opacity: 0.55;
+    opacity: 0.3;
   }
-  64% {
-    opacity: 0.12;
+  71% {
+    opacity: 0.21;
+  }
+  80% {
+    opacity: 0.38;
+  }
+  90% {
+    opacity: 0.2;
   }
 }
 

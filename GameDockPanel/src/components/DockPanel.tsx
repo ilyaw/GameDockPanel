@@ -11,6 +11,7 @@ import {
   ICON_SIZE_PX,
   MAGNIFY_INFLUENCE_RADIUS_PX,
   MAGNIFY_MAX_SCALE,
+  TOOLTIP_GAP_PX,
   getBackgroundPreset,
   backgroundSpeedToDurationS,
   getBorderStylePreset,
@@ -105,6 +106,7 @@ export function DockPanel() {
   } = useDockApps();
   const { settings } = useDockSettings();
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
+  const [isSettingsHovered, setIsSettingsHovered] = useState(false);
   const [hoverSessionId, setHoverSessionId] = useState(0);
   /**
    * Bumped once per `Reorder.Item` whose layout box actually finished
@@ -151,9 +153,11 @@ export function DockPanel() {
         mouseX.set(Infinity);
         settingsMouseX.set(x);
         setHoveredIconId(null);
+        setIsSettingsHovered(true);
         return;
       }
       settingsMouseX.set(Infinity);
+      setIsSettingsHovered(false);
       mouseX.set(x);
       setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
     },
@@ -165,6 +169,7 @@ export function DockPanel() {
     mouseX.set(Infinity);
     settingsMouseX.set(Infinity);
     setHoveredIconId(null);
+    setIsSettingsHovered(false);
   }, [mouseX, settingsMouseX]);
 
   const enterDock = useCallback(() => {
@@ -189,6 +194,7 @@ export function DockPanel() {
     mouseX.set(Infinity);
     settingsMouseX.set(Infinity);
     setHoveredIconId(null);
+    setIsSettingsHovered(false);
   }, [mouseX, settingsMouseX]);
 
   /** The one discrete "drop" event — persists the final order exactly once
@@ -224,6 +230,7 @@ export function DockPanel() {
             mouseX.set(Infinity);
             settingsMouseX.set(Infinity);
             setHoveredIconId(null);
+            setIsSettingsHovered(false);
           }
         }),
       );
@@ -535,19 +542,40 @@ export function DockPanel() {
             pill row is `items-end`, so without this the button's bottom
             (and thus its glyph) lands 11px lower than every app icon's. */}
         <div className="flex shrink-0 flex-col items-center gap-2">
-          <div ref={settingsSlotRef} className="relative h-14 w-14 shrink-0">
+          <div
+            ref={settingsSlotRef}
+            className={`relative h-14 w-14 shrink-0 ${
+              isSettingsHovered && !isDragging ? "z-10" : ""
+            }`}
+          >
+            <span
+              style={{ marginBottom: TOOLTIP_GAP_PX }}
+              className={`pointer-events-none absolute bottom-full left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
+                isSettingsHovered && !isDragging
+                  ? "scale-100 opacity-100"
+                  : "scale-90 opacity-0"
+              }`}
+            >
+              Настройки
+            </span>
             <motion.div
               style={{ scale: isDragging ? 1 : settingsScale }}
               className="h-full w-full origin-bottom"
             >
               <button
                 type="button"
-                title="Настройки"
                 aria-label="Настройки"
                 onClick={() => {
                   void invoke("open_settings");
                 }}
-                className="flex h-full w-full items-center justify-center rounded-2xl text-zinc-400 transition-colors hover:text-zinc-100"
+                style={
+                  {
+                    "--settings-accent": settings.staticGlowColor,
+                    borderColor: `color-mix(in srgb, ${settings.staticGlowColor} 34%, transparent)`,
+                    boxShadow: `inset 0 1px 0 0 rgb(255 255 255 / 0.08), 0 0 12px -2px color-mix(in srgb, ${settings.staticGlowColor} 16%, transparent)`,
+                  } as React.CSSProperties & Record<"--settings-accent", string>
+                }
+                className="flex h-full w-full items-center justify-center rounded-2xl border bg-zinc-950/40 text-zinc-400 transition-[color,background-color,box-shadow,border-color] duration-200 hover:border-[color-mix(in_srgb,var(--settings-accent)_48%,transparent)] hover:bg-zinc-900/55 hover:text-zinc-100 hover:shadow-[inset_0_1px_0_0_rgb(255_255_255/0.12),0_0_16px_0_color-mix(in_srgb,var(--settings-accent)_26%,transparent)]"
               >
                 <Settings className="h-7 w-7" strokeWidth={1.75} />
               </button>
