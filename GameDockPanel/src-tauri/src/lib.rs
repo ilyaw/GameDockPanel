@@ -15,6 +15,7 @@ pub fn run() {
             commands::apps::reveal_app_in_finder,
             commands::apps::quit_app,
             commands::window::sync_vibrancy_pill,
+            commands::window::set_menu_overlay,
         ])
         .setup(|app| {
             // Populate AppsState.entries (persisted list, or first-run seed)

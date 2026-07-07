@@ -28,7 +28,7 @@ const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
 // 194 = DOCK_BOTTOM_INSET_DIP(8) + PILL_HEIGHT_REST_DIP(91) +
 // PILL_TOP_RESERVE_PX(95) — the top reserve is sized for the tallest thing
 // that ever pokes above the pill, which is now DockIcon's context menu
-// (Show in Finder + Quit + divider + Remove), not the shorter hover
+// (Show in Finder + Remove from Dock + divider + Quit), not the shorter hover
 // tooltip or magnify overflow. See PILL_TOP_RESERVE_PX's `Math.max(...)` in
 // constants.ts for the full derivation — this constant must track it.
 const WINDOW_HEIGHT_DIP: f64 = 194.0;
@@ -40,6 +40,11 @@ const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
 /// visible shape if this stays in sync with that class.
 const PILL_CORNER_RADIUS_DIP: f64 = 28.0;
 const CLICK_POLL_MS: u64 = 50;
+/// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts — the gap between the
+/// open context menu's own bottom edge and the icon it hangs off of. Used
+/// to extend the click-through hit-test up through that gap and into the
+/// menu itself (see `AppsState::menu_overlay_height_dip`).
+const MENU_OVERLAY_GAP_DIP: f64 = 16.0;
 
 /// Raster size for native icon export — `NSWorkspace.iconForFile` defaults to
 /// 32×32; upscaling that in the dock looks blocky. Keep ≥ `ICON_SIZE_PX *
@@ -240,7 +245,7 @@ fn apply_dock_vibrancy(_window: &WebviewWindow, _pill_width_dip: f64) -> Result<
 /// here, only width.
 #[cfg(target_os = "macos")]
 pub fn sync_dock_geometry(window: &WebviewWindow, app_count: usize) -> Result<(), String> {
-    use objc2_app_kit::NSWindow;
+    use objc2_app_kit::{NSAnimatablePropertyContainer, NSAnimationContext, NSView, NSWindow};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let pill_width = pill_width_dip(app_count);
@@ -260,9 +265,33 @@ pub fn sync_dock_geometry(window: &WebviewWindow, app_count: usize) -> Result<()
         NSPoint::new(center_x - window_width / 2.0, current_frame.origin.y),
         NSSize::new(window_width, current_frame.size.height),
     );
-    ns_window.setFrame_display_animate(new_frame, true, true);
 
-    set_vibrancy_pill_frame(window, pill_width, PILL_HEIGHT_REST_DIP, None, None)?;
+    let ns_view_ptr = window.ns_view().map_err(|e| e.to_string())? as *mut NSView;
+    let ns_view = unsafe { &*ns_view_ptr };
+    let blur_view = ns_view.viewWithTag(VIBRANCY_VIEW_TAG);
+
+    // Derived straight from `window_width` — not from the blur view's
+    // `superview().bounds()` the way `set_vibrancy_pill_frame(..., None,
+    // None)` would, since those bounds won't reflect the new width until
+    // the frame change below actually lands on screen.
+    let new_pill_frame = NSRect::new(
+        NSPoint::new((window_width - pill_width) / 2.0, DOCK_BOTTOM_INSET_DIP),
+        NSSize::new(pill_width, PILL_HEIGHT_REST_DIP),
+    );
+
+    // Animate the window frame and the vibrancy blur view's frame in the
+    // same `NSAnimationContext` group so they move in lockstep. Previously
+    // only the window frame animated (`setFrame_display_animate`) while the
+    // blur view snapped to its end state instantly — for the whole
+    // animation the visible glass pill (smaller, already centered) and the
+    // window's actual bounds (still mid-resize) disagreed, which is what
+    // left a stray gap/flash behind after adding or removing an app.
+    NSAnimationContext::runAnimationGroup(&block2::RcBlock::new(move |_context| {
+        ns_window.animator().setFrame_display(new_frame, true);
+        if let Some(view) = &blur_view {
+            view.animator().setFrame(new_pill_frame);
+        }
+    }));
 
     {
         let state = window.state::<AppsState>();
@@ -373,6 +402,25 @@ fn pill_cursor_at_screen(
     })
 }
 
+/// Converts a screen-space point to this window's logical (DIP) coordinates,
+/// unconditionally — unlike `pill_cursor_at_screen`, this doesn't gate on
+/// the point being inside the pill. Used for `dock-global-mousedown`, whose
+/// whole point is to be delivered for clicks *outside* both the pill and
+/// this window (see `start_dock_click_tap`).
+#[cfg(target_os = "macos")]
+fn cursor_to_window_logical(
+    window: &WebviewWindow,
+    screen_x: i32,
+    screen_y: i32,
+) -> Option<DockCursorPayload> {
+    let scale = window.scale_factor().ok()?;
+    let outer_pos = window.outer_position().ok()?;
+    Some(DockCursorPayload {
+        x: (screen_x - outer_pos.x) as f64 / scale,
+        y: (screen_y - outer_pos.y) as f64 / scale,
+    })
+}
+
 /// HID-layer click capture — emits `dock-click` on mouse *up*, only when the
 /// pointer barely moved since mouse-down. That keeps icon drag-reorder from
 /// also launching the app (mousedown used to fire immediately).
@@ -415,11 +463,25 @@ fn start_dock_click_tap(window: WebviewWindow) {
                     }
                     CGEventType::LeftMouseDown => {
                         if let Ok(cursor) = window.cursor_position() {
+                            let down_x = cursor.x.round() as i32;
+                            let down_y = cursor.y.round() as i32;
                             if let Ok(mut guard) = pending_down_cb.lock() {
                                 *guard = Some(PendingDown {
-                                    x: cursor.x.round() as i32,
-                                    y: cursor.y.round() as i32,
+                                    x: down_x,
+                                    y: down_y,
                                 });
+                            }
+
+                            // Delivered for *every* left-mouse-down anywhere
+                            // on screen, regardless of `set_ignore_cursor_events`
+                            // — the frontend uses this to dismiss an open
+                            // context menu on a real "click anywhere else",
+                            // including clicks on other apps or the desktop,
+                            // which never reach the WebView's own DOM events
+                            // at all under this window's click-through design.
+                            if let Some(payload) = cursor_to_window_logical(&window, down_x, down_y)
+                            {
+                                let _ = window.emit("dock-global-mousedown", payload);
                             }
                         }
                     }
@@ -527,7 +589,24 @@ fn start_click_through_poller(window: WebviewWindow) {
             let cursor_x = cursor.x.round() as i32;
             let cursor_y = cursor.y.round() as i32;
 
-            let pill_h_dip = if dock_hovered {
+            let menu_overlay_height_dip = {
+                let state = window.state::<AppsState>();
+                let guard = state
+                    .menu_overlay_height_dip
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *guard
+            };
+
+            // While a `DockIcon` context menu is open, the hit-test rect has
+            // to reach all the way up through it — the menu can render much
+            // taller than the fixed magnify-overflow band below, and any
+            // shorter test here means the OS re-engages click-through under
+            // the cursor before it reaches the upper menu rows, making them
+            // permanently unreachable (see `AppsState::menu_overlay_height_dip`).
+            let pill_h_dip = if menu_overlay_height_dip > 0.0 {
+                PILL_HEIGHT_REST_DIP + MENU_OVERLAY_GAP_DIP + menu_overlay_height_dip
+            } else if dock_hovered {
                 PILL_HEIGHT_HOVER_DIP
             } else {
                 PILL_HEIGHT_REST_DIP

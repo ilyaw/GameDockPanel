@@ -47,12 +47,13 @@ export const TOOLTIP_HEIGHT_PX = 28;
  */
 export const CONTEXT_MENU_ROW_HEIGHT_PX = 30;
 
-/** Thin `h-px` divider between Quit/Show in Finder and Remove from Dock. */
+/** Thin `h-px` divider above Quit (only rendered while the app is running). */
 export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
 
 /**
- * Tallest the icon context menu ever gets: Show in Finder + Quit (only
- * rendered while the app is running) + divider + Remove from Dock. Must be
+ * Tallest the icon context menu ever gets: Show in Finder + Remove from Dock
+ * + divider + Quit (Quit and the divider only render while the app is
+ * running). Must be
  * accounted for in `PILL_TOP_RESERVE_PX` same as the tooltip — the menu
  * renders `bottom-full` off the same anchor, and the window has no scroll,
  * so anything past its fixed height is simply not drawn.

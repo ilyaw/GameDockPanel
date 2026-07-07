@@ -37,6 +37,14 @@ objc2-app-kit = { version = "0.3", features = [
     "NSImage",
     "NSImageRep",
     "NSBitmapImageRep",
+    # NSResponder + NSAnimation gate NSWindow/NSView's
+    # `NSAnimatablePropertyContainer` conformance (`.animator()`);
+    # NSAnimationContext + block2 are for grouping the window-frame and
+    # vibrancy-pill-frame animations together — see `sync_dock_geometry`.
+    "NSResponder",
+    "NSAnimation",
+    "NSAnimationContext",
+    "block2",
 ] }
 objc2-foundation = { version = "0.3", features = [
     "NSNotification",

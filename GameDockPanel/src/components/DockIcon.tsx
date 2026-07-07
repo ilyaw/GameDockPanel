@@ -6,9 +6,16 @@ import {
   useTransform,
   type MotionValue,
 } from "framer-motion";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { FolderOpen, Power, Trash2 } from "lucide-react";
 import type { DockApp } from "../lib/types";
 import { MAGNIFY_INFLUENCE_RADIUS_PX, MAGNIFY_MAX_SCALE, TOOLTIP_GAP_PX } from "../lib/constants";
+
+interface WindowLogicalPoint {
+  x: number;
+  y: number;
+}
 
 const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
 
@@ -75,6 +82,14 @@ export function DockIcon({
   // every `mousedown` — otherwise the menu item's own click never lands: the
   // mousedown that starts that click would close (and unmount) the menu
   // before the subsequent click event fires on it.
+  //
+  // This `window` listener only ever sees clicks that land inside this
+  // window's own web content — under the dock's click-through design
+  // (`platform::macos::start_click_through_poller`) that's a small minority
+  // of the screen. It's kept as a same-window fast path; the
+  // `dock-global-mousedown` listener below is what actually makes "click
+  // anywhere else" (other apps, the desktop) close the menu like a real
+  // macOS one.
   useEffect(() => {
     if (!menuOpen) return;
 
@@ -92,6 +107,63 @@ export function DockIcon({
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
+  }, [menuOpen]);
+
+  // Global click-anywhere-closes-it, the way a real `NSMenu` behaves.
+  // `dock-global-mousedown` is emitted by a HID-level event tap on the Rust
+  // side for every left-mouse-down on screen, regardless of this window's
+  // own click-through state — see `start_dock_click_tap` in
+  // `platform/macos.rs`. Coordinates arrive already converted to this
+  // window's logical space, so they compare directly against the menu's own
+  // `getBoundingClientRect()` with no further conversion.
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    void listen<WindowLogicalPoint>("dock-global-mousedown", (event) => {
+      const rect = menuRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const { x, y } = event.payload;
+      const insideMenu =
+        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+      if (!insideMenu) setMenuOpen(false);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [menuOpen]);
+
+  // Reports the open menu's real footprint to the Rust side so the native
+  // click-through hit-test can grow to cover it — see
+  // `AppsState::menu_overlay_height_dip`. Without this, only the bottommost
+  // menu row (closest to the icon) falls inside the fixed magnify-overflow
+  // band the hit-test otherwise uses; anything above that is silently
+  // click-through, which is what made the menu look "frozen" once the
+  // cursor moved up into it. `useLayoutEffect`, not `useEffect`, so the
+  // measurement happens before paint — the menu is already in the DOM by
+  // the time this runs (mounted by the `menuOpen &&` guard below in the
+  // same render), so there's no extra frame where it's visible but not yet
+  // reachable.
+  useLayoutEffect(() => {
+    const reportMenuOverlay = (active: boolean, height: number) => {
+      invoke("set_menu_overlay", { active, height }).catch((error: unknown) => {
+        console.error("Failed to sync menu overlay hit-test region:", error);
+      });
+    };
+
+    if (!menuOpen) {
+      reportMenuOverlay(false, 0);
+      return;
+    }
+    reportMenuOverlay(true, menuRef.current?.getBoundingClientRect().height ?? 0);
+    return () => reportMenuOverlay(false, 0);
   }, [menuOpen]);
 
   // Rest-layout center X for the magnify distance curve — re-measured on layout
@@ -188,27 +260,6 @@ export function DockIcon({
               Show in Finder
             </button>
 
-            {/* Quit terminates the running process (soft `terminate()`) and
-                leaves the dock list untouched — the opposite of Remove,
-                which edits the dock list and never touches the process. So
-                this only shows while the app is actually running; Remove
-                below is always available regardless of running state. */}
-            {app.isActive && (
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  onQuit?.(app.bundleId);
-                }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
-              >
-                <Power className="h-3.5 w-3.5" />
-                Quit
-              </button>
-            )}
-
-            <div className="h-px bg-zinc-700/70" />
-
             <button
               type="button"
               onClick={() => {
@@ -220,6 +271,29 @@ export function DockIcon({
               <Trash2 className="h-3.5 w-3.5" />
               Remove from Dock
             </button>
+
+            {/* Quit terminates the running process (soft `terminate()`) and
+                leaves the dock list untouched — the opposite of Remove,
+                which edits the dock list and never touches the process. Kept
+                alone at the bottom (after a divider) to mirror the real
+                macOS Dock, where Quit is always the last item. */}
+            {app.isActive && (
+              <>
+                <div className="h-px bg-zinc-700/70" />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onQuit?.(app.bundleId);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+                >
+                  <Power className="h-3.5 w-3.5" />
+                  Quit
+                </button>
+              </>
+            )}
           </div>
         )}
 

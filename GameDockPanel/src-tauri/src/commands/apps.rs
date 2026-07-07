@@ -171,12 +171,24 @@ pub struct AppIconUpdatePayload {
 /// a compile-time constant now that width changes at runtime. It lives here
 /// rather than in a separate managed state because it's derived straight
 /// from `entries.len()` and only ever changes alongside it.
+///
+/// `menu_overlay_height_dip` is 0.0 while no `DockIcon` context menu is
+/// open, or the open menu's measured DOM height (`getBoundingClientRect()`,
+/// set via `commands::window::set_menu_overlay`) while one is. The native
+/// click-through hit-test (`platform::macos::start_click_through_poller`)
+/// reads it so the "in the pill" region grows to cover the whole open menu
+/// — the menu can render far above the pill itself (see
+/// `CONTEXT_MENU_HEIGHT_PX` in `src/lib/constants.ts`), well past the fixed
+/// magnify-overflow band the hit-test otherwise uses, and without this the
+/// upper menu rows are physically unreachable: the OS starts passing clicks
+/// straight through the window before the cursor ever gets there.
 #[derive(Default)]
 pub struct AppsState {
     pub entries: Mutex<Vec<AppEntry>>,
     pub running: Mutex<HashMap<String, bool>>,
     pub icons: Mutex<HashMap<String, Option<String>>>,
     pub pill_width_dip: Mutex<f64>,
+    pub menu_overlay_height_dip: Mutex<f64>,
 }
 
 impl AppsState {
