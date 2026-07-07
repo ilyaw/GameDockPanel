@@ -271,6 +271,16 @@ export function DockPanel() {
           <Reorder.Item
             key={app.id}
             value={app}
+            // `layout="position"` (not the default `true`) opts out of
+            // framer-motion's layout *size* tracking. Icons never change
+            // size on reorder — only position — so the size half is dead
+            // weight; worse, framer-motion's automatic scale-correction for
+            // size changes stacks with `DockIcon`'s own independent magnify
+            // `scale` spring on the same element/descendants, producing a
+            // visible jitter on exactly the just-dragged icon (the only one
+            // still carrying a live size-projection box) and throwing off
+            // the context menu's real hit-box relative to where it's drawn.
+            layout="position"
             className="relative list-none"
             whileDrag={{ zIndex: 20, scale: 1.08 }}
             onDragStart={beginDrag}
