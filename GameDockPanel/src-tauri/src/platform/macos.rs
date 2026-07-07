@@ -20,6 +20,10 @@ const ICON_SIZE_DIP: f64 = 56.0;
 // Mirrors `gap-2` on the dock pill (src/lib/constants.ts DOCK_GAP_PX).
 const DOCK_GAP_DIP: f64 = 8.0;
 const DOCK_PADDING_X_DIP: f64 = 20.0;
+// Mirrors the vertical divider between the app icons and the settings gear
+// in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. See
+// src/lib/constants.ts DOCK_DIVIDER_WIDTH_PX for the JS-side copy.
+const DOCK_DIVIDER_WIDTH_DIP: f64 = 9.0;
 const MAGNIFY_MAX_SCALE: f64 = 1.4;
 const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
 
@@ -54,8 +58,8 @@ const ICON_EXPORT_PX: f64 = 256.0;
 fn pill_width_dip(app_count: usize) -> f64 {
     let apps_width = app_count as f64 * ICON_SIZE_DIP
         + app_count.saturating_sub(1) as f64 * DOCK_GAP_DIP;
-    // Trailing settings gear in DockPanel — one gap + one icon slot.
-    let settings_slot = DOCK_GAP_DIP + ICON_SIZE_DIP;
+    // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
+    let settings_slot = DOCK_GAP_DIP + DOCK_DIVIDER_WIDTH_DIP + DOCK_GAP_DIP + ICON_SIZE_DIP;
     DOCK_PADDING_X_DIP * 2.0 + apps_width + settings_slot
 }
 
@@ -117,14 +121,15 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         *current_width = pill_width;
     }
 
-    window.show().map_err(|e| e.to_string())?;
-
     enable_inactive_mouse_tracking(&window)?;
     apply_dock_vibrancy(&window, pill_width)?;
 
     start_dock_click_tap(window.clone());
     start_click_through_poller(window);
 
+    // Shown from `sync_vibrancy_pill_from_web` once the WebView has
+    // measured the real pill rect — avoids flashing a formula-sized blur
+    // mask that does not match the CSS pill.
     Ok(())
 }
 
@@ -213,7 +218,59 @@ fn set_vibrancy_pill_frame(
     Ok(())
 }
 
-/// Positions the vibrancy blur view from the pill's measured DOM rect.
+/// Snaps the native window inner width to `target_content_width`, keeping
+/// the outer frame centered on its current screen X. Uses Tauri's
+/// `set_size` (content/inner size) — same convention as `setup_dock_window`
+/// — not raw `NSWindow.setFrame`, which mixes frame vs content coords.
+/// Returns `true` when the width actually changed.
+#[cfg(target_os = "macos")]
+fn set_window_width_instant(
+    window: &WebviewWindow,
+    target_content_width: f64,
+) -> Result<bool, String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let inner = window.inner_size().map_err(|e| e.to_string())?;
+    let current_width = inner.width as f64 / scale;
+
+    if (current_width - target_content_width).abs() < 0.5 {
+        return Ok(false);
+    }
+
+    let outer_pos = window.outer_position().map_err(|e| e.to_string())?;
+    let outer_size = window.outer_size().map_err(|e| e.to_string())?;
+    let center_x = outer_pos.x as f64 + outer_size.width as f64 / 2.0;
+
+    let inner_height = inner.height as f64 / scale;
+    let width_px = (target_content_width * scale).round() as u32;
+    let height_px = (inner_height * scale).round() as u32;
+
+    window
+        .set_size(PhysicalSize::new(width_px, height_px))
+        .map_err(|e| e.to_string())?;
+
+    let new_outer_size = window.outer_size().map_err(|e| e.to_string())?;
+    let new_x = (center_x - new_outer_size.width as f64 / 2.0).round() as i32;
+    window
+        .set_position(PhysicalPosition::new(new_x, outer_pos.y))
+        .map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
+/// Resizes the native window inner width to fit `pill_width` (pill +
+/// magnify overflow + glow bleed). Does not touch the vibrancy mask — call
+/// `sync_vibrancy_pill_from_web` afterwards once the WebView has laid out.
+#[cfg(target_os = "macos")]
+pub fn resize_dock_window_for_pill(
+    window: &WebviewWindow,
+    pill_width: f64,
+) -> Result<bool, String> {
+    set_window_width_instant(window, window_width_dip(pill_width))
+}
+
+/// Aligns the masked vibrancy blur view to the pill's measured DOM rect.
+/// Does not resize the window — pair with `resize_dock_window_for_pill` when
+/// the pill width changes, then re-measure before calling this.
 #[cfg(target_os = "macos")]
 pub fn sync_vibrancy_pill_from_web(
     window: &WebviewWindow,
@@ -231,84 +288,15 @@ pub fn sync_vibrancy_pill_from_web(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *current_width = width;
 
+    // Idempotent — deferred from `setup_dock_window` so the first paint
+    // already has a DOM-aligned vibrancy mask.
+    window.show().map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
 fn apply_dock_vibrancy(_window: &WebviewWindow, _pill_width_dip: f64) -> Result<(), String> {
-    Ok(())
-}
-
-/// Applies a discrete pill-width change for an already-visible window: one
-/// coordinated pass over NSWindow frame (animated), vibrancy pill frame,
-/// and the shared width value hit-testing reads. Only ever called from
-/// `add_app_from_path` / `remove_app` — a rare, user-initiated, discrete
-/// event — never from hover/magnify/mousemove paths. Height never changes
-/// here, only width.
-#[cfg(target_os = "macos")]
-pub fn sync_dock_geometry(window: &WebviewWindow, app_count: usize) -> Result<(), String> {
-    use objc2_app_kit::{NSAnimatablePropertyContainer, NSAnimationContext, NSView, NSWindow};
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
-
-    let pill_width = pill_width_dip(app_count);
-    let window_width = window_width_dip(pill_width);
-
-    let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())? as *mut NSWindow;
-    let ns_window = unsafe { &*ns_window_ptr };
-
-    // Only width changes on this path — derive the new frame from the
-    // window's *current* frame (already correct AppKit bottom-left-origin
-    // coordinates) instead of recomputing from monitor geometry, so no
-    // Y-flip math is needed: origin.y and size.height carry over untouched,
-    // only origin.x and size.width move, symmetric around the old center.
-    let current_frame = ns_window.frame();
-    let center_x = current_frame.origin.x + current_frame.size.width / 2.0;
-    let new_frame = NSRect::new(
-        NSPoint::new(center_x - window_width / 2.0, current_frame.origin.y),
-        NSSize::new(window_width, current_frame.size.height),
-    );
-
-    let ns_view_ptr = window.ns_view().map_err(|e| e.to_string())? as *mut NSView;
-    let ns_view = unsafe { &*ns_view_ptr };
-    let blur_view = ns_view.viewWithTag(VIBRANCY_VIEW_TAG);
-
-    // Derived straight from `window_width` — not from the blur view's
-    // `superview().bounds()` the way `set_vibrancy_pill_frame(..., None,
-    // None)` would, since those bounds won't reflect the new width until
-    // the frame change below actually lands on screen.
-    let new_pill_frame = NSRect::new(
-        NSPoint::new((window_width - pill_width) / 2.0, DOCK_BOTTOM_INSET_DIP),
-        NSSize::new(pill_width, PILL_HEIGHT_REST_DIP),
-    );
-
-    // Animate the window frame and the vibrancy blur view's frame in the
-    // same `NSAnimationContext` group so they move in lockstep. Previously
-    // only the window frame animated (`setFrame_display_animate`) while the
-    // blur view snapped to its end state instantly — for the whole
-    // animation the visible glass pill (smaller, already centered) and the
-    // window's actual bounds (still mid-resize) disagreed, which is what
-    // left a stray gap/flash behind after adding or removing an app.
-    NSAnimationContext::runAnimationGroup(&block2::RcBlock::new(move |_context| {
-        ns_window.animator().setFrame_display(new_frame, true);
-        if let Some(view) = &blur_view {
-            view.animator().setFrame(new_pill_frame);
-        }
-    }));
-
-    {
-        let state = window.state::<AppsState>();
-        let mut current_width = state
-            .pill_width_dip
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *current_width = pill_width;
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn sync_dock_geometry(_window: &WebviewWindow, _app_count: usize) -> Result<(), String> {
     Ok(())
 }
 
@@ -354,9 +342,10 @@ fn enable_inactive_mouse_tracking(window: &WebviewWindow) -> Result<(), String> 
 /// Maps a screen-space cursor position to DIP coords inside the window when
 /// the point lies on the rounded pill footprint; `None` otherwise. Reads
 /// the pill's current width from `AppsState` (mutated by `setup_dock_window`
-/// / `sync_dock_geometry`) instead of a compile-time constant, so both
+/// / `sync_vibrancy_pill_from_web`) instead of a compile-time constant, so both
 /// consumers below (the click tap and the hover poller) automatically
-/// hit-test against whatever width is currently applied.
+/// hit-test against whatever width is currently applied (updated by
+/// `sync_vibrancy_pill_from_web` from the measured DOM rect).
 #[cfg(target_os = "macos")]
 fn pill_cursor_at_screen(
     window: &WebviewWindow,

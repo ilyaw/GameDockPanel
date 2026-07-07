@@ -112,6 +112,10 @@ export const WINDOW_HEIGHT_DIP =
 /** Horizontal glow bleed (~14px box-shadow each side). */
 export const WINDOW_GLOW_BLEED_PX = 32;
 
+/** Mirrors the vertical divider between the app icons and the settings
+ * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
+export const DOCK_DIVIDER_WIDTH_PX = 9;
+
 /**
  * Pill outer width at rest for `appCount` icons (padding + icons + gaps) —
  * the CSS pill itself is content-driven (no explicit width is ever set in
@@ -129,8 +133,9 @@ export const WINDOW_GLOW_BLEED_PX = 32;
 export function pillWidthPx(appCount: number): number {
   const appsWidth =
     appCount * ICON_SIZE_PX + (appCount - 1) * DOCK_GAP_PX;
-  // Trailing settings gear in DockPanel — one gap + one icon slot.
-  const settingsSlot = DOCK_GAP_PX + ICON_SIZE_PX;
+  // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
+  const settingsSlot =
+    DOCK_GAP_PX + DOCK_DIVIDER_WIDTH_PX + DOCK_GAP_PX + ICON_SIZE_PX;
   return DOCK_PADDING_X_PX * 2 + appsWidth + settingsSlot;
 }
 

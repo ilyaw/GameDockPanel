@@ -167,10 +167,11 @@ pub struct AppIconUpdatePayload {
 /// `entries` is the persisted, user-configurable roster (order = dock
 /// order) — the single source of truth `running`/`icons` are keyed against.
 /// `pill_width_dip` mirrors the last width applied by
-/// `platform::sync_dock_geometry`; hit-testing reads it directly instead of
-/// a compile-time constant now that width changes at runtime. It lives here
-/// rather than in a separate managed state because it's derived straight
-/// from `entries.len()` and only ever changes alongside it.
+/// `sync_vibrancy_pill_from_web` (measured DOM rect); hit-testing reads it
+/// directly instead of a compile-time constant now that width changes at
+/// runtime. It lives here rather than in a separate managed state because
+/// it's derived straight from the pill footprint and only ever changes
+/// alongside `entries`.
 ///
 /// `menu_overlay_height_dip` is 0.0 while no `DockIcon` context menu is
 /// open, or the open menu's measured DOM height (`getBoundingClientRect()`,
@@ -403,14 +404,13 @@ pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) 
         color: color_for_bundle_id(&bundle_id).to_string(),
     };
 
-    let app_count = {
+    {
         let mut entries = state
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         entries.push(entry);
-        entries.len()
-    };
+    }
 
     {
         let mut running = state
@@ -435,10 +435,6 @@ pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) 
         save_entries(&app, &entries)?;
     }
 
-    if let Some(window) = app.get_webview_window("main") {
-        platform::sync_dock_geometry(&window, app_count)?;
-    }
-
     let _ = app.emit("apps-list-changed", state.snapshot());
     Ok(())
 }
@@ -448,18 +444,18 @@ pub fn add_app_from_path(app: AppHandle, state: State<AppsState>, path: String) 
 /// dock displays.
 #[tauri::command]
 pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) -> Result<(), String> {
-    let app_count = {
+    let removed = {
         let mut entries = state
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let before = entries.len();
         entries.retain(|entry| entry.bundle_id != bundle_id);
-        if entries.len() == before {
-            return Err(format!("{} is not in the dock", bundle_id));
-        }
-        entries.len()
+        entries.len() != before
     };
+    if !removed {
+        return Err(format!("{} is not in the dock", bundle_id));
+    }
 
     {
         let mut running = state
@@ -482,10 +478,6 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         save_entries(&app, &entries)?;
-    }
-
-    if let Some(window) = app.get_webview_window("main") {
-        platform::sync_dock_geometry(&window, app_count)?;
     }
 
     let _ = app.emit("apps-list-changed", state.snapshot());

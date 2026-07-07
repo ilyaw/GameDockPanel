@@ -299,9 +299,13 @@ export function DockPanel() {
     const el = pillRef.current;
     if (!el) return;
 
-    const syncVibrancyPill = () => {
-      const rect = el.getBoundingClientRect();
-      void invoke("sync_vibrancy_pill", {
+    let cancelled = false;
+
+    const measurePill = () => el.getBoundingClientRect();
+
+    const syncVibrancyFromDom = async () => {
+      const rect = measurePill();
+      await invoke("sync_vibrancy_pill", {
         x: rect.x,
         y: rect.y,
         width: rect.width,
@@ -309,10 +313,34 @@ export function DockPanel() {
       });
     };
 
-    syncVibrancyPill();
-    const observer = new ResizeObserver(syncVibrancyPill);
+    const syncDockGeometry = async () => {
+      const rect = measurePill();
+      await invoke("resize_dock_window", { pillWidth: rect.width });
+      if (cancelled) return;
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+      if (cancelled) return;
+      await syncVibrancyFromDom();
+    };
+
+    void syncDockGeometry();
+
+    let lastPillWidth = measurePill().width;
+    const observer = new ResizeObserver(() => {
+      const width = measurePill().width;
+      if (Math.abs(width - lastPillWidth) > 0.5) {
+        lastPillWidth = width;
+        void syncDockGeometry();
+      } else {
+        void syncVibrancyFromDom();
+      }
+    });
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
   }, [apps]);
 
   useLayoutEffect(() => {

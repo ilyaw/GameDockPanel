@@ -17,6 +17,7 @@ pub fn run() {
             commands::apps::reorder_apps,
             commands::apps::reveal_app_in_finder,
             commands::apps::quit_app,
+            commands::window::resize_dock_window,
             commands::window::sync_vibrancy_pill,
             commands::window::set_menu_overlay,
             commands::window::open_settings,

@@ -3,9 +3,20 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use crate::commands::apps::AppsState;
 use crate::platform;
 
-/// Aligns the native vibrancy blur view with the dock pill's actual DOM box.
-/// CSS layout is the source of truth — Rust's width formula can drift from
-/// flex rounding, borders, or list defaults.
+/// Resizes the native window to fit the measured pill width (inner size +
+/// magnify/glow margins). Call before `sync_vibrancy_pill` when the pill
+/// width may have changed — then re-measure the DOM after layout settles.
+#[tauri::command]
+pub fn resize_dock_window(app: AppHandle, pill_width: f64) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    platform::resize_dock_window_for_pill(&window, pill_width)
+}
+
+/// Aligns the native vibrancy blur mask to the pill's measured DOM box.
+/// Does not resize the window — use `resize_dock_window` first when width
+/// changed, then re-measure `getBoundingClientRect()` before calling this.
 #[tauri::command]
 pub fn sync_vibrancy_pill(
     app: AppHandle,
