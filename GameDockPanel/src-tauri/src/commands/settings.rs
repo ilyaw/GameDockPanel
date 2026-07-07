@@ -233,13 +233,3 @@ pub fn update_dock_settings(
     let _ = app.emit("dock-settings-changed", settings);
     Ok(())
 }
-
-/// Live icon-size preview while the settings slider is dragged — emits only,
-/// no disk write. The dock springs toward this value; `update_dock_settings`
-/// persists the final size on release / debounced commit.
-#[tauri::command]
-pub fn preview_dock_icon_size(app: AppHandle, icon_size_px: f64) -> Result<(), String> {
-    let px = clamp_icon_size_px(icon_size_px);
-    let _ = app.emit("dock-icon-size-preview", px);
-    Ok(())
-}

@@ -72,7 +72,7 @@ export function useDockSettings() {
    * Applies `next` immediately to local state (instant visual feedback in
    * the settings window itself), and debounces the actual persist +
    * cross-window broadcast. Icon-size live preview during slider drags
-   * goes through `preview_dock_icon_size` instead (see SettingsWindow).
+   * goes through `emit("dock-icon-size-preview")` instead (see SettingsWindow).
    */
   const commit = useCallback(
     (next: DockSettings) => {

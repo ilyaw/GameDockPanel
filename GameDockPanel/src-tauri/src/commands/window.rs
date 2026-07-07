@@ -8,11 +8,16 @@ use crate::platform;
 /// before `sync_vibrancy_pill` when the pill size may have changed — then
 /// re-measure the DOM after layout settles.
 #[tauri::command]
-pub fn resize_dock_window(app: AppHandle, pill_width: f64, pill_height: f64) -> Result<bool, String> {
+pub fn resize_dock_window(
+    app: AppHandle,
+    pill_width: f64,
+    pill_height: f64,
+    icon_size_px: f64,
+) -> Result<bool, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-    platform::resize_dock_window_for_pill(&window, pill_width, pill_height)
+    platform::resize_dock_window_for_pill(&window, pill_width, pill_height, icon_size_px)
 }
 
 /// Aligns the native vibrancy blur mask to the pill's measured DOM box.

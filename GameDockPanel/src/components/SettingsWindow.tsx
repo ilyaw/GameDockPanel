@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { SlidersHorizontal } from "lucide-react";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
@@ -173,6 +173,7 @@ const colorInputClass =
 export function SettingsWindow() {
   const { settings, commit } = useDockSettings();
   const [sliderIconSizePx, setSliderIconSizePx] = useState(settings.iconSizePx);
+  const previewPendingPxRef = useRef<number | null>(null);
   const previewRafRef = useRef(0);
   const persistSizeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -196,10 +197,14 @@ export function SettingsWindow() {
   );
 
   const queueIconSizePreview = useCallback((px: number) => {
-    if (previewRafRef.current) cancelAnimationFrame(previewRafRef.current);
+    previewPendingPxRef.current = clampIconSizePx(px);
+    if (previewRafRef.current) return;
     previewRafRef.current = requestAnimationFrame(() => {
       previewRafRef.current = 0;
-      void invoke("preview_dock_icon_size", { iconSizePx: px });
+      const pending = previewPendingPxRef.current;
+      if (pending === null) return;
+      previewPendingPxRef.current = null;
+      void emit("dock-icon-size-preview", pending);
     });
   }, []);
 

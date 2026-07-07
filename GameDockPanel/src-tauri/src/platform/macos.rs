@@ -385,8 +385,8 @@ pub fn resize_dock_window_for_pill(
     window: &WebviewWindow,
     pill_width: f64,
     pill_height: f64,
+    icon_size_dip: f64,
 ) -> Result<bool, String> {
-    let icon_size_dip = current_icon_size_dip(window);
     let target_width = window_width_dip(pill_width, icon_size_dip);
     let target_height = window_height_dip(pill_height, icon_size_dip);
     let changed = set_window_frame_instant(window, target_width, target_height)?;
@@ -422,7 +422,7 @@ pub fn resize_dock_window_for_app_count(
     let icon_size_dip = current_icon_size_dip(window);
     let pill_width = pill_width_dip(app_count, icon_size_dip);
     let pill_height = size_metrics(icon_size_dip).pill_height_dip;
-    resize_dock_window_for_pill(window, pill_width, pill_height)
+    resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)
 }
 
 /// Aligns the masked vibrancy blur view to the pill's measured DOM rect.

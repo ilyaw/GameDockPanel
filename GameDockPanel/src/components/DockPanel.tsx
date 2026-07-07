@@ -55,8 +55,9 @@ const REJECT_PULSE_MS = 400;
 const SETTLE_DEBOUNCE_MS = 40;
 
 const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
-/** Softer than magnify — panel height/width while dragging the size slider. */
-const ICON_SIZE_SPRING = { mass: 2.2, stiffness: 26, damping: 11 };
+/** Critically damped, ~100 ms settle — interpolates between rapid slider
+ * steps without the old soft spring's ~1.8 s lag or jump()'s 1 px stutter. */
+const ICON_SIZE_SPRING = { mass: 0.35, stiffness: 420, damping: 32 };
 
 interface DockCursorPayload {
   x: number;
@@ -109,12 +110,12 @@ export function DockPanel() {
     quitApp,
   } = useDockApps();
   const { settings, hydrated } = useDockSettings();
-  const iconSizeMotion = useMotionValue(settings.iconSizePx);
-  const iconSizeAnimated = useSpring(iconSizeMotion, ICON_SIZE_SPRING);
+  const iconSizeTarget = useMotionValue(settings.iconSizePx);
+  const iconSizeAnimated = useSpring(iconSizeTarget, ICON_SIZE_SPRING);
   const iconSizeSyncedRef = useRef(false);
   const geometrySyncRafRef = useRef(0);
   /** Static layout numbers for the first paint — guarantees a non-zero pill
-   * rect before Motion spring values land in the DOM. */
+   * rect before Motion values land in the DOM. */
   const restMetrics = useMemo(
     () => getSizeMetrics(settings.iconSizePx),
     [settings.iconSizePx],
@@ -124,19 +125,20 @@ export function DockPanel() {
     if (!hydrated) return;
 
     if (!iconSizeSyncedRef.current) {
-      iconSizeMotion.jump(settings.iconSizePx);
+      iconSizeTarget.jump(settings.iconSizePx);
+      iconSizeAnimated.jump(settings.iconSizePx);
       iconSizeSyncedRef.current = true;
       return;
     }
 
-    iconSizeMotion.set(settings.iconSizePx);
-  }, [settings.iconSizePx, hydrated, iconSizeMotion]);
+    iconSizeTarget.set(settings.iconSizePx);
+  }, [settings.iconSizePx, hydrated, iconSizeTarget, iconSizeAnimated]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
 
     void listen<number>("dock-icon-size-preview", (event) => {
-      iconSizeMotion.set(event.payload);
+      iconSizeTarget.set(event.payload);
     }).then((fn) => {
       unlisten = fn;
     });
@@ -144,7 +146,7 @@ export function DockPanel() {
     return () => {
       unlisten?.();
     };
-  }, [iconSizeMotion]);
+  }, [iconSizeTarget]);
 
   const pillHeightPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).pillHeightPx);
   const pillGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
@@ -428,6 +430,55 @@ export function DockPanel() {
 
     const measurePill = () => el.getBoundingClientRect();
 
+    let syncRunning = false;
+    let syncPending = false;
+
+    const runGeometrySync = async () => {
+      if (syncRunning) {
+        syncPending = true;
+        return;
+      }
+      syncRunning = true;
+
+      try {
+        while (alive) {
+          syncPending = false;
+
+          const rect = measurePill();
+          if (rect.width < 1 || rect.height < 1) break;
+
+          const iconSizePx = iconSizeAnimated.get();
+          await invoke("resize_dock_window", {
+            pillWidth: rect.width,
+            pillHeight: rect.height,
+            iconSizePx,
+          });
+
+          if (!alive) break;
+
+          // Window resize reflows the webview — re-measure before aligning the
+          // native vibrancy mask so blur doesn't lag behind the CSS pill.
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => resolve());
+          });
+
+          if (!alive) break;
+
+          const aligned = measurePill();
+          await invoke("sync_vibrancy_pill", {
+            x: aligned.x,
+            y: aligned.y,
+            width: aligned.width,
+            height: aligned.height,
+          });
+
+          if (!syncPending) break;
+        }
+      } finally {
+        syncRunning = false;
+      }
+    };
+
     const syncDockGeometry = () => {
       if (!alive) return;
 
@@ -439,16 +490,7 @@ export function DockPanel() {
       }
       if (rect.width < 1 || rect.height < 1) return;
 
-      void invoke("resize_dock_window", {
-        pillWidth: rect.width,
-        pillHeight: rect.height,
-      });
-      void invoke("sync_vibrancy_pill", {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-      });
+      void runGeometrySync();
     };
 
     const scheduleGeometrySync = () => {
@@ -463,13 +505,16 @@ export function DockPanel() {
 
     let lastPillWidth = measurePill().width;
     let lastPillHeight = measurePill().height;
+    let lastPillTop = measurePill().top;
     const observer = new ResizeObserver(() => {
       const rect = measurePill();
       const widthChanged = Math.abs(rect.width - lastPillWidth) > 0.5;
       const heightChanged = Math.abs(rect.height - lastPillHeight) > 0.5;
-      if (widthChanged || heightChanged) {
+      const topChanged = Math.abs(rect.top - lastPillTop) > 0.5;
+      if (widthChanged || heightChanged || topChanged) {
         lastPillWidth = rect.width;
         lastPillHeight = rect.height;
+        lastPillTop = rect.top;
         scheduleGeometrySync();
       }
     });

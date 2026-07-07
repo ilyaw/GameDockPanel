@@ -60,6 +60,7 @@ pub fn resize_dock_window_for_pill(
     _window: &tauri::WebviewWindow,
     _pill_width: f64,
     _pill_height: f64,
+    _icon_size_dip: f64,
 ) -> Result<bool, String> {
     Ok(false)
 }
