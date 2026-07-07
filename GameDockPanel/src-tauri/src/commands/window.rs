@@ -50,8 +50,8 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     // picks the UI to render from `getCurrentWebviewWindow().label`.
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("GameDockPanel — Settings")
-        .inner_size(460.0, 560.0)
-        .min_inner_size(380.0, 440.0)
+        .inner_size(480.0, 680.0)
+        .min_inner_size(400.0, 480.0)
         .resizable(true)
         .decorations(true)
         .build()

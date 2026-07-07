@@ -144,6 +144,74 @@ export function windowWidthDip(appCount: number): number {
 }
 
 /**
+ * A ready-made gamer-style RGB/gradient combo for the dock's animated
+ * background layer — picked by id in `DockSettings.backgroundPreset`.
+ * Fixed at 6 stops, mirroring the border cycle's own `rgbGlowColors`
+ * convention (`RGB_GLOW_COLOR_COUNT` in settings.rs) purely for
+ * consistency; unlike that field, presets aren't user-editable, so no
+ * length validation is needed on the Rust side — only an id round-trips
+ * through persistence, this color data lives on the frontend alone.
+ */
+export interface BackgroundPreset {
+  id: string;
+  label: string;
+  colors: [string, string, string, string, string, string];
+}
+
+export const BACKGROUND_PRESETS: BackgroundPreset[] = [
+  {
+    id: "chroma",
+    label: "Chroma",
+    colors: ["#ff3b6b", "#ff9d3b", "#e9ff3b", "#3bffb0", "#3bb0ff", "#b03bff"],
+  },
+  {
+    id: "cyberpunk",
+    label: "Cyberpunk",
+    colors: ["#ff2ec4", "#8b2fff", "#2f6bff", "#00e5ff", "#39ffd8", "#ff2ec4"],
+  },
+  {
+    id: "toxic",
+    label: "Toxic",
+    colors: ["#caff3f", "#39ff14", "#0aff99", "#00e6b8", "#7bff3f", "#caff3f"],
+  },
+  {
+    id: "inferno",
+    label: "Inferno",
+    colors: ["#ff003c", "#ff6a00", "#ffb700", "#ff2e00", "#ff8a00", "#ff003c"],
+  },
+  {
+    id: "aurora",
+    label: "Aurora",
+    colors: ["#00ffd5", "#4dd0ff", "#6a5cff", "#c66aff", "#ff6ec7", "#00ffd5"],
+  },
+  {
+    id: "frost",
+    label: "Frost",
+    colors: ["#0072ff", "#00c6ff", "#7de2fc", "#c2f5ff", "#66d9ff", "#0072ff"],
+  },
+];
+
+/** Falls back to the first preset for an unrecognized id — e.g. a config
+ * file written by a future version with a preset this build doesn't know
+ * about yet, rather than rendering nothing. */
+export function getBackgroundPreset(id: string): BackgroundPreset {
+  return BACKGROUND_PRESETS.find((preset) => preset.id === id) ?? BACKGROUND_PRESETS[0];
+}
+
+/** Animation-duration bounds for the background flow, in seconds — the
+ * `backgroundSpeed` slider (0..1) maps onto this range inversely (1 =
+ * fastest = shortest duration) via `backgroundSpeedToDurationS`. */
+export const BACKGROUND_FLOW_MIN_DURATION_S = 4;
+export const BACKGROUND_FLOW_MAX_DURATION_S = 24;
+
+export function backgroundSpeedToDurationS(speed: number): number {
+  return (
+    BACKGROUND_FLOW_MAX_DURATION_S -
+    speed * (BACKGROUND_FLOW_MAX_DURATION_S - BACKGROUND_FLOW_MIN_DURATION_S)
+  );
+}
+
+/**
  * Mirrors `DockSettings::default()` in `src-tauri/src/commands/settings.rs`
  * — used as `useDockSettings`'s initial state so the very first render
  * already matches what the backend will report a moment later for a user
@@ -154,6 +222,9 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   animationsEnabled: true,
   rgbGlowColors: ["#ff3b6b", "#ff9d3b", "#e9ff3b", "#3bffb0", "#3bb0ff", "#b03bff"],
   staticGlowColor: "#ff3b6b",
-  tintColor: "#09090b",
-  tintOpacity: 0.8,
+  backgroundAnimationEnabled: true,
+  backgroundPreset: "chroma",
+  backgroundIntensity: 0.7,
+  backgroundVisibility: 0.45,
+  backgroundSpeed: 0.4,
 };

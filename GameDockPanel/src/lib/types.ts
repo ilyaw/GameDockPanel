@@ -53,9 +53,21 @@ export interface DockSettings {
   /** Frame color shown when `animationsEnabled` is off, instead of a
    * random freeze-frame of the cycle. */
   staticGlowColor: string;
-  /** Tint layer color under the icons — painted on top of the native
-   * vibrancy blur, not a substitute for it. */
-  tintColor: string;
-  /** Alpha (0..1) of the tint layer. */
-  tintOpacity: number;
+  /** Master toggle for the animated RGB/gradient background layer under
+   * the icons (painted on top of the native vibrancy blur). Independent
+   * of `animationsEnabled`, which only ever covered the border cycle + LED
+   * pulse — this is a separate decorative layer with its own on/off. */
+  backgroundAnimationEnabled: boolean;
+  /** Id into `BACKGROUND_PRESETS` (constants.ts) — picks the gradient's 6
+   * color stops. Falls back to the first preset if unrecognized (e.g. an
+   * older config file). */
+  backgroundPreset: string;
+  /** 0..1 — how vivid/bright the preset's colors render (mixed toward
+   * black at 0, full color at 1). */
+  backgroundIntensity: number;
+  /** 0..1 — opacity of the whole gradient layer over the glass. */
+  backgroundVisibility: number;
+  /** 0..1 — flow speed; mapped to an animation duration via
+   * `backgroundSpeedToDurationS`. */
+  backgroundSpeed: number;
 }

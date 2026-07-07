@@ -25,15 +25,22 @@ pub struct DockSettings {
     /// Frame color shown when `animations_enabled` is off — a static
     /// picture, not a random freeze-frame of the cycle.
     pub static_glow_color: String,
-    /// Tint layer color under the icons (`bg-zinc-950/80`'s replacement).
-    /// This is a color layer painted *on top of* the native vibrancy blur,
-    /// not a substitute for it — see `tint_opacity` below.
-    pub tint_color: String,
-    /// Alpha (0.0..=1.0) of the tint layer. At 1.0 the tint is fully
-    /// opaque and visually hides the vibrancy blur behind it entirely —
-    /// that's an expected consequence of the user's own opacity choice,
-    /// not a bug in the vibrancy setup.
-    pub tint_opacity: f64,
+    /// Master toggle for the animated RGB/gradient background layer under
+    /// the icons, painted on top of the native vibrancy blur. Independent
+    /// of `animations_enabled` (border cycle + LED pulse only) — this is a
+    /// separate decorative layer with its own on/off.
+    pub background_animation_enabled: bool,
+    /// Id into the frontend's `BACKGROUND_PRESETS` table (constants.ts),
+    /// which owns the actual color data — this side only stores/persists
+    /// the chosen id, same as every other purely-visual string here.
+    pub background_preset: String,
+    /// 0.0..=1.0 — how vivid/bright the preset's colors render.
+    pub background_intensity: f64,
+    /// 0.0..=1.0 — opacity of the whole gradient layer over the glass.
+    pub background_visibility: f64,
+    /// 0.0..=1.0 — flow speed, mapped to an animation duration on the
+    /// frontend.
+    pub background_speed: f64,
 }
 
 impl Default for DockSettings {
@@ -49,8 +56,11 @@ impl Default for DockSettings {
                 "#b03bff".to_string(),
             ],
             static_glow_color: "#ff3b6b".to_string(),
-            tint_color: "#09090b".to_string(),
-            tint_opacity: 0.8,
+            background_animation_enabled: true,
+            background_preset: "chroma".to_string(),
+            background_intensity: 0.7,
+            background_visibility: 0.45,
+            background_speed: 0.4,
         }
     }
 }
@@ -128,7 +138,9 @@ pub fn update_dock_settings(
             "rgbGlowColors must have exactly {RGB_GLOW_COLOR_COUNT} entries"
         ));
     }
-    settings.tint_opacity = settings.tint_opacity.clamp(0.0, 1.0);
+    settings.background_intensity = settings.background_intensity.clamp(0.0, 1.0);
+    settings.background_visibility = settings.background_visibility.clamp(0.0, 1.0);
+    settings.background_speed = settings.background_speed.clamp(0.0, 1.0);
 
     let path = config_file_path(&app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;

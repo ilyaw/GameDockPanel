@@ -6,7 +6,12 @@ import { Settings } from "lucide-react";
 import { DockIcon } from "./DockIcon";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockSettings } from "../hooks/useDockSettings";
-import { PILL_HEIGHT_PX, ICON_SIZE_PX } from "../lib/constants";
+import {
+  PILL_HEIGHT_PX,
+  ICON_SIZE_PX,
+  getBackgroundPreset,
+  backgroundSpeedToDurationS,
+} from "../lib/constants";
 import type { DockApp } from "../lib/types";
 
 /**
@@ -16,6 +21,12 @@ import type { DockApp } from "../lib/types";
  * needed instead of reaching for a broader `any`.
  */
 type StyleWithGlowVars = React.CSSProperties & Record<`--dock-glow-${number}`, string>;
+
+/** Same gap as `StyleWithGlowVars`, for the background gradient layer's own
+ * custom properties (`--dock-bg-1..6`, `--dock-bg-duration`). */
+type StyleWithBgVars = React.CSSProperties &
+  Record<`--dock-bg-${number}`, string> &
+  Record<"--dock-bg-duration", string>;
 
 /** How long the pill's reject-pulse border stays applied — mirrors the
  * `--animate-reject-pulse` duration in `index.css`; kept here instead of
@@ -270,8 +281,8 @@ export function DockPanel() {
    * neither animation class is applied (`animationsEnabled` off, not
    * rejecting) — no extra branching needed to pick which one "wins".
    */
-  const pillStyle = useMemo<StyleWithGlowVars>(() => {
-    const style: StyleWithGlowVars = {
+  const pillStyle = useMemo<StyleWithGlowVars>(
+    () => ({
       height: PILL_HEIGHT_PX,
       borderColor: settings.staticGlowColor,
       boxShadow: `0 0 14px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
@@ -281,23 +292,41 @@ export function DockPanel() {
       "--dock-glow-4": settings.rgbGlowColors[3],
       "--dock-glow-5": settings.rgbGlowColors[4],
       "--dock-glow-6": settings.rgbGlowColors[5],
+    }),
+    [settings.staticGlowColor, settings.rgbGlowColors],
+  );
+
+  /**
+   * The animated RGB/gradient background layer (see `.dock-bg-flow` /
+   * `@keyframes rgb-bg-flow` in index.css) — `backgroundIntensity` mixes
+   * each preset color toward black (same `color-mix()` technique as the
+   * border glow's shadow above), `backgroundVisibility` becomes this
+   * layer's own `opacity` rather than baking alpha into each color stop
+   * so the gradient's relative color balance stays constant as the
+   * slider moves, and `backgroundSpeed` maps to a duration consumed by
+   * `--animate-rgb-bg-flow`'s `var(--dock-bg-duration, ...)` fallback.
+   */
+  const bgFlowStyle = useMemo<StyleWithBgVars>(() => {
+    const preset = getBackgroundPreset(settings.backgroundPreset);
+    const mixed = preset.colors.map(
+      (color) =>
+        `color-mix(in srgb, ${color} ${Math.round(settings.backgroundIntensity * 100)}%, black)`,
+    );
+    return {
+      opacity: settings.backgroundVisibility,
+      "--dock-bg-1": mixed[0],
+      "--dock-bg-2": mixed[1],
+      "--dock-bg-3": mixed[2],
+      "--dock-bg-4": mixed[3],
+      "--dock-bg-5": mixed[4],
+      "--dock-bg-6": mixed[5],
+      "--dock-bg-duration": `${backgroundSpeedToDurationS(settings.backgroundSpeed)}s`,
     };
-    // The drag-over cue (`border-zinc-400 bg-zinc-900/90` classes below)
-    // relies on a plain utility class for its background — an inline
-    // `backgroundColor` always beats that regardless of source order, so
-    // only apply the tint here while a drop isn't in progress.
-    if (!fileDragOver) {
-      style.backgroundColor = `color-mix(in srgb, ${settings.tintColor} ${Math.round(
-        settings.tintOpacity * 100,
-      )}%, transparent)`;
-    }
-    return style;
   }, [
-    fileDragOver,
-    settings.staticGlowColor,
-    settings.rgbGlowColors,
-    settings.tintColor,
-    settings.tintOpacity,
+    settings.backgroundPreset,
+    settings.backgroundIntensity,
+    settings.backgroundVisibility,
+    settings.backgroundSpeed,
   ]);
 
   return (
@@ -315,7 +344,7 @@ export function DockPanel() {
           leaveDock();
         }}
         style={pillStyle}
-        className={`pointer-events-auto mx-auto m-0 flex shrink-0 items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
+        className={`pointer-events-auto relative mx-auto m-0 flex shrink-0 items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
           isRejecting
             ? "animate-reject-pulse"
             : settings.animationsEnabled
@@ -324,9 +353,27 @@ export function DockPanel() {
         } ${
           fileDragOver
             ? "border-zinc-400 bg-zinc-900/90"
-            : "border-transparent"
+            : "border-transparent bg-black/40"
         }`}
       >
+        {settings.backgroundAnimationEnabled && !fileDragOver && (
+          // Negative z-index puts this behind the icons/button below
+          // automatically (static in-flow siblings paint above negative-
+          // z-index descendants per the stacking spec) — no z-index needed
+          // on them. The outer wrapper stays unblurred so it can clip to
+          // the pill's own rounded corners; the inner layer is the one
+          // that's oversized + blurred, so the blur's soft falloff never
+          // shows a hard, unblurred edge at the clip boundary.
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-[28px]"
+          >
+            <div
+              className="dock-bg-flow animate-rgb-bg-flow absolute -inset-8 blur-2xl"
+              style={bgFlowStyle}
+            />
+          </div>
+        )}
         <Reorder.Group
           axis="x"
           values={apps}
@@ -382,18 +429,25 @@ export function DockPanel() {
           className="mx-1 mb-3 w-px shrink-0 self-end bg-zinc-600/80"
           style={{ height: ICON_SIZE_PX * 0.55 }}
         />
-        <button
-          ref={settingsButtonRef}
-          type="button"
-          title="Settings"
-          aria-label="Settings"
-          onClick={() => {
-            void invoke("open_settings");
-          }}
-          className="mb-0 flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-zinc-400 transition-colors hover:bg-zinc-800/60 hover:text-zinc-100"
-        >
-          <Settings className="h-7 w-7" strokeWidth={1.75} />
-        </button>
+        {/* Matches DockIcon's own `flex-col items-center gap-2` shape (icon +
+            gap + LED) with an invisible spacer standing in for the LED — the
+            pill row is `items-end`, so without this the button's bottom
+            (and thus its glyph) lands 11px lower than every app icon's. */}
+        <div className="flex shrink-0 flex-col items-center gap-2">
+          <button
+            ref={settingsButtonRef}
+            type="button"
+            title="Settings"
+            aria-label="Settings"
+            onClick={() => {
+              void invoke("open_settings");
+            }}
+            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-zinc-400 transition-colors hover:bg-zinc-800/60 hover:text-zinc-100"
+          >
+            <Settings className="h-7 w-7" strokeWidth={1.75} />
+          </button>
+          <span aria-hidden className="h-[3px] w-6" />
+        </div>
       </div>
     </div>
   );

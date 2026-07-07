@@ -35,6 +35,10 @@ img {
   --animate-rgb-glow: rgb-glow 6s linear infinite;
   --animate-led-pulse: led-pulse 1.8s ease-in-out infinite;
   --animate-reject-pulse: reject-pulse 0.4s ease-out;
+  /* Duration is per-user (`backgroundSpeed` in DockSettings) — the `var()`
+     fallback only covers the sliver of time before DockPanel's inline
+     style sets `--dock-bg-duration` on mount. */
+  --animate-rgb-bg-flow: rgb-bg-flow var(--dock-bg-duration, 14s) linear infinite;
 }
 
 /*
@@ -74,6 +78,41 @@ img {
   100% {
     border-color: var(--dock-glow-1);
     box-shadow: 0 0 14px 0 color-mix(in srgb, var(--dock-glow-1) 40%, transparent);
+  }
+}
+
+/*
+  Animated background gradient behind the dock icons (DockPanel.tsx). The
+  `@theme` block above only generates the `animation` shorthand utility —
+  composing 6 user-picked color stops (`--dock-bg-1..6`, from the active
+  `BackgroundPreset`) into an actual `linear-gradient()` needs a real
+  declaration, which Tailwind utilities can't express, hence the plain
+  class here rather than something purely theme-driven. The gradient
+  repeats its first stop as its last so animating `background-position`
+  loops seamlessly instead of visibly jumping at the wrap-around; the
+  oversized `background-size` is what gives the position animation room
+  to move through before it has to repeat.
+*/
+.dock-bg-flow {
+  background-image: linear-gradient(
+    100deg,
+    var(--dock-bg-1),
+    var(--dock-bg-2),
+    var(--dock-bg-3),
+    var(--dock-bg-4),
+    var(--dock-bg-5),
+    var(--dock-bg-6),
+    var(--dock-bg-1)
+  );
+  background-size: 220% 220%;
+}
+
+@keyframes rgb-bg-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
   }
 }
 
