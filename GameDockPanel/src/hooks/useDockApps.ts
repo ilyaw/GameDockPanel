@@ -40,6 +40,17 @@ export type InsertIndexResolver = (x: number, y: number) => number;
 export type SeparatorPlacement = "before" | "after";
 
 /**
+ * Upper bound on how long a launch-bounce plays while waiting for
+ * `apps-running-changed` to report `isActive: true` for the clicked bundle
+ * ID. Not every app's `didLaunchApplicationNotification` timing is
+ * predictable (slow-starting installers, permission prompts, etc.) — this
+ * is the "stop anyway" fallback so a single stuck app can't bounce forever.
+ * A one-shot JS timer, not CSS-consumed, so it lives here rather than
+ * `constants.ts` — same precedent as `REJECT_PULSE_MS` in `DockPanel.tsx`.
+ */
+const LAUNCH_BOUNCE_TIMEOUT_MS = 9000;
+
+/**
  * Owns the dock's item list and every IPC touchpoint around it: initial
  * snapshot, running/icon/list-membership push events, reorder, and
  * add/remove mutations (add via Finder drag-drop onto the window — the
@@ -57,8 +68,64 @@ export function useDockApps() {
   const resolveInsertIndexRef = useRef<InsertIndexResolver | null>(null);
   const dragScaleFactorRef = useRef(1);
 
+  /**
+   * Item IDs currently playing a launch-bounce. `bouncingIds` is the
+   * render-facing copy; `bouncingIdsRef` is updated in lockstep (not via a
+   * separate effect) so `activateApp`'s re-click check below always reads
+   * the current value even within the same tick a click was just handled —
+   * an effect-based mirror could still see the pre-update value if two
+   * clicks landed before React flushed.
+   */
+  const [bouncingIds, setBouncingIds] = useState<Set<string>>(new Set());
+  const bouncingIdsRef = useRef<Set<string>>(new Set());
+  const bounceTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+
   const reportReject = useCallback(() => {
     setRejectPulseKey((key) => key + 1);
+  }, []);
+
+  /**
+   * Idempotent — safe to call from both race participants (the
+   * `apps-running-changed` listener and the timeout below) without special
+   * "who already won" bookkeeping: whichever fires first clears the timer
+   * and the set membership, the second call finds nothing left to do.
+   */
+  const stopBounce = useCallback((id: string) => {
+    const timeout = bounceTimeoutsRef.current.get(id);
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+      bounceTimeoutsRef.current.delete(id);
+    }
+    if (!bouncingIdsRef.current.has(id)) return;
+    const next = new Set(bouncingIdsRef.current);
+    next.delete(id);
+    bouncingIdsRef.current = next;
+    setBouncingIds(next);
+  }, []);
+
+  const startBounce = useCallback(
+    (id: string) => {
+      if (bouncingIdsRef.current.has(id)) return;
+      const next = new Set(bouncingIdsRef.current);
+      next.add(id);
+      bouncingIdsRef.current = next;
+      setBouncingIds(next);
+
+      const timeout = setTimeout(() => stopBounce(id), LAUNCH_BOUNCE_TIMEOUT_MS);
+      bounceTimeoutsRef.current.set(id, timeout);
+    },
+    [stopBounce],
+  );
+
+  useEffect(() => {
+    return () => {
+      for (const timeout of bounceTimeoutsRef.current.values()) {
+        clearTimeout(timeout);
+      }
+      bounceTimeoutsRef.current.clear();
+    };
   }, []);
 
   const resolveInsertIndexFromPosition = useCallback(
@@ -110,7 +177,16 @@ export function useDockApps() {
 
       unlisteners.push(
         await listen<AppRunningUpdate[]>("apps-running-changed", (event) => {
-          setItems((prev) => mergeRunningUpdates(prev, event.payload));
+          // Mirror running-state into `itemsRef` synchronously — `activateApp`
+          // reads it on every click and must not see a stale `isActive: false`
+          // after `stopBounce` has already cleared `bouncingIdsRef` (otherwise
+          // a rapid re-click restarts bounce while the stop tween still runs).
+          const next = mergeRunningUpdates(itemsRef.current, event.payload);
+          itemsRef.current = next;
+          setItems(next);
+          for (const update of event.payload) {
+            if (update.isActive) stopBounce(update.id);
+          }
         }),
       );
 
@@ -209,20 +285,43 @@ export function useDockApps() {
         unlisten();
       }
     };
-  }, [addAppPath, reportReject, resolveInsertIndexFromPosition, updateFileDragInsertIndex]);
+  }, [
+    addAppPath,
+    reportReject,
+    resolveInsertIndexFromPosition,
+    updateFileDragInsertIndex,
+    stopBounce,
+  ]);
 
-  const activateApp = useCallback((id: string) => {
-    const app = itemsRef.current.find(
-      (candidate): candidate is Extract<DockItem, { type: "app" }> =>
-        isDockAppItem(candidate) && candidate.id === id,
-    );
-    if (!app) return;
-    invoke("launch_or_activate_app", { bundleId: app.bundleId }).catch(
-      (error: unknown) => {
-        console.error(`Failed to launch or activate ${app.name}:`, error);
-      },
-    );
-  }, []);
+  const activateApp = useCallback(
+    (id: string) => {
+      const app = itemsRef.current.find(
+        (candidate): candidate is Extract<DockItem, { type: "app" }> =>
+          isDockAppItem(candidate) && candidate.id === id,
+      );
+      if (!app) return;
+
+      // Already waiting on this bundle ID's launch — a repeat click is a
+      // no-op, not a second `open_path` and not a restarted animation.
+      if (bouncingIdsRef.current.has(id)) return;
+
+      // `app.isActive` mirrors the same running-state Rust would check
+      // fresh on the main thread — not launch-perfect (a just-quit app can
+      // theoretically be stale for a race-thin window before its terminate
+      // notification lands), but the only signal available without new
+      // native code, same class of approximation already accepted for the
+      // stop condition below.
+      if (!app.isActive) startBounce(id);
+
+      invoke("launch_or_activate_app", { bundleId: app.bundleId }).catch(
+        (error: unknown) => {
+          console.error(`Failed to launch or activate ${app.name}:`, error);
+          stopBounce(id);
+        },
+      );
+    },
+    [startBounce, stopBounce],
+  );
 
   const reorderItems = useCallback((newOrder: DockItem[]) => {
     setItems(newOrder);
@@ -316,6 +415,7 @@ export function useDockApps() {
     items,
     itemsRef,
     activateApp,
+    bouncingIds,
     reorderItems,
     commitReorder,
     removeApp,

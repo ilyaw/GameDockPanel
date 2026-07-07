@@ -210,6 +210,7 @@ export function DockPanel() {
   const {
     items,
     activateApp,
+    bouncingIds,
     reorderItems,
     commitReorder,
     removeApp,
@@ -890,6 +891,7 @@ export function DockPanel() {
                 isDragging={isDragging}
                 isReorderSettling={isReorderSettling}
                 animationsEnabled={settings.animationsEnabled}
+                isBouncing={bouncingIds.has(item.id)}
                 onRemove={removeApp}
                 onShowInFinder={showInFinder}
                 onQuit={quitApp}

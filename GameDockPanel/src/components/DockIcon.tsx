@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  animate,
   motion,
   useMotionValue,
   useSpring,
@@ -23,6 +24,35 @@ interface WindowLogicalPoint {
 }
 
 const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
+
+/**
+ * Launch-bounce keyframe shape — 4 decaying hops (relative to
+ * `launchBounceAmplitudePx`) rather than one repeated fixed-height jump, per
+ * the "decaying amplitude, not infinitely-equal jumps" requirement. Each
+ * pair of segments is an up (`easeOut`, decelerating against "gravity") then
+ * a down (`easeIn`, accelerating) — the last hop settles back to rest before
+ * `LAUNCH_BOUNCE_REPEAT_DELAY_S` pauses and the whole decaying burst
+ * restarts, so the icon keeps visibly bouncing for as long as the wait
+ * lasts instead of freezing once the amplitude decays to zero.
+ */
+const LAUNCH_BOUNCE_RATIOS = [0, -1, 0, -0.62, 0, -0.38, 0, -0.2, 0];
+const LAUNCH_BOUNCE_TIMES = [0, 0.11, 0.22, 0.32, 0.42, 0.53, 0.65, 0.8, 1];
+const LAUNCH_BOUNCE_EASES = [
+  "easeOut",
+  "easeIn",
+  "easeOut",
+  "easeIn",
+  "easeOut",
+  "easeIn",
+  "easeOut",
+  "easeIn",
+] as const;
+const LAUNCH_BOUNCE_BURST_DURATION_S = 1.1;
+const LAUNCH_BOUNCE_REPEAT_DELAY_S = 0.35;
+/** How quickly `bounceY` eases back to rest once the bounce is told to stop
+ * (running-state arrived, or the timeout fired) — a short tween instead of
+ * a hard `jump(0)` so the icon doesn't visibly snap mid-arc. */
+const LAUNCH_BOUNCE_STOP_TWEEN_S = 0.15;
 
 interface DockIconProps {
   app: DockApp;
@@ -73,6 +103,10 @@ interface DockIconProps {
    * "breathing" pulse keyframe, not its on/off (active/inactive) state,
    * which is a functional signal, not decoration. */
   animationsEnabled?: boolean;
+  /** True while waiting for this app's launch to be observed via
+   * `apps-running-changed` (or the timeout fallback) — see `useDockApps`'s
+   * `bouncingIds`. Drives the launch-bounce animation below. */
+  isBouncing?: boolean;
 }
 
 export function DockIcon({
@@ -93,6 +127,7 @@ export function DockIcon({
   isDragging = false,
   isReorderSettling = false,
   animationsEnabled = true,
+  isBouncing = false,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -257,6 +292,58 @@ export function DockIcon({
       scale.set(scaleRaw.get());
     }
   }, [magnifySuppressed, scale, scaleRaw]);
+
+  /**
+   * Independent motion value composed onto the same node as `scale` below —
+   * Framer Motion recognizes `y`/`scale` as transform-shorthand style props
+   * and always merges every one present into a single `transform` (see
+   * `buildTransform` in `motion-dom`), in `translate` → `scale` order. That
+   * means the bounce's `translateY` is always in unscaled px, unaffected by
+   * whatever magnify scale the icon currently has — no suppression needed
+   * between the two, unlike the reorder/magnify interaction above (which is
+   * a different mechanism: `Reorder.Item`'s own layout-projection transform
+   * on the *outer* wrapper, not a style prop on this inner node).
+   */
+  const bounceY = useMotionValue(0);
+  const bounceAmplitudePx = useTransform(
+    iconSizePx,
+    (px) => getSizeMetrics(px).launchBounceAmplitudePx,
+  );
+  /** Held so a bounce restart can cancel an in-flight stop tween on `bounceY`. */
+  const bounceStopTweenRef = useRef<ReturnType<typeof animate> | null>(null);
+
+  useEffect(() => {
+    if (!isBouncing) return;
+
+    bounceStopTweenRef.current?.stop();
+    bounceStopTweenRef.current = null;
+
+    const amplitude = bounceAmplitudePx.get();
+    const controls = animate(
+      bounceY,
+      LAUNCH_BOUNCE_RATIOS.map((ratio) => ratio * amplitude),
+      {
+        times: LAUNCH_BOUNCE_TIMES,
+        // Spread to a mutable copy — `LAUNCH_BOUNCE_EASES` is a `readonly`
+        // `as const` tuple (needed so each entry keeps its literal
+        // `Easing` name instead of widening to `string`), which the
+        // `animate()` options type doesn't accept directly.
+        ease: [...LAUNCH_BOUNCE_EASES],
+        duration: LAUNCH_BOUNCE_BURST_DURATION_S,
+        repeat: Infinity,
+        repeatDelay: LAUNCH_BOUNCE_REPEAT_DELAY_S,
+      },
+    );
+
+    return () => {
+      controls.stop();
+      bounceStopTweenRef.current?.stop();
+      bounceStopTweenRef.current = animate(bounceY, 0, {
+        duration: LAUNCH_BOUNCE_STOP_TWEEN_S,
+        ease: "easeOut",
+      });
+    };
+  }, [isBouncing, bounceY, bounceAmplitudePx]);
 
   const iconWidth = useTransform(iconSizePx, (px) => px);
   const iconHeight = useTransform(iconSizePx, (px) => px);
@@ -427,6 +514,7 @@ export function DockIcon({
               height: iconHeight,
               borderRadius: iconCornerRadius,
               scale: magnifySuppressed ? 1 : scale,
+              y: bounceY,
               color: app.indicatorColor,
             }}
             className="flex origin-bottom items-center justify-center bg-zinc-800 text-lg font-semibold"
@@ -441,6 +529,7 @@ export function DockIcon({
               height: iconHeight,
               borderRadius: iconCornerRadius,
               scale: magnifySuppressed ? 1 : scale,
+              y: bounceY,
             }}
             src={app.iconUrl ?? undefined}
             alt={app.name}

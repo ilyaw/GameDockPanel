@@ -94,6 +94,18 @@ const BASE_ICON_LED_GAP_PX = 8;
 export const MAGNIFY_MAX_SCALE = 1.4;
 
 /**
+ * Peak launch-bounce `translateY` as a fraction of `magnifyHeightOverflowPx`
+ * — deliberately tied to the *same* number `pillTopReservePx` already
+ * reserves headroom for, instead of an independent constant, so bounce
+ * amplitude + peak magnify overflow happening at once can never exceed
+ * that existing reserve (dominated in practice by
+ * `CONTEXT_MENU_HEIGHT_PX`). Keeps this a pure frontend visual number that
+ * never has to grow the window or get mirrored into `platform/macos.rs` —
+ * same rationale already documented for `magnifyInfluenceRadiusPx`.
+ */
+export const LAUNCH_BOUNCE_AMPLITUDE_RATIO = 0.55;
+
+/**
  * Fixed across every icon-size preset — like the real macOS Dock, whose
  * own size slider doesn't change the pill's corner shape, its margin to
  * the screen edge, glow bleed, divider thickness, or the LED indicator
@@ -175,6 +187,10 @@ export interface SizeMetrics {
    * magnify falls back to rest scale (1). Spans roughly two neighboring
    * icons on each side of the one closest to the cursor. */
   magnifyInfluenceRadiusPx: number;
+  /** Peak upward `translateY` for the launch-bounce animation (`DockIcon`) —
+   * see `LAUNCH_BOUNCE_AMPLITUDE_RATIO` for why this is derived from
+   * `magnifyHeightOverflowPx` rather than its own independent constant. */
+  launchBounceAmplitudePx: number;
   /** Pill outer height at rest: py + icon + gap + LED; magnify overflows above. */
   pillHeightPx: number;
   /** Native hit-test band above the pill (magnify overflow, not CSS pill height). */
@@ -201,6 +217,8 @@ export function getSizeMetrics(iconSizePx: number): SizeMetrics {
 
   const magnifyHeightOverflowPx = iconSizePx * (MAGNIFY_MAX_SCALE - 1);
   const magnifyInfluenceRadiusPx = (iconSizePx + dockGapPx) * 2;
+  const launchBounceAmplitudePx =
+    magnifyHeightOverflowPx * LAUNCH_BOUNCE_AMPLITUDE_RATIO;
 
   const pillHeightPx = dockPaddingYPx * 2 + iconSizePx + iconLedGapPx + LED_HEIGHT_PX;
   const pillHeightHoverPx = pillHeightPx + magnifyHeightOverflowPx;
@@ -223,6 +241,7 @@ export function getSizeMetrics(iconSizePx: number): SizeMetrics {
     iconLedGapPx,
     magnifyHeightOverflowPx,
     magnifyInfluenceRadiusPx,
+    launchBounceAmplitudePx,
     pillHeightPx,
     pillHeightHoverPx,
     pillTopReservePx,
