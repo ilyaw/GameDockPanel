@@ -206,8 +206,7 @@ export function DockIcon({
   );
   const scale = useSpring(scaleRaw, MAGNIFY_SPRING);
 
-  const iconVisualClass =
-    "h-14 w-14 origin-bottom rounded-2xl shadow-lg shadow-black/40";
+  const iconVisualClass = "h-14 w-14 origin-bottom rounded-2xl";
 
   // `null` means Rust couldn't resolve a native icon (app not installed) —
   // same fallback badge as a broken/failed `<img>` load.

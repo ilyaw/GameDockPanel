@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Reorder, useMotionValue } from "framer-motion";
+import { Reorder, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Settings } from "lucide-react";
@@ -9,6 +9,8 @@ import { useDockSettings } from "../hooks/useDockSettings";
 import {
   PILL_HEIGHT_PX,
   ICON_SIZE_PX,
+  MAGNIFY_INFLUENCE_RADIUS_PX,
+  MAGNIFY_MAX_SCALE,
   getBackgroundPreset,
   backgroundSpeedToDurationS,
   getBorderStylePreset,
@@ -48,6 +50,8 @@ const PANEL_EFFECT_CLASSES: Record<string, { overlay: string; animation: string 
  * `--animate-reject-pulse` duration in `index.css`; kept here instead of
  * imported since it's a one-shot JS timer, not a CSS-consumed constant. */
 const REJECT_PULSE_MS = 400;
+
+const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
 
 interface DockCursorPayload {
   x: number;
@@ -118,12 +122,18 @@ export function DockPanel() {
   const [isRejecting, setIsRejecting] = useState(false);
 
   const mouseX = useMotionValue(Infinity);
+  /** Separate cursor channel for the settings slot — when the pointer is over
+   * settings, `mouseX` is forced to `Infinity` so app icons don't pick up a
+   * distant magnify curve from the far-right cursor X (which was making the
+   * leftmost icon grow). Settings reads this value instead. */
+  const settingsMouseX = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement>(null);
-  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsSlotRef = useRef<HTMLDivElement>(null);
+  const settingsCenterX = useMotionValue(0);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
@@ -136,17 +146,26 @@ export function DockPanel() {
   const applyCursor = useCallback(
     (x: number, y: number) => {
       if (isDraggingRef.current) return;
+      const settingsEl = settingsSlotRef.current;
+      if (settingsEl && pointInRect(x, y, settingsEl)) {
+        mouseX.set(Infinity);
+        settingsMouseX.set(x);
+        setHoveredIconId(null);
+        return;
+      }
+      settingsMouseX.set(Infinity);
       mouseX.set(x);
       setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
     },
-    [mouseX],
+    [mouseX, settingsMouseX],
   );
 
   const leaveDock = useCallback(() => {
     dockHoveredRef.current = false;
     mouseX.set(Infinity);
+    settingsMouseX.set(Infinity);
     setHoveredIconId(null);
-  }, [mouseX]);
+  }, [mouseX, settingsMouseX]);
 
   const enterDock = useCallback(() => {
     dockHoveredRef.current = true;
@@ -168,8 +187,9 @@ export function DockPanel() {
   const beginDrag = useCallback(() => {
     setIsDragging(true);
     mouseX.set(Infinity);
+    settingsMouseX.set(Infinity);
     setHoveredIconId(null);
-  }, [mouseX]);
+  }, [mouseX, settingsMouseX]);
 
   /** The one discrete "drop" event — persists the final order exactly once
    * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
@@ -202,6 +222,7 @@ export function DockPanel() {
           } else {
             dockHoveredRef.current = false;
             mouseX.set(Infinity);
+            settingsMouseX.set(Infinity);
             setHoveredIconId(null);
           }
         }),
@@ -235,7 +256,7 @@ export function DockPanel() {
         await listen<DockCursorPayload>("dock-click", (event) => {
           if (isDraggingRef.current) return;
           const { x, y } = event.payload;
-          const settingsEl = settingsButtonRef.current;
+          const settingsEl = settingsSlotRef.current;
           if (settingsEl && pointInRect(x, y, settingsEl)) {
             void invoke("open_settings");
             return;
@@ -286,6 +307,35 @@ export function DockPanel() {
     observer.observe(el);
     return () => observer.disconnect();
   }, [apps]);
+
+  useLayoutEffect(() => {
+    const el = settingsSlotRef.current;
+    if (!el) return;
+
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      settingsCenterX.set(rect.left + rect.width / 2);
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [settingsCenterX, apps, hoverSessionId, reorderSettledId]);
+
+  const settingsDistance = useTransform(
+    [settingsMouseX, settingsCenterX],
+    ([mx, cx]: number[]) => {
+      if (!Number.isFinite(mx)) return Infinity;
+      return mx - cx;
+    },
+  );
+  const settingsScaleRaw = useTransform(
+    settingsDistance,
+    [-MAGNIFY_INFLUENCE_RADIUS_PX, 0, MAGNIFY_INFLUENCE_RADIUS_PX],
+    [1, MAGNIFY_MAX_SCALE, 1],
+  );
+  const settingsScale = useSpring(settingsScaleRaw, MAGNIFY_SPRING);
 
   const activeBorderStyle = getBorderStylePreset(settings.borderStyle);
   /**
@@ -485,18 +535,24 @@ export function DockPanel() {
             pill row is `items-end`, so without this the button's bottom
             (and thus its glyph) lands 11px lower than every app icon's. */}
         <div className="flex shrink-0 flex-col items-center gap-2">
-          <button
-            ref={settingsButtonRef}
-            type="button"
-            title="Настройки"
-            aria-label="Настройки"
-            onClick={() => {
-              void invoke("open_settings");
-            }}
-            className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-zinc-400 transition-colors hover:bg-zinc-800/60 hover:text-zinc-100"
-          >
-            <Settings className="h-7 w-7" strokeWidth={1.75} />
-          </button>
+          <div ref={settingsSlotRef} className="relative h-14 w-14 shrink-0">
+            <motion.div
+              style={{ scale: isDragging ? 1 : settingsScale }}
+              className="h-full w-full origin-bottom"
+            >
+              <button
+                type="button"
+                title="Настройки"
+                aria-label="Настройки"
+                onClick={() => {
+                  void invoke("open_settings");
+                }}
+                className="flex h-full w-full items-center justify-center rounded-2xl text-zinc-400 transition-colors hover:text-zinc-100"
+              >
+                <Settings className="h-7 w-7" strokeWidth={1.75} />
+              </button>
+            </motion.div>
+          </div>
           <span aria-hidden className="h-[3px] w-6" />
         </div>
         {showPanelEffect && (
