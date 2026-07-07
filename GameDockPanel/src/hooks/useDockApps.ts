@@ -31,12 +31,43 @@ function isAppBundlePath(path: string): boolean {
 /**
  * Owns the dock's app list and every IPC touchpoint around it: initial
  * snapshot, running/icon/list-membership push events, reorder, and
- * add/remove mutations (add via Finder drag-drop onto the window).
+ * add/remove mutations (add via Finder drag-drop onto the window — the
+ * only add path — funnels through `addAppPath` below into the
+ * `add_app_from_path` command).
  */
 export function useDockApps() {
   const [apps, setApps] = useState<DockApp[]>([]);
   const [fileDragOver, setFileDragOver] = useState(false);
+  /**
+   * Bumped on any add-app rejection — invalid file type on drop, duplicate
+   * bundle ID, or a full dock. One counter, not a boolean, so `DockPanel`
+   * can re-trigger the reject animation on consecutive rejections via a
+   * `key`/effect dependency even if the value would otherwise "already be
+   * true".
+   */
+  const [rejectPulseKey, setRejectPulseKey] = useState(0);
   const appsRef = useRef<DockApp[]>([]);
+
+  const reportReject = useCallback(() => {
+    setRejectPulseKey((key) => key + 1);
+  }, []);
+
+  /**
+   * Single entry point into `add_app_from_path` — same duplicate/`MAX_APPS`
+   * rejection on the Rust side, and the same reject-pulse cue on the
+   * frontend either way (see `rejectPulseKey`).
+   */
+  const addAppPath = useCallback(
+    async (path: string) => {
+      try {
+        await invoke("add_app_from_path", { path });
+      } catch (error) {
+        reportReject();
+        throw error;
+      }
+    },
+    [reportReject],
+  );
 
   useEffect(() => {
     appsRef.current = apps;
@@ -102,16 +133,22 @@ export function useDockApps() {
           if (event.payload.type !== "drop") return;
           if (appsRef.current.length >= MAX_APPS) {
             console.error("dock is full");
+            reportReject();
             return;
           }
 
-          for (const path of event.payload.paths) {
-            if (!isAppBundlePath(path)) continue;
-            invoke("add_app_from_path", { path }).catch((error: unknown) => {
-              console.error("Failed to add app from drop:", error);
-            });
-            break;
+          const appPath = event.payload.paths.find(isAppBundlePath);
+          if (!appPath) {
+            // Dropped something that isn't a `.app` bundle — silence would
+            // read as "nothing happened", so flash the same reject cue used
+            // for duplicate/full-dock errors below.
+            reportReject();
+            return;
           }
+
+          addAppPath(appPath).catch((error: unknown) => {
+            console.error("Failed to add app from drop:", error);
+          });
         }),
       );
 
@@ -161,5 +198,32 @@ export function useDockApps() {
     }
   }, []);
 
-  return { apps, appsRef, activateApp, reorderApps, removeApp, fileDragOver };
+  const showInFinder = useCallback((bundleId: string) => {
+    invoke("reveal_app_in_finder", { bundleId }).catch((error: unknown) => {
+      console.error(`Failed to reveal ${bundleId} in Finder:`, error);
+    });
+  }, []);
+
+  /**
+   * Never mutates `apps`/`isActive` optimistically — the real LED flip comes
+   * from the same `apps-running-changed` push that a manual Cmd+Q would
+   * also trigger (see `platform::quit_app`).
+   */
+  const quitApp = useCallback((bundleId: string) => {
+    invoke("quit_app", { bundleId }).catch((error: unknown) => {
+      console.error(`Failed to quit ${bundleId}:`, error);
+    });
+  }, []);
+
+  return {
+    apps,
+    appsRef,
+    activateApp,
+    reorderApps,
+    removeApp,
+    fileDragOver,
+    rejectPulseKey,
+    showInFinder,
+    quitApp,
+  };
 }

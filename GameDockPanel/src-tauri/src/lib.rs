@@ -5,7 +5,6 @@ mod platform;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
         .manage(commands::apps::AppsState::default())
         .invoke_handler(tauri::generate_handler![
             commands::apps::get_apps_snapshot,
@@ -13,6 +12,8 @@ pub fn run() {
             commands::apps::add_app_from_path,
             commands::apps::remove_app,
             commands::apps::reorder_apps,
+            commands::apps::reveal_app_in_finder,
+            commands::apps::quit_app,
             commands::window::sync_vibrancy_pill,
         ])
         .setup(|app| {

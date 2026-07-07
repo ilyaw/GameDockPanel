@@ -17,14 +17,21 @@ struct DockCursorPayload {
 // throughout (Tauri's logical-pixel convention), so these are used directly
 // against `NSRect`/`NSWindow` without any extra unit conversion.
 const ICON_SIZE_DIP: f64 = 56.0;
-const DOCK_GAP_DIP: f64 = 20.0;
+// Mirrors `gap-2` on the dock pill (src/lib/constants.ts DOCK_GAP_PX).
+const DOCK_GAP_DIP: f64 = 8.0;
 const DOCK_PADDING_X_DIP: f64 = 20.0;
 const MAGNIFY_MAX_SCALE: f64 = 1.4;
 const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
 
 // Keep in sync with WINDOW_HEIGHT_DIP / PILL_* in src/lib/constants.ts.
-// Height never depends on app count — only width does (see slot_count()).
-const WINDOW_HEIGHT_DIP: f64 = 154.0;
+// Height never depends on app count — only width does (see pill_width_dip()).
+// 194 = DOCK_BOTTOM_INSET_DIP(8) + PILL_HEIGHT_REST_DIP(91) +
+// PILL_TOP_RESERVE_PX(95) — the top reserve is sized for the tallest thing
+// that ever pokes above the pill, which is now DockIcon's context menu
+// (Show in Finder + Quit + divider + Remove), not the shorter hover
+// tooltip or magnify overflow. See PILL_TOP_RESERVE_PX's `Math.max(...)` in
+// constants.ts for the full derivation — this constant must track it.
+const WINDOW_HEIGHT_DIP: f64 = 194.0;
 const PILL_HEIGHT_REST_DIP: f64 = 91.0;
 const PILL_HEIGHT_HOVER_DIP: f64 = 114.0;
 const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
@@ -39,15 +46,10 @@ const CLICK_POLL_MS: u64 = 50;
 /// MAGNIFY_MAX_SCALE * 2` from `src/lib/constants.ts` (56 × 1.4 × 2 ≈ 157).
 const ICON_EXPORT_PX: f64 = 256.0;
 
-/// Flex slots in the pill — one per dock icon, no trailing "+" tile.
-fn slot_count(app_count: usize) -> usize {
-    app_count
-}
-
-fn pill_width_dip(slots: usize) -> f64 {
+fn pill_width_dip(app_count: usize) -> f64 {
     DOCK_PADDING_X_DIP * 2.0
-        + slots as f64 * ICON_SIZE_DIP
-        + slots.saturating_sub(1) as f64 * DOCK_GAP_DIP
+        + app_count as f64 * ICON_SIZE_DIP
+        + app_count.saturating_sub(1) as f64 * DOCK_GAP_DIP
 }
 
 fn window_width_dip(pill_width_dip: f64) -> f64 {
@@ -67,7 +69,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
     let app_count = app.state::<AppsState>().app_count();
-    let pill_width = pill_width_dip(slot_count(app_count));
+    let pill_width = pill_width_dip(app_count);
     let window_width = window_width_dip(pill_width);
 
     let monitor = window
@@ -241,7 +243,7 @@ pub fn sync_dock_geometry(window: &WebviewWindow, app_count: usize) -> Result<()
     use objc2_app_kit::NSWindow;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-    let pill_width = pill_width_dip(slot_count(app_count));
+    let pill_width = pill_width_dip(app_count);
     let window_width = window_width_dip(pill_width);
 
     let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())? as *mut NSWindow;
@@ -875,8 +877,8 @@ pub fn is_bundle_running(bundle_id: &str) -> bool {
 
 /// Resolves the `CFBundleIdentifier` of a `.app` bundle at `path` — the
 /// reverse of `resolve_icon_data_url`'s bundle-id-to-path lookup, needed for
-/// the "add app from native dialog" flow where all we have is a filesystem
-/// path the user picked.
+/// the Finder drag-drop flow where all we have is a filesystem path the
+/// user dropped.
 #[cfg(target_os = "macos")]
 pub fn resolve_bundle_id_from_path(path: &str) -> Result<String, String> {
     use objc2_foundation::{NSBundle, NSString};
@@ -928,4 +930,80 @@ fn activate_or_launch_app_on_main_thread(bundle_id: &str) -> Result<(), String> 
     let path = app_url.path().ok_or_else(|| "app URL has no path".to_string())?;
 
     tauri_plugin_opener::open_path(path.to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Reveals the installed `.app` for `bundle_id` in Finder, with the icon
+/// selected — same `URLForApplicationWithBundleIdentifier` resolve used for
+/// launch/icon, just handed to Finder instead of opened or rasterized.
+/// Dispatched onto the main thread for consistency with every other
+/// `NSWorkspace`/AppKit call in this module (`activate_or_launch_app`,
+/// `quit_app`), even though this particular call has not been observed to
+/// require it.
+#[cfg(target_os = "macos")]
+pub fn reveal_app_in_finder(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = tx.send(reveal_app_in_finder_on_main_thread(&bundle_id));
+    })
+    .map_err(|e| e.to_string())?;
+
+    rx.recv()
+        .map_err(|_| "reveal_app_in_finder did not complete".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_app_in_finder_on_main_thread(bundle_id: &str) -> Result<(), String> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSArray, NSString};
+
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    let workspace = NSWorkspace::sharedWorkspace();
+    let app_url = workspace
+        .URLForApplicationWithBundleIdentifier(&ns_bundle_id)
+        .ok_or_else(|| format!("{bundle_id} is not installed"))?;
+
+    let urls = NSArray::from_slice(&[app_url.as_ref()]);
+    workspace.activateFileViewerSelectingURLs(&urls);
+    Ok(())
+}
+
+/// Soft-quits the running instance of `bundle_id`, if any. Uses `terminate()`
+/// (asks the app to quit normally, respecting its own unsaved-changes
+/// prompts etc.) — never `forceTerminate()`, which kills it outright. Does
+/// **not** touch `AppsState.running` itself: the real LED update comes from
+/// `NSWorkspaceDidTerminateApplicationNotification` via
+/// `handle_workspace_notification`, once the app has actually exited, same
+/// as a user quitting it any other way (Cmd+Q, Dock, Activity Monitor).
+/// Dispatched onto the main thread — `NSRunningApplication` lookups aren't
+/// safe from the Tauri command threadpool (same rationale as
+/// `activate_or_launch_app`).
+#[cfg(target_os = "macos")]
+pub fn quit_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let _ = tx.send(quit_app_on_main_thread(&bundle_id));
+    })
+    .map_err(|e| e.to_string())?;
+
+    rx.recv()
+        .map_err(|_| "quit_app did not complete".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn quit_app_on_main_thread(bundle_id: &str) -> Result<(), String> {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id);
+
+    let Some(instance) = running.iter().next() else {
+        return Err(format!("{bundle_id} is not running"));
+    };
+
+    if instance.terminate() {
+        Ok(())
+    } else {
+        Err(format!("failed to send terminate to {bundle_id}"))
+    }
 }

@@ -6,8 +6,8 @@
 /** Mirrors `h-14 w-14` on the icon image/fallback badge. */
 export const ICON_SIZE_PX = 56;
 
-/** Mirrors `gap-5` between icons in the dock pill. */
-export const DOCK_GAP_PX = 20;
+/** Mirrors `gap-2` between icons in the dock pill. */
+export const DOCK_GAP_PX = 8;
 
 /** Mirrors `px-5` on the dock pill. */
 export const DOCK_PADDING_X_PX = 20;
@@ -32,11 +32,33 @@ export const ICON_LED_GAP_PX = 8;
 /** LED bar height (`h-[3px]`). */
 export const LED_HEIGHT_PX = 3;
 
-/** Gap between tooltip bottom edge and icon top (`margin-bottom` on tooltip). */
+/** Gap between tooltip/menu bottom edge and icon top (`margin-bottom` on both). */
 export const TOOLTIP_GAP_PX = 16;
 
 /** Approximate rendered height of the hover name tooltip (`text-xs` + `py-1`). */
 export const TOOLTIP_HEIGHT_PX = 28;
+
+/**
+ * Approximate rendered height of one context-menu row (`DockIcon.tsx`) —
+ * `text-xs` row with an icon, `py-1.5` (taller than the tooltip's `py-1`).
+ * Rounded up a little over the raw text+padding math as headroom, since
+ * under-reserving here clips the menu against the window's fixed height
+ * with no visible error (see `CONTEXT_MENU_HEIGHT_PX`).
+ */
+export const CONTEXT_MENU_ROW_HEIGHT_PX = 30;
+
+/** Thin `h-px` divider between Quit/Show in Finder and Remove from Dock. */
+export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
+
+/**
+ * Tallest the icon context menu ever gets: Show in Finder + Quit (only
+ * rendered while the app is running) + divider + Remove from Dock. Must be
+ * accounted for in `PILL_TOP_RESERVE_PX` same as the tooltip — the menu
+ * renders `bottom-full` off the same anchor, and the window has no scroll,
+ * so anything past its fixed height is simply not drawn.
+ */
+export const CONTEXT_MENU_HEIGHT_PX =
+  CONTEXT_MENU_ROW_HEIGHT_PX * 3 + CONTEXT_MENU_DIVIDER_HEIGHT_PX;
 
 /**
  * Cursor-to-icon-center distance (px, viewport coords) beyond which magnify
@@ -61,14 +83,20 @@ export const PILL_HEIGHT_HOVER_PX =
   PILL_HEIGHT_PX + MAGNIFY_HEIGHT_OVERFLOW_PX;
 
 /**
- * Transparent band above the fixed pill inside the window — magnify overflow
- * plus any tooltip that sticks out above enlarged icons.
+ * Transparent band above the fixed pill inside the window — big enough for
+ * whichever thing currently pokes highest above the pill: a magnified icon,
+ * the hover tooltip, or the (taller) context menu. These never show at the
+ * same time (menu replaces tooltip; magnify is suppressed while the menu is
+ * open — see `isHovered || menuOpen` / dragging guards in `DockIcon.tsx`),
+ * so `max`, not a sum, is the right combinator — summing would reserve far
+ * more transparent dead space above the dock than anything ever needs.
  */
 export const PILL_TOP_RESERVE_PX =
-  MAGNIFY_HEIGHT_OVERFLOW_PX +
-  TOOLTIP_GAP_PX +
-  TOOLTIP_HEIGHT_PX -
-  DOCK_PADDING_Y_PX;
+  Math.max(
+    MAGNIFY_HEIGHT_OVERFLOW_PX,
+    TOOLTIP_GAP_PX + TOOLTIP_HEIGHT_PX,
+    TOOLTIP_GAP_PX + CONTEXT_MENU_HEIGHT_PX,
+  ) - DOCK_PADDING_Y_PX;
 
 /**
  * Tauri window logical size — keep in sync with `WINDOW_HEIGHT_DIP` in
@@ -82,25 +110,31 @@ export const WINDOW_HEIGHT_DIP =
 export const WINDOW_GLOW_BLEED_PX = 32;
 
 /**
- * Pill outer width at rest for `slots` flex children (padding + icons +
- * gaps) — the CSS pill itself is content-driven (no explicit width is ever
- * set in JSX, flex sizes it from its children), so nothing in the frontend
+ * Pill outer width at rest for `appCount` icons (padding + icons + gaps) —
+ * the CSS pill itself is content-driven (no explicit width is ever set in
+ * JSX, flex sizes it from its children), so nothing in the frontend
  * actually calls this at runtime. It exists purely as the documented
- * formula that `pillWidthDip`/`windowWidthDip` in
+ * formula that `pill_width_dip`/`window_width_dip` in
  * src-tauri/src/platform/macos.rs mirror for native window/vibrancy/
  * hit-test sizing — kept here, parametrized by count instead of a fixed
- * `APP_COUNT`, so the two sides stay provably in sync.
+ * `APP_COUNT`, so the two sides stay provably in sync. The actual
+ * on-screen pill's vibrancy blur mask is independently corrected from the
+ * measured DOM rect at runtime (see `sync_vibrancy_pill` /
+ * `commands/window.rs`) — this formula only has to get the *native window
+ * frame* wide enough to avoid clipping it.
  */
-export function pillWidthPx(slots: number): number {
+export function pillWidthPx(appCount: number): number {
   return (
-    DOCK_PADDING_X_PX * 2 + slots * ICON_SIZE_PX + (slots - 1) * DOCK_GAP_PX
+    DOCK_PADDING_X_PX * 2 +
+    appCount * ICON_SIZE_PX +
+    (appCount - 1) * DOCK_GAP_PX
   );
 }
 
 /** See `pillWidthPx` — same "documented formula, not called at runtime" note. */
-export function windowWidthDip(slots: number): number {
+export function windowWidthDip(appCount: number): number {
   return (
-    pillWidthPx(slots) +
+    pillWidthPx(appCount) +
     Math.ceil(ICON_SIZE_PX * (MAGNIFY_MAX_SCALE - 1)) +
     WINDOW_GLOW_BLEED_PX
   );

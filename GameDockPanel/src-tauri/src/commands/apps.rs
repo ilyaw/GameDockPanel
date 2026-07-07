@@ -88,8 +88,8 @@ const DEFAULT_SEED_LIMIT: usize = 10;
 
 /// Soft ceiling on total dock entries (seeded + manually added). Purely a
 /// pill-width safety net now that width resizes dynamically — not for
-/// reserving native window space. The "+" tile disables past this rather
-/// than disappearing (still visible so the limit is discoverable).
+/// reserving native window space. Drag-drop past this limit is rejected
+/// with the reject-pulse cue (see `add_app_from_path` below).
 pub const MAX_APPS: usize = 15;
 
 /// Small, fixed palette for arbitrary user-added apps — colors are picked
@@ -118,7 +118,7 @@ fn color_for_bundle_id(bundle_id: &str) -> &'static str {
 /// Derives a display name from a `.app` bundle's filename (e.g.
 /// `/Applications/Discord.app` → `"Discord"`) rather than reading
 /// `CFBundleName` out of `Info.plist` — the filename is what the user just
-/// picked in the native dialog, and is enough for this pass.
+/// dropped onto the dock, and is enough for this pass.
 fn display_name_from_path(path: &str) -> String {
     std::path::Path::new(path)
         .file_stem()
@@ -490,6 +490,22 @@ pub fn remove_app(app: AppHandle, state: State<AppsState>, bundle_id: String) ->
 
     let _ = app.emit("apps-list-changed", state.snapshot());
     Ok(())
+}
+
+/// Reveals the installed `.app` for `bundle_id` in Finder. Purely a
+/// filesystem-lookup passthrough — doesn't touch `AppsState` at all.
+#[tauri::command]
+pub fn reveal_app_in_finder(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    platform::reveal_app_in_finder(app, bundle_id)
+}
+
+/// Soft-quits the running instance of `bundle_id`, if any (see
+/// `platform::quit_app` for why this never touches `AppsState.running`
+/// itself — the real LED update comes from the `NSWorkspace` termination
+/// notification, same as `remove_app` never touching the process).
+#[tauri::command]
+pub fn quit_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    platform::quit_app(app, bundle_id)
 }
 
 /// Reorders the persisted roster to match `ordered_bundle_ids` — same set of

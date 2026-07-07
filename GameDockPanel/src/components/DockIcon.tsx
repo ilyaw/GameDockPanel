@@ -6,7 +6,7 @@ import {
   useTransform,
   type MotionValue,
 } from "framer-motion";
-import { Trash2 } from "lucide-react";
+import { FolderOpen, Power, Trash2 } from "lucide-react";
 import type { DockApp } from "../lib/types";
 import { MAGNIFY_INFLUENCE_RADIUS_PX, MAGNIFY_MAX_SCALE, TOOLTIP_GAP_PX } from "../lib/constants";
 
@@ -29,6 +29,12 @@ interface DockIconProps {
   /** Right-click → "Remove from Dock" — mirrors the real macOS Dock pattern
    * (context menu item, not a separate "edit mode"). */
   onRemove?: (bundleId: string) => void;
+  /** Right-click → "Show in Finder" — always available, regardless of
+   * running state (just reveals the installed `.app`). */
+  onShowInFinder?: (bundleId: string) => void;
+  /** Right-click → "Quit" — only rendered when `app.isActive`; see the menu
+   * JSX below for why this is distinct from `onRemove`. */
+  onQuit?: (bundleId: string) => void;
   /** While an icon is being drag-reordered, magnify is suppressed. */
   isDragging?: boolean;
 }
@@ -40,6 +46,8 @@ export function DockIcon({
   isHovered = false,
   hoverSessionId = 0,
   onRemove,
+  onShowInFinder,
+  onQuit,
   isDragging = false,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
@@ -158,6 +166,39 @@ export function DockIcon({
             style={{ marginBottom: TOOLTIP_GAP_PX }}
             className="pointer-events-auto absolute bottom-full left-1/2 z-30 -translate-x-1/2 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
           >
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onShowInFinder?.(app.bundleId);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              Show in Finder
+            </button>
+
+            {/* Quit terminates the running process (soft `terminate()`) and
+                leaves the dock list untouched — the opposite of Remove,
+                which edits the dock list and never touches the process. So
+                this only shows while the app is actually running; Remove
+                below is always available regardless of running state. */}
+            {app.isActive && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onQuit?.(app.bundleId);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+              >
+                <Power className="h-3.5 w-3.5" />
+                Quit
+              </button>
+            )}
+
+            <div className="h-px bg-zinc-700/70" />
+
             <button
               type="button"
               onClick={() => {

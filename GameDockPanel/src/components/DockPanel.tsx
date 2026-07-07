@@ -7,6 +7,11 @@ import { useDockApps } from "../hooks/useDockApps";
 import { PILL_HEIGHT_PX } from "../lib/constants";
 import type { DockApp } from "../lib/types";
 
+/** How long the pill's reject-pulse border stays applied — mirrors the
+ * `--animate-reject-pulse` duration in `index.css`; kept here instead of
+ * imported since it's a one-shot JS timer, not a CSS-consumed constant. */
+const REJECT_PULSE_MS = 400;
+
 interface DockCursorPayload {
   x: number;
   y: number;
@@ -37,12 +42,21 @@ function hitTestIcon(
 }
 
 export function DockPanel() {
-  const { apps, activateApp, reorderApps, removeApp, fileDragOver } =
-    useDockApps();
+  const {
+    apps,
+    activateApp,
+    reorderApps,
+    removeApp,
+    fileDragOver,
+    rejectPulseKey,
+    showInFinder,
+    quitApp,
+  } = useDockApps();
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [hoverSessionId, setHoverSessionId] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const isDraggingRef = useRef(false);
+  const [isRejecting, setIsRejecting] = useState(false);
 
   const mouseX = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
@@ -161,6 +175,13 @@ export function DockPanel() {
     };
   }, [activateApp, mouseX, applyCursor, enterDock]);
 
+  useEffect(() => {
+    if (rejectPulseKey === 0) return;
+    setIsRejecting(true);
+    const timeout = setTimeout(() => setIsRejecting(false), REJECT_PULSE_MS);
+    return () => clearTimeout(timeout);
+  }, [rejectPulseKey]);
+
   useLayoutEffect(() => {
     const el = pillRef.current;
     if (!el) return;
@@ -199,7 +220,9 @@ export function DockPanel() {
           leaveDock();
         }}
         style={{ height: PILL_HEIGHT_PX }}
-        className={`animate-rgb-glow pointer-events-auto mx-auto m-0 flex shrink-0 list-none items-end gap-5 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
+        className={`pointer-events-auto mx-auto m-0 flex shrink-0 list-none items-end gap-2 overflow-visible rounded-[28px] border px-5 py-3 transition-colors ${
+          isRejecting ? "animate-reject-pulse" : "animate-rgb-glow"
+        } ${
           fileDragOver
             ? "border-zinc-400 bg-zinc-900/90"
             : "border-transparent bg-zinc-950/80"
@@ -222,6 +245,8 @@ export function DockPanel() {
               hoverSessionId={hoverSessionId}
               isDragging={isDragging}
               onRemove={removeApp}
+              onShowInFinder={showInFinder}
+              onQuit={quitApp}
             />
           </Reorder.Item>
         ))}

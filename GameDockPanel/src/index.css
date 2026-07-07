@@ -34,6 +34,7 @@ img {
 @theme {
   --animate-rgb-glow: rgb-glow 6s linear infinite;
   --animate-led-pulse: led-pulse 1.8s ease-in-out infinite;
+  --animate-reject-pulse: reject-pulse 0.4s ease-out;
 }
 
 /*
@@ -86,5 +87,22 @@ img {
   50% {
     opacity: 1;
     box-shadow: 0 0 10px 2px currentColor;
+  }
+}
+
+/*
+  One-shot rejection cue on the dock pill's border — invalid drop type,
+  duplicate bundle ID, or a full dock (see `rejectPulseKey` in
+  `useDockApps`). Deliberately brief and non-looping (unlike `rgb-glow`/
+  `led-pulse`): a short flash reads as "no", not as an ongoing state.
+*/
+@keyframes reject-pulse {
+  0% {
+    border-color: #f43f5e;
+    box-shadow: 0 0 16px 0 rgb(244 63 94 / 55%);
+  }
+  100% {
+    border-color: transparent;
+    box-shadow: none;
   }
 }

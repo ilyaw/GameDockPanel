@@ -6,9 +6,10 @@ mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    activate_or_launch_app, is_app_installed, is_bundle_running,
-    resolve_bundle_id_from_path, resolve_icon_data_url as resolve_app_icon, setup_dock_window,
-    start_apps_monitoring, sync_dock_geometry, sync_vibrancy_pill_from_web,
+    activate_or_launch_app, is_app_installed, is_bundle_running, quit_app,
+    resolve_bundle_id_from_path, resolve_icon_data_url as resolve_app_icon,
+    reveal_app_in_finder, setup_dock_window, start_apps_monitoring, sync_dock_geometry,
+    sync_vibrancy_pill_from_web,
 };
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
@@ -71,4 +72,14 @@ pub fn sync_vibrancy_pill_from_web(
     _height: f64,
 ) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn quit_app(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
+    Err("process monitoring is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reveal_app_in_finder(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
+    Err("process monitoring is not implemented on this platform yet".to_string())
 }
