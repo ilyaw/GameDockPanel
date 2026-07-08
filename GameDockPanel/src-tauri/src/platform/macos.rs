@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 use crate::commands::apps::{AppsState, DockItem};
-use crate::commands::settings::SettingsState;
+use crate::commands::settings::{DockAxis, DockPosition, SettingsState};
 use crate::platform::IconResolveResult;
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
@@ -52,6 +52,33 @@ fn current_icon_size_dip(window: &WebviewWindow) -> f64 {
     guard.icon_size_px
 }
 
+/// Reads the current `DockPosition` fresh from `SettingsState` — same
+/// "state, not a cached/compile-time value" rationale as
+/// `current_icon_size_dip`, so a settings-window position change takes
+/// effect immediately on the next geometry call, without restarting the
+/// click-through poller or click tap threads.
+fn current_dock_position(window: &WebviewWindow) -> DockPosition {
+    let state = window.state::<SettingsState>();
+    let guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.dock_position
+}
+
+/// Maps the orientation-neutral `(length, thickness)` pair onto actual CSS
+/// `(width, height)` per `DockPosition::axis` — Bottom/Top keep
+/// length→width, thickness→height (the dock's original math); Left/Right
+/// swap them. Self-inverse (`axis_css_dims(axis, axis_css_dims(axis, a,
+/// b))` reproduces `(a, b)`), so the same helper also converts a measured
+/// `(width, height)` pair back into `(length, thickness)`.
+fn axis_css_dims(axis: DockAxis, length: f64, thickness: f64) -> (f64, f64) {
+    match axis {
+        DockAxis::Horizontal => (length, thickness),
+        DockAxis::Vertical => (thickness, length),
+    }
+}
+
 // Reference icon size the constants below were originally tuned against
 // (the dock's pre-preset fixed size) — mirrors `BASE_ICON_SIZE_PX` in
 // src/lib/constants.ts.
@@ -73,7 +100,12 @@ const DOCK_DIVIDER_WIDTH_DIP: f64 = 9.0;
 const DOCK_SEPARATOR_WIDTH_DIP: f64 = 7.0;
 const MAGNIFY_MAX_SCALE: f64 = 1.4;
 const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
-const DOCK_BOTTOM_INSET_DIP: f64 = 8.0;
+/// Gap between the dock pill's near edge and the screen edge it's anchored
+/// to — bottom edge for `DockPosition::Bottom`, top for `Top`, etc. Named
+/// generically since Phase 1 (PROMPT_15_POSITION_PHASE1.md) generalized
+/// anchoring beyond bottom-only. Mirrors `DOCK_EDGE_INSET_PX` in
+/// src/lib/constants.ts.
+const DOCK_EDGE_INSET_DIP: f64 = 8.0;
 /// Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx) —
 /// CSS and the native vibrancy/hit-test masks below only agree with the
 /// visible shape if this stays in sync with that class.
@@ -101,18 +133,34 @@ const ICON_EXPORT_MIN_PX: f64 = 128.0;
 /// to just the fields Rust itself reads (window sizing / hit-testing).
 /// Magnify curve numbers (influence radius, etc.) stay JS-only since Rust
 /// never renders the magnify animation.
+///
+/// `*_thickness_dip` names the dock's fixed, icon-size-driven axis — CSS
+/// height for `DockPosition::Bottom`/`Top`, CSS width for `Left`/`Right`
+/// (see `axis_css_dims`).
 struct SizeMetrics {
     dock_gap_dip: f64,
     dock_padding_x_dip: f64,
-    pill_height_dip: f64,
-    window_height_dip: f64,
+    pill_thickness_dip: f64,
+    window_thickness_dip: f64,
 }
 
-/// Transparent band above the pill inside the window — big enough for
-/// whichever thing currently pokes highest above it (magnified icon, hover
-/// tooltip, or the taller context menu). Mirrors `pillTopReservePx` in
-/// `getSizeMetrics` (src/lib/constants.ts).
-fn pill_top_reserve_dip(icon_size_dip: f64) -> f64 {
+/// Transparent band on the far side of the pill (away from the anchored
+/// screen edge) inside the window — big enough for whichever thing
+/// currently pokes furthest past it (magnified icon, hover tooltip, or the
+/// taller context menu). Mirrors `pillFarReservePx` in `getSizeMetrics`
+/// (src/lib/constants.ts).
+///
+/// Named for history (this dock only ever anchored to the bottom when it
+/// was introduced) — still literally "above the pill" for
+/// `DockPosition::Bottom`/`Top`, but for `Left`/`Right` this reserve maps
+/// onto the far side of the *thickness* axis (screen-horizontal) rather
+/// than the true overflow direction, which stays screen-"up" regardless of
+/// orientation (magnify/tooltip direction are unchanged — see
+/// PROMPT_15_POSITION_PHASE1.md's explicitly deferred items). That's a
+/// known, accepted trade-off for this phase: the reserve exists and is
+/// harmless (transparent, click-through) even where it isn't the axis the
+/// real overflow needs.
+fn pill_far_reserve_dip(icon_size_dip: f64) -> f64 {
     let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
     let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
     let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
@@ -123,14 +171,15 @@ fn pill_top_reserve_dip(icon_size_dip: f64) -> f64 {
         - dock_padding_y_dip
 }
 
-/// Full window height for a given (measured or formula) pill height —
-/// mirrors `windowHeightDip` derivation in `getSizeMetrics`. Takes the pill
-/// height as a parameter (like `window_width_dip` takes pill width) so the
-/// primary, DOM-measured resize path can feed in the real rendered pill
-/// height while only the invisible top-reserve margin comes from the
-/// formula.
-fn window_height_dip(pill_height_dip: f64, icon_size_dip: f64) -> f64 {
-    DOCK_BOTTOM_INSET_DIP + pill_height_dip + pill_top_reserve_dip(icon_size_dip)
+/// Window size along the thickness axis for a given (measured or formula)
+/// pill thickness — mirrors `windowThicknessDip` derivation in
+/// `getSizeMetrics`. Takes the pill thickness as a parameter (like
+/// `window_length_dip` takes pill length) so the primary, DOM-measured
+/// resize path can feed in the real rendered pill thickness while only the
+/// invisible far-reserve margin comes from the formula. Maps onto CSS
+/// height for `DockPosition::Bottom`/`Top`, CSS width for `Left`/`Right`.
+fn window_thickness_dip(pill_thickness_dip: f64, icon_size_dip: f64) -> f64 {
+    DOCK_EDGE_INSET_DIP + pill_thickness_dip + pill_far_reserve_dip(icon_size_dip)
 }
 
 fn size_metrics(icon_size_dip: f64) -> SizeMetrics {
@@ -140,35 +189,39 @@ fn size_metrics(icon_size_dip: f64) -> SizeMetrics {
     let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
     let icon_led_gap_dip = (BASE_ICON_LED_GAP_DIP * scale).round();
 
-    let pill_height_dip =
+    let pill_thickness_dip =
         dock_padding_y_dip * 2.0 + icon_size_dip + icon_led_gap_dip + LED_HEIGHT_DIP;
 
     SizeMetrics {
         dock_gap_dip,
         dock_padding_x_dip,
-        pill_height_dip,
-        window_height_dip: window_height_dip(pill_height_dip, icon_size_dip),
+        pill_thickness_dip,
+        window_thickness_dip: window_thickness_dip(pill_thickness_dip, icon_size_dip),
     }
 }
 
-/// Mirrors `pillHeightHoverPx` in `getSizeMetrics` — used by the click-tap
-/// and click-through hit-test, which read the *measured* rest height from
-/// `AppsState` and only need the formula-only magnify-overflow margin added
-/// on top (same "measured base + formula margin" pattern as
-/// `window_height_dip`).
-fn pill_height_hover_dip(pill_height_rest_dip: f64, icon_size_dip: f64) -> f64 {
+/// Mirrors `pillThicknessHoverPx` in `getSizeMetrics` — used by the
+/// click-tap and click-through hit-test, which read the *measured* rest
+/// thickness from `AppsState` and only need the formula-only
+/// magnify-overflow margin added on top (same "measured base + formula
+/// margin" pattern as `window_thickness_dip`). Grows the thickness
+/// dimension away from the near edge — see `pill_rect_for_position`.
+fn pill_thickness_hover_dip(pill_thickness_rest_dip: f64, icon_size_dip: f64) -> f64 {
     let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
-    pill_height_rest_dip + magnify_height_overflow_dip
+    pill_thickness_rest_dip + magnify_height_overflow_dip
 }
 
-fn pill_width_dip(entries: &[DockItem], icon_size_dip: f64) -> f64 {
+/// Pill size along the length axis (grows/shrinks with item count) — maps
+/// onto CSS width for `DockPosition::Bottom`/`Top`, CSS height for
+/// `Left`/`Right`. Mirrors `pillLengthPx` in src/lib/constants.ts.
+fn pill_length_dip(entries: &[DockItem], icon_size_dip: f64) -> f64 {
     let metrics = size_metrics(icon_size_dip);
-    let mut row_width = 0.0;
+    let mut row_length = 0.0;
     for (index, item) in entries.iter().enumerate() {
         if index > 0 {
-            row_width += metrics.dock_gap_dip;
+            row_length += metrics.dock_gap_dip;
         }
-        row_width += match item {
+        row_length += match item {
             DockItem::App(_) => icon_size_dip,
             DockItem::Separator(_) => DOCK_SEPARATOR_WIDTH_DIP,
         };
@@ -176,16 +229,20 @@ fn pill_width_dip(entries: &[DockItem], icon_size_dip: f64) -> f64 {
     // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
     let settings_slot =
         metrics.dock_gap_dip + DOCK_DIVIDER_WIDTH_DIP + metrics.dock_gap_dip + icon_size_dip;
-    metrics.dock_padding_x_dip * 2.0 + row_width + settings_slot
+    metrics.dock_padding_x_dip * 2.0 + row_length + settings_slot
 }
 
-fn window_width_dip(pill_width_dip: f64, icon_size_dip: f64) -> f64 {
-    pill_width_dip + (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil() + WINDOW_GLOW_BLEED_DIP
+/// Window size along the length axis: the pill's own length plus room for
+/// endmost icons bulging outward on magnify, plus RGB-glow bleed. Mirrors
+/// `windowLengthDip` in src/lib/constants.ts.
+fn window_length_dip(pill_length_dip: f64, icon_size_dip: f64) -> f64 {
+    pill_length_dip + (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil() + WINDOW_GLOW_BLEED_DIP
 }
 
 /// Positions, sizes and reveals the main window: a compact, always-on-top
-/// strip anchored to the bottom-center of the primary display, with the
-/// app hidden from the Dock. Initial width is computed from
+/// strip anchored to whichever screen edge `DockPosition` currently
+/// selects (see the anchoring model in PROMPT_15_POSITION_PHASE1.md), with
+/// the app hidden from the Dock. Initial length is computed from
 /// `AppsState.entries` (populated by `commands::apps::init_entries` just
 /// before this runs), not a fixed constant.
 pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
@@ -196,12 +253,17 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
     let icon_size_dip = current_icon_size_dip(&window);
+    let position = current_dock_position(&window);
     let entries = app.state::<AppsState>().entries_snapshot();
-    let pill_width = pill_width_dip(&entries, icon_size_dip);
-    let window_width = window_width_dip(pill_width, icon_size_dip);
+    let pill_length = pill_length_dip(&entries, icon_size_dip);
     let metrics = size_metrics(icon_size_dip);
+    let (pill_width, pill_height) =
+        axis_css_dims(position.axis(), pill_length, metrics.pill_thickness_dip);
+    let window_length = window_length_dip(pill_length, icon_size_dip);
+    let (window_width, window_height) =
+        axis_css_dims(position.axis(), window_length, metrics.window_thickness_dip);
 
-    apply_dock_window_frame(&window, window_width, metrics.window_height_dip)?;
+    apply_dock_window_frame(&window, window_width, window_height, position)?;
     window
         .set_always_on_top(true)
         .map_err(|e| e.to_string())?;
@@ -222,11 +284,11 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
             .pill_height_dip
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *current_height = metrics.pill_height_dip;
+        *current_height = pill_height;
     }
 
     enable_inactive_mouse_tracking(&window)?;
-    apply_dock_vibrancy(&window, pill_width, metrics.pill_height_dip)?;
+    apply_dock_vibrancy(&window, pill_width, pill_height, position)?;
 
     start_dock_click_tap(window.clone());
 
@@ -264,6 +326,7 @@ fn apply_dock_vibrancy(
     window: &WebviewWindow,
     pill_width_dip: f64,
     pill_height_dip: f64,
+    position: DockPosition,
 ) -> Result<(), String> {
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
@@ -280,14 +343,51 @@ fn apply_dock_vibrancy(
     )
     .map_err(|e| e.to_string())?;
 
-    set_vibrancy_pill_frame(window, pill_width_dip, pill_height_dip, None, None)
+    set_vibrancy_pill_frame(window, pill_width_dip, pill_height_dip, None, None, position)
+}
+
+/// Startup fallback pill origin (window-local coords) before the first DOM
+/// measurement lands — see `sync_vibrancy_pill_from_web` for the
+/// steady-state path that measures directly instead. Mirrors
+/// `apply_dock_window_frame`'s screen-level near-edge/centered anchoring
+/// model, just expressed relative to the window's own bounds.
+#[cfg(target_os = "macos")]
+fn fallback_pill_origin(
+    position: DockPosition,
+    bounds_width: f64,
+    bounds_height: f64,
+    width: f64,
+    height: f64,
+    is_flipped: bool,
+) -> (f64, f64) {
+    // `near_edge_y(from_top)`: the Y origin that puts the pill near the
+    // window's top edge (`from_top = true`) or bottom edge (`false`),
+    // accounting for `NSView.isFlipped` (flipped: origin top-left, Y grows
+    // down; non-flipped: origin bottom-left, Y grows up).
+    let near_edge_y = |from_top: bool| {
+        if from_top == is_flipped {
+            DOCK_EDGE_INSET_DIP
+        } else {
+            bounds_height - DOCK_EDGE_INSET_DIP - height
+        }
+    };
+
+    match position {
+        DockPosition::Bottom => ((bounds_width - width) / 2.0, near_edge_y(false)),
+        DockPosition::Top => ((bounds_width - width) / 2.0, near_edge_y(true)),
+        DockPosition::Left => (DOCK_EDGE_INSET_DIP, (bounds_height - height) / 2.0),
+        DockPosition::Right => (
+            bounds_width - DOCK_EDGE_INSET_DIP - width,
+            (bounds_height - height) / 2.0,
+        ),
+    }
 }
 
 /// Resizes the masked vibrancy blur view to the given pill footprint.
-/// When `origin_x` / `origin_y` are `None`, the frame is centered on X and
-/// anchored with `DOCK_BOTTOM_INSET_DIP` on Y (startup before DOM measure).
-/// When provided, values are webview logical coords from
-/// `getBoundingClientRect()` (see `sync_vibrancy_pill_from_web`).
+/// When `origin_x` / `origin_y` are `None`, the frame is anchored via
+/// `fallback_pill_origin` (startup before DOM measure). When provided,
+/// values are webview logical coords from `getBoundingClientRect()` (see
+/// `sync_vibrancy_pill_from_web`).
 #[cfg(target_os = "macos")]
 fn set_vibrancy_pill_frame(
     window: &WebviewWindow,
@@ -295,6 +395,7 @@ fn set_vibrancy_pill_frame(
     height_dip: f64,
     origin_x: Option<f64>,
     origin_y: Option<f64>,
+    position: DockPosition,
 ) -> Result<(), String> {
     use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
 
@@ -311,18 +412,27 @@ fn set_vibrancy_pill_frame(
             .ok_or_else(|| "blur view has no superview".to_string())?
     };
     let bounds = parent.bounds();
+    let is_flipped = parent.isFlipped();
 
     blur_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
+
+    let fallback_origin = fallback_pill_origin(
+        position,
+        bounds.size.width,
+        bounds.size.height,
+        width_dip,
+        height_dip,
+        is_flipped,
+    );
 
     let mut pill_frame = bounds;
     pill_frame.size.width = width_dip;
     pill_frame.size.height = height_dip;
-    pill_frame.origin.x = origin_x.unwrap_or((bounds.size.width - width_dip) / 2.0);
+    pill_frame.origin.x = origin_x.unwrap_or(fallback_origin.0);
     pill_frame.origin.y = match origin_y {
-        Some(y) if parent.isFlipped() => y,
+        Some(y) if is_flipped => y,
         Some(y) => bounds.size.height - y - height_dip,
-        None if parent.isFlipped() => bounds.size.height - DOCK_BOTTOM_INSET_DIP - height_dip,
-        None => DOCK_BOTTOM_INSET_DIP,
+        None => fallback_origin.1,
     };
 
     blur_view.setClipsToBounds(true);
@@ -340,19 +450,22 @@ fn set_vibrancy_pill_frame(
 }
 
 /// Sizes the window to `target_content_width` × `target_content_height`
-/// (inner DIP) and anchors it to the bottom-center of the primary monitor —
-/// same geometry as `setup_dock_window`. Always updates position even when
-/// the size is unchanged, so a prior resize that grew without recentering
-/// is corrected on the next call — this is what keeps the dock centered on
-/// *every* geometry change (app add/remove, icon-size preset switch alike),
-/// not just the one that happened to change the size. Uses inner size for
-/// both `set_size` and the centering math (not `outer_size`) to stay
-/// consistent with `setup_dock_window` and avoid macOS inner/outer drift.
+/// (inner DIP) and anchors it to the near edge for `position`, centered on
+/// the other screen dimension — same geometry as `setup_dock_window`. See
+/// the anchoring model in PROMPT_15_POSITION_PHASE1.md. Always updates
+/// position even when the size is unchanged, so a prior resize that grew
+/// without recentering is corrected on the next call — this is what keeps
+/// the dock properly anchored on *every* geometry change (app add/remove,
+/// icon-size preset switch, position switch alike), not just the one that
+/// happened to change the size. Uses inner size for both `set_size` and
+/// the centering math (not `outer_size`) to stay consistent with
+/// `setup_dock_window` and avoid macOS inner/outer drift.
 #[cfg(target_os = "macos")]
 fn apply_dock_window_frame(
     window: &WebviewWindow,
     target_content_width: f64,
     target_content_height: f64,
+    position: DockPosition,
 ) -> Result<bool, String> {
     let monitor = window
         .primary_monitor()
@@ -378,11 +491,27 @@ fn apply_dock_window_frame(
             .map_err(|e| e.to_string())?;
     }
 
-    window
-        .set_position(PhysicalPosition::new(
+    let (x, y) = match position {
+        DockPosition::Bottom => (
             monitor_pos.x + (monitor_size.width as i32 - width_px) / 2,
             monitor_pos.y + monitor_size.height as i32 - height_px,
-        ))
+        ),
+        DockPosition::Top => (
+            monitor_pos.x + (monitor_size.width as i32 - width_px) / 2,
+            monitor_pos.y,
+        ),
+        DockPosition::Left => (
+            monitor_pos.x,
+            monitor_pos.y + (monitor_size.height as i32 - height_px) / 2,
+        ),
+        DockPosition::Right => (
+            monitor_pos.x + monitor_size.width as i32 - width_px,
+            monitor_pos.y + (monitor_size.height as i32 - height_px) / 2,
+        ),
+    };
+
+    window
+        .set_position(PhysicalPosition::new(x, y))
         .map_err(|e| e.to_string())?;
 
     Ok(size_changed)
@@ -395,6 +524,7 @@ fn set_window_frame_instant(
     window: &WebviewWindow,
     target_content_width: f64,
     target_content_height: f64,
+    position: DockPosition,
 ) -> Result<bool, String> {
     let window = window.clone();
     let window_for_closure = window.clone();
@@ -405,6 +535,7 @@ fn set_window_frame_instant(
                 &window_for_closure,
                 target_content_width,
                 target_content_height,
+                position,
             ));
         })
         .map_err(|e| e.to_string())?;
@@ -414,9 +545,11 @@ fn set_window_frame_instant(
 }
 
 /// Resizes the native window inner size to fit `pill_width` × `pill_height`
-/// (pill + magnify overflow + glow bleed / top reserve), re-centering it in
-/// the same call. Does not touch the vibrancy mask — call
-/// `sync_vibrancy_pill_from_web` afterwards once the WebView has laid out.
+/// (already orientation-correct CSS values, as measured from the DOM) —
+/// pill + magnify overflow + glow bleed on the length axis, near-edge
+/// inset + far reserve on the thickness axis — re-anchoring it in the same
+/// call. Does not touch the vibrancy mask — call `sync_vibrancy_pill_from_web`
+/// afterwards once the WebView has laid out.
 #[cfg(target_os = "macos")]
 pub fn resize_dock_window_for_pill(
     window: &WebviewWindow,
@@ -426,9 +559,13 @@ pub fn resize_dock_window_for_pill(
 ) -> Result<bool, String> {
     sync_icon_size_preview(window, icon_size_dip);
 
-    let target_width = window_width_dip(pill_width, icon_size_dip);
-    let target_height = window_height_dip(pill_height, icon_size_dip);
-    let changed = set_window_frame_instant(window, target_width, target_height)?;
+    let position = current_dock_position(window);
+    let (pill_length, pill_thickness) = axis_css_dims(position.axis(), pill_width, pill_height);
+    let window_length = window_length_dip(pill_length, icon_size_dip);
+    let window_thickness = window_thickness_dip(pill_thickness, icon_size_dip);
+    let (target_width, target_height) =
+        axis_css_dims(position.axis(), window_length, window_thickness);
+    let changed = set_window_frame_instant(window, target_width, target_height, position)?;
 
     let state = window.state::<AppsState>();
     {
@@ -450,8 +587,14 @@ pub fn resize_dock_window_for_pill(
 }
 
 /// Grows the dock window when an open context menu is taller than the
-/// current top reserve — prevents the menu from being clipped by the
-/// webview's `overflow: hidden` boundary.
+/// current far reserve — prevents the menu from being clipped by the
+/// webview's `overflow: hidden` boundary. Grows the thickness-axis CSS
+/// dimension (height for Bottom/Top, width for Left/Right), leaving the
+/// length axis untouched. Note: the menu still only ever pops
+/// screen-"up" off its icon (unchanged this phase — see
+/// PROMPT_15_POSITION_PHASE1.md), so on Left/Right this grows the axis
+/// that actually holds the far reserve, not necessarily the one the menu
+/// visually needs; screen-edge collision remains explicitly out of scope.
 #[cfg(target_os = "macos")]
 pub fn ensure_window_fits_menu_overlay(
     window: &WebviewWindow,
@@ -462,16 +605,22 @@ pub fn ensure_window_fits_menu_overlay(
     }
 
     let icon_size_dip = current_icon_size_dip(window);
-    let pill_height_dip = {
+    let position = current_dock_position(window);
+    let pill_thickness_dip = {
         let state = window.state::<AppsState>();
-        let stored = state
+        let stored_width = *state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stored_height = *state
             .pill_height_dip
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *stored > 0.0 {
-            *stored
+        let (_, stored_thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
+        if stored_thickness > 0.0 {
+            stored_thickness
         } else {
-            size_metrics(icon_size_dip).pill_height_dip
+            size_metrics(icon_size_dip).pill_thickness_dip
         }
     };
 
@@ -479,22 +628,26 @@ pub fn ensure_window_fits_menu_overlay(
     let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
     let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
     let menu_stack_dip = MENU_OVERLAY_GAP_DIP + menu_height_dip;
-    let top_reserve_dip = magnify_height_overflow_dip
+    let far_reserve_dip = magnify_height_overflow_dip
         .max(TOOLTIP_GAP_DIP + TOOLTIP_HEIGHT_DIP)
         .max(menu_stack_dip)
         - dock_padding_y_dip;
-    let target_height_dip = DOCK_BOTTOM_INSET_DIP + pill_height_dip + top_reserve_dip;
+    let target_thickness_dip = DOCK_EDGE_INSET_DIP + pill_thickness_dip + far_reserve_dip;
 
     let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
-    let current_height_dip =
-        window.inner_size().map_err(|e| e.to_string())?.height as f64 / scale_factor;
-    if target_height_dip <= current_height_dip + 0.5 {
+    let inner = window.inner_size().map_err(|e| e.to_string())?;
+    let current_width_dip = inner.width as f64 / scale_factor;
+    let current_height_dip = inner.height as f64 / scale_factor;
+    let (current_length_dip, current_thickness_dip) =
+        axis_css_dims(position.axis(), current_width_dip, current_height_dip);
+
+    if target_thickness_dip <= current_thickness_dip + 0.5 {
         return Ok(());
     }
 
-    let current_width_dip =
-        window.inner_size().map_err(|e| e.to_string())?.width as f64 / scale_factor;
-    set_window_frame_instant(window, current_width_dip, target_height_dip)?;
+    let (target_width_dip, target_height_dip) =
+        axis_css_dims(position.axis(), current_length_dip, target_thickness_dip);
+    set_window_frame_instant(window, target_width_dip, target_height_dip, position)?;
     Ok(())
 }
 
@@ -507,8 +660,10 @@ pub fn resize_dock_window_for_app_count(
     entries: &[DockItem],
 ) -> Result<bool, String> {
     let icon_size_dip = current_icon_size_dip(window);
-    let pill_width = pill_width_dip(entries, icon_size_dip);
-    let pill_height = size_metrics(icon_size_dip).pill_height_dip;
+    let position = current_dock_position(window);
+    let pill_length = pill_length_dip(entries, icon_size_dip);
+    let pill_thickness = size_metrics(icon_size_dip).pill_thickness_dip;
+    let (pill_width, pill_height) = axis_css_dims(position.axis(), pill_length, pill_thickness);
     resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)
 }
 
@@ -523,7 +678,8 @@ pub fn sync_vibrancy_pill_from_web(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    set_vibrancy_pill_frame(window, width, height, Some(x), Some(y))?;
+    let position = current_dock_position(window);
+    set_vibrancy_pill_frame(window, width, height, Some(x), Some(y), position)?;
 
     let state = window.state::<AppsState>();
     {
@@ -553,6 +709,7 @@ fn apply_dock_vibrancy(
     _window: &WebviewWindow,
     _pill_width_dip: f64,
     _pill_height_dip: f64,
+    _position: DockPosition,
 ) -> Result<(), String> {
     Ok(())
 }
@@ -596,41 +753,86 @@ fn enable_inactive_mouse_tracking(window: &WebviewWindow) -> Result<(), String> 
     Ok(())
 }
 
+/// Pill hit-test rect in screen coordinates: anchored to the near edge for
+/// `position` (`pill_w`/`pill_h` already include any hover-extension on
+/// the thickness axis, applied by the caller), centered on the other
+/// screen dimension. Mirrors `apply_dock_window_frame`'s anchoring model,
+/// in physical pixels — see PROMPT_15_POSITION_PHASE1.md.
+#[cfg(target_os = "macos")]
+fn pill_rect_for_position(
+    position: DockPosition,
+    outer_pos: PhysicalPosition<i32>,
+    outer_size: PhysicalSize<u32>,
+    pill_w: i32,
+    pill_h: i32,
+    inset: i32,
+) -> (i32, i32, i32, i32) {
+    let (left, top) = match position {
+        DockPosition::Bottom => (
+            outer_pos.x + (outer_size.width as i32 - pill_w) / 2,
+            outer_pos.y + outer_size.height as i32 - inset - pill_h,
+        ),
+        DockPosition::Top => (
+            outer_pos.x + (outer_size.width as i32 - pill_w) / 2,
+            outer_pos.y + inset,
+        ),
+        DockPosition::Left => (
+            outer_pos.x + inset,
+            outer_pos.y + (outer_size.height as i32 - pill_h) / 2,
+        ),
+        DockPosition::Right => (
+            outer_pos.x + outer_size.width as i32 - inset - pill_w,
+            outer_pos.y + (outer_size.height as i32 - pill_h) / 2,
+        ),
+    };
+    (left, top, left + pill_w, top + pill_h)
+}
+
 /// Maps a screen-space cursor position to DIP coords inside the window when
 /// the point lies on the rounded pill footprint; `None` otherwise. Reads
-/// the pill's current width from `AppsState` (mutated by `setup_dock_window`
-/// / `sync_vibrancy_pill_from_web`) instead of a compile-time constant, so both
-/// consumers below (the click tap and the hover poller) automatically
-/// hit-test against whatever width is currently applied (updated by
-/// `sync_vibrancy_pill_from_web` from the measured DOM rect).
+/// the pill's current *length* from `AppsState` (mutated by
+/// `setup_dock_window` / `sync_vibrancy_pill_from_web`) instead of a
+/// compile-time constant, so both consumers below (the click tap and the
+/// hover poller) automatically hit-test against whatever size is currently
+/// applied. `pill_thickness_dip` is the caller-supplied thickness (rest or
+/// hover-extended, per `pill_thickness_hover_dip`) — the one dimension
+/// that varies with hover state.
 #[cfg(target_os = "macos")]
 fn pill_cursor_at_screen(
     window: &WebviewWindow,
     screen_x: i32,
     screen_y: i32,
-    pill_height_dip: f64,
+    pill_thickness_dip: f64,
 ) -> Option<DockCursorPayload> {
     let scale = window.scale_factor().ok()?;
     let outer_pos = window.outer_position().ok()?;
     let outer_size = window.outer_size().ok()?;
-    let pill_width_dip = {
+    let position = current_dock_position(window);
+
+    let pill_length_dip = {
         let state = window.state::<AppsState>();
-        let guard = state
+        let stored_width = *state
             .pill_width_dip
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *guard
+        let stored_height = *state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (length, _thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
+        length
     };
 
-    let pill_w = (pill_width_dip * scale).round() as i32;
-    let pill_h = (pill_height_dip * scale).round() as i32;
-    let inset = (DOCK_BOTTOM_INSET_DIP * scale).round() as i32;
+    let (pill_w_dip, pill_h_dip) =
+        axis_css_dims(position.axis(), pill_length_dip, pill_thickness_dip);
+
+    let pill_w = (pill_w_dip * scale).round() as i32;
+    let pill_h = (pill_h_dip * scale).round() as i32;
+    let inset = (DOCK_EDGE_INSET_DIP * scale).round() as i32;
     let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
 
-    let pill_left = outer_pos.x + (outer_size.width as i32 - pill_w) / 2;
-    let pill_top = outer_pos.y + outer_size.height as i32 - inset - pill_h;
-    let pill_right = pill_left + pill_w;
-    let pill_bottom = pill_top + pill_h;
+    let (pill_left, pill_top, pill_right, pill_bottom) =
+        pill_rect_for_position(position, outer_pos, outer_size, pill_w, pill_h, inset);
 
     if !in_rounded_rect(
         screen_x,
@@ -650,19 +852,25 @@ fn pill_cursor_at_screen(
     })
 }
 
-/// Reads the pill's current *rest* height from `AppsState` (mutated by
+/// Reads the pill's current *rest* thickness from `AppsState` (mutated by
 /// `setup_dock_window`/`resize_dock_window_for_pill`/
 /// `sync_vibrancy_pill_from_web`) — same "state, not compile-time constant"
-/// rationale as `pill_cursor_at_screen`'s own width read, generalized to
-/// height now that it varies by icon-size preset too.
+/// rationale as `pill_cursor_at_screen`'s own length read, generalized
+/// across positions via `DockPosition::axis`.
 #[cfg(target_os = "macos")]
-fn current_pill_height_rest_dip(window: &WebviewWindow) -> f64 {
+fn current_pill_thickness_rest_dip(window: &WebviewWindow) -> f64 {
     let state = window.state::<AppsState>();
-    let guard = state
+    let stored_width = *state
+        .pill_width_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stored_height = *state
         .pill_height_dip
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard
+    let position = current_dock_position(window);
+    let (_, thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
+    thickness
 }
 
 /// Converts a screen-space point to this window's logical (DIP) coordinates,
@@ -773,15 +981,18 @@ fn start_dock_click_tap(window: WebviewWindow) {
                             if let Ok(cursor) = window.cursor_position() {
                                 let cursor_x = cursor.x.round() as i32;
                                 let cursor_y = cursor.y.round() as i32;
-                                let pill_height_rest_dip = current_pill_height_rest_dip(&window);
+                                let pill_thickness_rest_dip =
+                                    current_pill_thickness_rest_dip(&window);
                                 let icon_size_dip = current_icon_size_dip(&window);
-                                let pill_height_hover =
-                                    pill_height_hover_dip(pill_height_rest_dip, icon_size_dip);
+                                let pill_thickness_hover = pill_thickness_hover_dip(
+                                    pill_thickness_rest_dip,
+                                    icon_size_dip,
+                                );
                                 if let Some(payload) = pill_cursor_at_screen(
                                     &window,
                                     cursor_x,
                                     cursor_y,
-                                    pill_height_hover,
+                                    pill_thickness_hover,
                                 ) {
                                     let _ = window.emit("dock-click", payload);
                                 }
@@ -865,22 +1076,23 @@ fn start_click_through_poller(window: WebviewWindow) {
                 *guard
             };
 
-            let pill_height_rest_dip = current_pill_height_rest_dip(&window);
+            let pill_thickness_rest_dip = current_pill_thickness_rest_dip(&window);
 
             // While a `DockIcon` context menu is open, the hit-test rect has
-            // to reach all the way up through it — the menu can render much
-            // taller than the fixed magnify-overflow band below, and any
-            // shorter test here means the OS re-engages click-through under
-            // the cursor before it reaches the upper menu rows, making them
+            // to reach all the way through it — the menu can render much
+            // larger than the fixed magnify-overflow band below, and any
+            // smaller test here means the OS re-engages click-through under
+            // the cursor before it reaches the far menu rows, making them
             // permanently unreachable (see `AppsState::menu_overlay_height_dip`).
-            let pill_h_dip = if menu_overlay_height_dip > 0.0 {
-                pill_height_rest_dip + MENU_OVERLAY_GAP_DIP + menu_overlay_height_dip
+            let pill_thickness_dip = if menu_overlay_height_dip > 0.0 {
+                pill_thickness_rest_dip + MENU_OVERLAY_GAP_DIP + menu_overlay_height_dip
             } else if dock_hovered {
-                pill_height_hover_dip(pill_height_rest_dip, current_icon_size_dip(&window))
+                pill_thickness_hover_dip(pill_thickness_rest_dip, current_icon_size_dip(&window))
             } else {
-                pill_height_rest_dip
+                pill_thickness_rest_dip
             };
-            let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y, pill_h_dip);
+            let pill_cursor =
+                pill_cursor_at_screen(&window, cursor_x, cursor_y, pill_thickness_dip);
             let in_pill = pill_cursor.is_some();
 
             if in_pill != dock_hovered {

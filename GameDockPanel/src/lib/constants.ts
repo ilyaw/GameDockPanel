@@ -95,7 +95,7 @@ export const MAGNIFY_MAX_SCALE = 1.4;
 
 /**
  * Peak launch-bounce `translateY` as a fraction of `magnifyHeightOverflowPx`
- * — deliberately tied to the *same* number `pillTopReservePx` already
+ * — deliberately tied to the *same* number `pillFarReservePx` already
  * reserves headroom for, instead of an independent constant, so bounce
  * amplitude + peak magnify overflow happening at once can never exceed
  * that existing reserve (dominated in practice by
@@ -113,7 +113,12 @@ export const LAUNCH_BOUNCE_AMPLITUDE_RATIO = 0.55;
  * icon content. Tooltip/context-menu row heights are fixed for the same
  * reason as LED size: their font size doesn't scale with icon size.
  */
-export const DOCK_BOTTOM_INSET_PX = 8;
+/** Gap between the dock pill's near edge and the screen edge it's anchored
+ * to — bottom edge for `dockPosition: "bottom"`, top for `"top"`, etc.
+ * Named generically since Phase 1 (PROMPT_15_POSITION_PHASE1.md)
+ * generalized anchoring beyond bottom-only. Mirrors `DOCK_EDGE_INSET_DIP`
+ * in src-tauri/src/platform/macos.rs. */
+export const DOCK_EDGE_INSET_PX = 8;
 export const LED_HEIGHT_PX = 3;
 /** Mirrors the vertical divider between the app icons and the settings
  * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
@@ -146,7 +151,7 @@ export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
 /**
  * Tallest the icon context menu ever gets: Show in Finder + Remove from Dock
  * + divider + indicator color + optional Reset + optional Quit divider/row.
- * Must be accounted for in `pillTopReservePx` — the menu renders
+ * Must be accounted for in `pillFarReservePx` — the menu renders
  * `bottom-full` off the same anchor, and the window has no scroll, so
  * anything past its height is simply not drawn.
  */
@@ -172,6 +177,11 @@ export const MAX_SEPARATORS = 5;
  * input by `getSizeMetrics`. Kept as one object (instead of a dozen loose
  * module-level consts, as before presets existed) so Rust's `size_metrics`
  * in `platform/macos.rs` can mirror it field-for-field.
+ *
+ * `*ThicknessPx` names the dock's fixed, icon-size-driven axis — CSS
+ * height for `dockPosition: "bottom"|"top"`, CSS width for `"left"|"right"`
+ * (see `useDockOrientation`). Everything else here (gap, padding, magnify
+ * numbers) stays orientation-neutral.
  */
 export interface SizeMetrics {
   iconSizePx: number;
@@ -191,21 +201,30 @@ export interface SizeMetrics {
    * see `LAUNCH_BOUNCE_AMPLITUDE_RATIO` for why this is derived from
    * `magnifyHeightOverflowPx` rather than its own independent constant. */
   launchBounceAmplitudePx: number;
-  /** Pill outer height at rest: py + icon + gap + LED; magnify overflows above. */
-  pillHeightPx: number;
-  /** Native hit-test band above the pill (magnify overflow, not CSS pill height). */
-  pillHeightHoverPx: number;
+  /** Pill's thickness-axis size at rest: py + icon + gap + LED; magnify
+   * overflows past it on the far side (see `pillFarReservePx`). */
+  pillThicknessPx: number;
+  /** Native hit-test band past the pill's near edge (magnify overflow, not
+   * the CSS thickness itself). */
+  pillThicknessHoverPx: number;
   /**
-   * Transparent band above the pill inside the window — big enough for
-   * whichever thing currently pokes highest above it: a magnified icon,
-   * the hover tooltip, or the (taller) context menu. These never show at
-   * the same time (menu replaces tooltip; magnify is suppressed while the
-   * menu is open), so `max`, not a sum, is the right combinator.
+   * Transparent band on the far side of the pill (away from the anchored
+   * screen edge) inside the window — big enough for whichever thing
+   * currently pokes furthest past it: a magnified icon, the hover tooltip,
+   * or the (taller) context menu. These never show at the same time (menu
+   * replaces tooltip; magnify is suppressed while the menu is open), so
+   * `max`, not a sum, is the right combinator. Named `*Top*` for history
+   * (this dock only ever anchored to the bottom when it was introduced) —
+   * still literally "above the pill" for `dockPosition: "bottom"|"top"`,
+   * but for `"left"|"right"` it maps onto the far side of the *thickness*
+   * axis rather than the true overflow direction (magnify/tooltip stay
+   * screen-"up" — see PROMPT_15_POSITION_PHASE1.md's known trade-off).
    */
-  pillTopReservePx: number;
-  /** Tauri window logical height — keep in sync with `window_height_dip`
-   * in src-tauri/src/platform/macos.rs and tauri.conf.json. */
-  windowHeightDip: number;
+  pillFarReservePx: number;
+  /** Tauri window logical size along the thickness axis — keep in sync
+   * with `window_thickness_dip` in src-tauri/src/platform/macos.rs and
+   * tauri.conf.json. */
+  windowThicknessDip: number;
 }
 
 export function getSizeMetrics(iconSizePx: number): SizeMetrics {
@@ -220,17 +239,17 @@ export function getSizeMetrics(iconSizePx: number): SizeMetrics {
   const launchBounceAmplitudePx =
     magnifyHeightOverflowPx * LAUNCH_BOUNCE_AMPLITUDE_RATIO;
 
-  const pillHeightPx = dockPaddingYPx * 2 + iconSizePx + iconLedGapPx + LED_HEIGHT_PX;
-  const pillHeightHoverPx = pillHeightPx + magnifyHeightOverflowPx;
+  const pillThicknessPx = dockPaddingYPx * 2 + iconSizePx + iconLedGapPx + LED_HEIGHT_PX;
+  const pillThicknessHoverPx = pillThicknessPx + magnifyHeightOverflowPx;
 
-  const pillTopReservePx =
+  const pillFarReservePx =
     Math.max(
       magnifyHeightOverflowPx,
       TOOLTIP_GAP_PX + TOOLTIP_HEIGHT_PX,
       TOOLTIP_GAP_PX + CONTEXT_MENU_HEIGHT_PX,
     ) - dockPaddingYPx;
 
-  const windowHeightDip = DOCK_BOTTOM_INSET_PX + pillHeightPx + pillTopReservePx;
+  const windowThicknessDip = DOCK_EDGE_INSET_PX + pillThicknessPx + pillFarReservePx;
 
   return {
     iconSizePx,
@@ -242,47 +261,49 @@ export function getSizeMetrics(iconSizePx: number): SizeMetrics {
     magnifyHeightOverflowPx,
     magnifyInfluenceRadiusPx,
     launchBounceAmplitudePx,
-    pillHeightPx,
-    pillHeightHoverPx,
-    pillTopReservePx,
-    windowHeightDip,
+    pillThicknessPx,
+    pillThicknessHoverPx,
+    pillFarReservePx,
+    windowThicknessDip,
   };
 }
 
 /**
- * Pill outer width at rest for `appCount` icons at the given icon size
- * (padding + icons + gaps) — the CSS pill itself is content-driven (no
- * explicit width is ever set in JSX, flex sizes it from its children), so
+ * Pill size at rest along the length axis (grows/shrinks with item count —
+ * padding + icons + gaps), for `appCount` icons at the given icon size.
+ * Maps onto CSS width for `dockPosition: "bottom"|"top"`, CSS height for
+ * `"left"|"right"`. The CSS pill itself is content-driven on this axis (no
+ * explicit size is ever set in JSX, flex sizes it from its children), so
  * nothing in the frontend actually calls this at runtime. It exists purely
- * as the documented formula that `pill_width_dip`/`window_width_dip` in
+ * as the documented formula that `pill_length_dip`/`window_length_dip` in
  * src-tauri/src/platform/macos.rs mirror for native window/vibrancy/
  * hit-test sizing — kept here, parametrized by count and icon size instead
  * of fixed constants, so the two sides stay provably in sync. The actual
  * on-screen pill's vibrancy blur mask is independently corrected from the
  * measured DOM rect at runtime (see `sync_vibrancy_pill` /
  * `commands/window.rs`) — this formula only has to get the *native window
- * frame* wide enough to avoid clipping it.
+ * frame* long enough to avoid clipping it.
  */
-export function pillWidthPx(items: DockItem[], iconSizePx: number): number {
+export function pillLengthPx(items: DockItem[], iconSizePx: number): number {
   const metrics = getSizeMetrics(iconSizePx);
-  let rowWidth = 0;
+  let rowLength = 0;
   items.forEach((item, index) => {
     if (index > 0) {
-      rowWidth += metrics.dockGapPx;
+      rowLength += metrics.dockGapPx;
     }
-    rowWidth +=
+    rowLength +=
       item.type === "app" ? iconSizePx : DOCK_SEPARATOR_WIDTH_PX;
   });
   // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
   const settingsSlot =
     metrics.dockGapPx + DOCK_DIVIDER_WIDTH_PX + metrics.dockGapPx + iconSizePx;
-  return metrics.dockPaddingXPx * 2 + rowWidth + settingsSlot;
+  return metrics.dockPaddingXPx * 2 + rowLength + settingsSlot;
 }
 
-/** See `pillWidthPx` — same "documented formula, not called at runtime" note. */
-export function windowWidthDip(items: DockItem[], iconSizePx: number): number {
+/** See `pillLengthPx` — same "documented formula, not called at runtime" note. */
+export function windowLengthDip(items: DockItem[], iconSizePx: number): number {
   return (
-    pillWidthPx(items, iconSizePx) +
+    pillLengthPx(items, iconSizePx) +
     Math.ceil(iconSizePx * (MAGNIFY_MAX_SCALE - 1)) +
     WINDOW_GLOW_BLEED_PX
   );
@@ -702,9 +723,38 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   iconSizePx: DEFAULT_ICON_SIZE_PX,
   ledColorMode: "auto",
   ledFixedColor: "#ff9d3b",
+  dockPosition: "bottom",
 };
 
 export type LedColorMode = DockSettings["ledColorMode"];
+export type DockPositionOption = DockSettings["dockPosition"];
+
+export const DOCK_POSITION_OPTIONS: {
+  id: DockPositionOption;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "bottom",
+    label: "Снизу",
+    description: "Горизонтальная панель у нижнего края экрана",
+  },
+  {
+    id: "top",
+    label: "Сверху",
+    description: "Горизонтальная панель у верхнего края экрана",
+  },
+  {
+    id: "left",
+    label: "Слева",
+    description: "Вертикальная панель у левого края экрана",
+  },
+  {
+    id: "right",
+    label: "Справа",
+    description: "Вертикальная панель у правого края экрана",
+  },
+];
 
 export const LED_COLOR_MODE_OPTIONS: {
   id: LedColorMode;

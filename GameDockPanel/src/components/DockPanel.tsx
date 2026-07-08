@@ -7,6 +7,7 @@ import { DockIcon } from "./DockIcon";
 import { DockRowDivider } from "./DockRowDivider";
 import { DockSeparator } from "./DockSeparator";
 import { useDockApps } from "../hooks/useDockApps";
+import { useDockOrientation } from "../hooks/useDockOrientation";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
   MAGNIFY_MAX_SCALE,
@@ -233,6 +234,7 @@ export function DockPanel() {
   } = useDockApps();
   const separatorsFull = countDockSeparators(items) >= MAX_SEPARATORS;
   const { settings, hydrated } = useDockSettings();
+  const orientation = useDockOrientation(settings.dockPosition);
   const iconSizeTarget = useMotionValue(settings.iconSizePx);
   const iconSizeAnimated = useSpring(iconSizeTarget, ICON_SIZE_SPRING);
   const iconSizeSyncedRef = useRef(false);
@@ -271,13 +273,24 @@ export function DockPanel() {
     };
   }, [iconSizeTarget]);
 
-  const pillHeightPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).pillHeightPx);
+  const pillThicknessPx = useTransform(
+    iconSizeAnimated,
+    (px) => getSizeMetrics(px).pillThicknessPx,
+  );
   const pillGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
-  const pillPaddingInlinePx = useTransform(
+  /**
+   * `X`/`Y` here name the padding's *role* (along the growth axis vs along
+   * the thickness axis), not a literal CSS side — which of `paddingInline`/
+   * `paddingBlock` each one feeds is decided below, per `orientation`
+   * (bottom/top: X→inline, Y→block; left/right: swapped), since
+   * `paddingInline`/`paddingBlock` are writing-mode logical properties that
+   * don't follow `flex-direction` on their own.
+   */
+  const pillPaddingXPx = useTransform(
     iconSizeAnimated,
     (px) => getSizeMetrics(px).dockPaddingXPx,
   );
-  const pillPaddingBlockPx = useTransform(
+  const pillPaddingYPx = useTransform(
     iconSizeAnimated,
     (px) => getSizeMetrics(px).dockPaddingYPx,
   );
@@ -808,7 +821,9 @@ export function DockPanel() {
   );
 
   return (
-    <div className="pointer-events-none fixed inset-0 z-50 flex flex-col justify-end overflow-visible pb-2">
+    <div
+      className={`pointer-events-none fixed inset-0 z-50 flex overflow-visible ${orientation.wrapperClassName}`}
+    >
       <motion.div
         ref={pillRef}
         onMouseEnter={enterDock}
@@ -823,14 +838,31 @@ export function DockPanel() {
         }}
         style={{
           ...pillStyle,
-          height: pillHeightPx,
+          // Both `width` and `height` (and both `minWidth`/`minHeight`
+          // below) are always present, with an explicit `"auto"` fallback
+          // on the non-thickness axis rather than `undefined` — Framer
+          // Motion's imperative style application can leave a stale
+          // pixel value stuck on a key that silently disappears from the
+          // style object between renders (observed when the orientation
+          // flips right after `useDockSettings` hydrates, since the very
+          // first render always starts from the `bottom` default and
+          // briefly binds the *other* axis to this same motion value).
+          // Always including both keys, just swapping which one holds
+          // the live motion value, avoids that trap.
+          width: orientation.isVertical ? pillThicknessPx : "auto",
+          height: orientation.isVertical ? "auto" : pillThicknessPx,
           gap: pillGapPx,
-          paddingInline: pillPaddingInlinePx,
-          paddingBlock: pillPaddingBlockPx,
+          // `paddingInline`/`paddingBlock` are writing-mode logical
+          // properties — they don't follow `flex-direction` on their own,
+          // so which padding value (growth-axis vs thickness-axis) feeds
+          // which CSS side is swapped explicitly per orientation here.
+          paddingInline: orientation.isVertical ? pillPaddingYPx : pillPaddingXPx,
+          paddingBlock: orientation.isVertical ? pillPaddingXPx : pillPaddingYPx,
           // Static fallback until Motion values commit on the first frame.
-          minHeight: restMetrics.pillHeightPx,
+          minWidth: orientation.isVertical ? restMetrics.pillThicknessPx : 0,
+          minHeight: orientation.isVertical ? 0 : restMetrics.pillThicknessPx,
         }}
-        className={`pointer-events-auto relative mx-auto m-0 flex shrink-0 items-end overflow-visible rounded-[28px] border transition-colors ${
+        className={`pointer-events-auto relative m-0 flex shrink-0 overflow-visible rounded-[28px] border transition-colors ${orientation.pillClassName} ${
           isRejecting
             ? "animate-reject-pulse"
             : settings.animationsEnabled && !showGradientRing
@@ -898,11 +930,11 @@ export function DockPanel() {
           />
         )}
         <Reorder.Group
-          axis="x"
+          axis={orientation.reorderAxis}
           values={items}
           onReorder={handleReorder}
           style={{ gap: iconRowGapPx }}
-          className="m-0 flex list-none items-end"
+          className={`m-0 flex list-none ${orientation.pillClassName}`}
           as="ul"
         >
         {items.map((item) => (

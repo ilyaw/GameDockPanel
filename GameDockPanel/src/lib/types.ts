@@ -56,6 +56,12 @@ export interface AppIconUpdate {
 }
 
 /**
+ * Which screen edge the dock is anchored to — mirrors `DockPosition` in
+ * `src-tauri/src/commands/settings.rs`.
+ */
+export type DockPosition = "bottom" | "top" | "left" | "right";
+
+/**
  * Live-tunable dock visuals — mirrors `DockSettings` in
  * `src-tauri/src/commands/settings.rs`. Read by the dock window to render,
  * read+written by the settings window (`get_dock_settings` /
@@ -114,4 +120,6 @@ export interface DockSettings {
   ledColorMode: "auto" | "fixed" | "override_only";
   /** Hex LED color when `ledColorMode` is `fixed`. */
   ledFixedColor: string;
+  /** Which screen edge the dock is anchored to — see `DockPosition`. */
+  dockPosition: DockPosition;
 }

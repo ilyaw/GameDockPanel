@@ -4,6 +4,46 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::apps::{refresh_icon_cache, emit_apps_list_changed, AppsState};
 
+/// Which screen edge the dock is anchored to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DockPosition {
+    Bottom,
+    Top,
+    Left,
+    Right,
+}
+
+impl Default for DockPosition {
+    fn default() -> Self {
+        DockPosition::Bottom
+    }
+}
+
+/// Which screen dimension is the dock's "length" axis (grows/shrinks with
+/// item count) vs its "thickness" axis (icon-size-driven only, independent
+/// of item count) — `platform::macos`'s whole geometry pipeline (window
+/// size/position, vibrancy mask, click-through hit-test) is parameterized
+/// by this instead of hardcoding width=length/height=thickness.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DockAxis {
+    /// Bottom/Top — length axis is horizontal (CSS width), thickness is
+    /// vertical (CSS height). This is the dock's original, only orientation.
+    Horizontal,
+    /// Left/Right — length axis is vertical (CSS height), thickness is
+    /// horizontal (CSS width).
+    Vertical,
+}
+
+impl DockPosition {
+    pub fn axis(self) -> DockAxis {
+        match self {
+            DockPosition::Bottom | DockPosition::Top => DockAxis::Horizontal,
+            DockPosition::Left | DockPosition::Right => DockAxis::Vertical,
+        }
+    }
+}
+
 /// Live-tunable visual settings for the dock, persisted to
 /// `dock-settings.json` and broadcast to every webview on change (see
 /// `update_dock_settings`). Field defaults below mirror the values that
@@ -82,6 +122,13 @@ pub struct DockSettings {
     /// that id when `iconSizePx` is absent in the JSON.
     #[serde(default = "default_icon_size_px")]
     pub icon_size_px: f64,
+    /// Which screen edge the dock is anchored to. `#[serde(default)]` (via
+    /// `DockPosition`'s own `Default`) — same missing-field-safety pattern
+    /// as `icon_size_preset`/`icon_size_px`, since this field is new in a
+    /// version that shipped after users could already have a
+    /// `dock-settings.json` without it.
+    #[serde(default)]
+    pub dock_position: DockPosition,
 }
 
 fn default_led_color_mode() -> String {
@@ -140,6 +187,7 @@ impl Default for DockSettings {
             led_fixed_color: default_led_fixed_color(),
             icon_size_preset: "medium".to_string(),
             icon_size_px: 56.0,
+            dock_position: DockPosition::default(),
         }
     }
 }
@@ -211,14 +259,10 @@ pub fn get_dock_settings(state: State<SettingsState>) -> DockSettings {
         .clone()
 }
 
-/// Persists the full settings snapshot and broadcasts it to every webview.
-/// Always takes the complete `DockSettings`, not a partial diff — simpler
-/// on both ends, and the frontend already holds the full object locally
-/// (see `useDockSettings`'s debounced `commit`).
-#[tauri::command]
-pub fn update_dock_settings(
-    app: AppHandle,
-    state: State<SettingsState>,
+/// Shared validate → persist → update-state → refresh/broadcast pipeline.
+fn apply_dock_settings(
+    app: &AppHandle,
+    state: &SettingsState,
     mut settings: DockSettings,
 ) -> Result<(), String> {
     if settings.rgb_glow_colors.len() != RGB_GLOW_COLOR_COUNT {
@@ -253,7 +297,7 @@ pub fn update_dock_settings(
     let icon_size_changed =
         (previous_icon_size_px - settings.icon_size_px).abs() >= 0.5;
 
-    let path = config_file_path(&app)?;
+    let path = config_file_path(app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;
 
     {
@@ -264,19 +308,36 @@ pub fn update_dock_settings(
         *guard = settings.clone();
     }
 
-    // Window geometry during icon-size changes is driven by the dock
-    // webview's measured DOM + spring animation (ResizeObserver →
-    // `resize_dock_window`), not a formula snap here — an immediate native
-    // resize would fight the CSS transition and look like a jump.
+    // Window geometry during icon-size (or dock-position) changes is
+    // driven by the dock webview's measured DOM + spring animation
+    // (ResizeObserver → `resize_dock_window`), not a formula snap here —
+    // an immediate native resize would fight the CSS transition and look
+    // like a jump. A position change re-flows DockPanel's CSS for the new
+    // orientation, which fires the same ResizeObserver path; the native
+    // geometry functions in `platform::macos` read `DockPosition` fresh
+    // from this state on every call, so no extra plumbing is needed here.
 
     if icon_size_changed {
         let apps_state = app.state::<AppsState>();
-        refresh_icon_cache(&app, &apps_state);
+        refresh_icon_cache(app, &apps_state);
     } else {
         let apps_state = app.state::<AppsState>();
-        emit_apps_list_changed(&app, &apps_state);
+        emit_apps_list_changed(app, &apps_state);
     }
 
     let _ = app.emit("dock-settings-changed", settings);
     Ok(())
+}
+
+/// Persists the full settings snapshot and broadcasts it to every webview.
+/// Always takes the complete `DockSettings`, not a partial diff — simpler
+/// on both ends, and the frontend already holds the full object locally
+/// (see `useDockSettings`'s debounced `commit`).
+#[tauri::command]
+pub fn update_dock_settings(
+    app: AppHandle,
+    state: State<SettingsState>,
+    settings: DockSettings,
+) -> Result<(), String> {
+    apply_dock_settings(&app, &state, settings)
 }

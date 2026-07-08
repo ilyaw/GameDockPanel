@@ -6,6 +6,7 @@ import { useDockSettings } from "../hooks/useDockSettings";
 import {
   BACKGROUND_PRESETS,
   BORDER_STYLE_PRESETS,
+  DOCK_POSITION_OPTIONS,
   ICON_SIZE_PRESETS,
   ICON_SIZE_MAX_PX,
   ICON_SIZE_MIN_PX,
@@ -261,6 +262,26 @@ export function SettingsWindow() {
       </header>
 
       <section className="divide-y divide-zinc-800 rounded-xl border border-zinc-800 bg-zinc-900/60 px-4">
+        <SettingsRow
+          title="Положение панели"
+          description="К какому краю экрана прикреплена панель дока."
+        >
+          <div className="flex max-w-[240px] flex-wrap justify-end gap-1.5">
+            {DOCK_POSITION_OPTIONS.map((option) => (
+              <StylePresetButton
+                key={option.id}
+                preset={{
+                  id: option.id,
+                  label: option.label,
+                  description: option.description,
+                }}
+                selected={settings.dockPosition === option.id}
+                onSelect={() => update({ dockPosition: option.id })}
+              />
+            ))}
+          </div>
+        </SettingsRow>
+
         <SettingsRow
           title="Размер иконок"
           descriptionClassName="max-w-sm"
