@@ -1815,19 +1815,131 @@ pub fn activate_or_launch_app(app: AppHandle, bundle_id: String) -> Result<(), S
         .map_err(|_| "activate_or_launch_app did not complete".to_string())?
 }
 
+/// Whether `pid` owns at least one on-screen window at layer 0 — used to
+/// decide if a running app still needs `kAEReopenApplication` after
+/// `activateWithOptions` (minimized windows are absent from this list).
+#[cfg(target_os = "macos")]
+fn process_has_on_screen_windows(pid: i32) -> bool {
+    use core_foundation::base::{CFType, FromVoid, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID,
+    };
+
+    let option = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let Some(windows) = copy_window_info(option, kCGNullWindowID) else {
+        return false;
+    };
+
+    let pid_key = unsafe { CFString::wrap_under_get_rule(kCGWindowOwnerPID) };
+    let layer_key = unsafe { CFString::wrap_under_get_rule(kCGWindowLayer) };
+
+    for ptr in windows.get_all_values() {
+        let dict = unsafe { CFDictionary::<CFString, CFType>::from_void(ptr) };
+        let Some(owner_ref) = dict.find(&pid_key) else {
+            continue;
+        };
+        let Some(owner) = owner_ref.downcast::<CFNumber>() else {
+            continue;
+        };
+        if owner.to_i32() != Some(pid) {
+            continue;
+        }
+        let Some(layer_ref) = dict.find(&layer_key) else {
+            continue;
+        };
+        let Some(layer) = layer_ref.downcast::<CFNumber>() else {
+            continue;
+        };
+        if layer.to_i32() == Some(0) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Sends `kAEReopenApplication` — the same Apple Event the system Dock uses
+/// to restore minimized windows or show a hidden app with no visible windows.
+#[cfg(target_os = "macos")]
+fn send_reopen_apple_event(pid: i32) -> Result<(), String> {
+    use objc2_core_services::{kAEReopenApplication, kCoreEventClass};
+    use objc2_foundation::NSAppleEventDescriptor;
+
+    let target = NSAppleEventDescriptor::descriptorWithProcessIdentifier(pid);
+    let event = NSAppleEventDescriptor::appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID(
+        kCoreEventClass,
+        kAEReopenApplication,
+        Some(&target),
+        -1,
+        0,
+    );
+
+    // `sendEventWithOptions` pulls in `NSDate`; `AESendMessage` on the raw
+    // `AEDesc` keeps the dependency surface minimal.
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AESendMessage(
+            the_apple_event: *const std::ffi::c_void,
+            the_reply: *mut std::ffi::c_void,
+            send_mode: u32,
+            timeout_in_ticks: i32,
+        ) -> i16;
+    }
+
+    const K_AE_NO_REPLY: u32 = 1;
+    const K_AE_DEFAULT_TIMEOUT: i32 = -1;
+
+    let status = unsafe {
+        AESendMessage(
+            event.aeDesc().cast(),
+            std::ptr::null_mut(),
+            K_AE_NO_REPLY,
+            K_AE_DEFAULT_TIMEOUT,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(format!("AESendMessage(kAEReopenApplication) failed: {status}"))
+    }
+}
+
+/// Brings a running instance to the foreground, unhiding and deminiaturizing
+/// as needed — mirrors system Dock click on an already-launched app.
+#[cfg(target_os = "macos")]
+fn activate_running_application(
+    instance: &objc2_app_kit::NSRunningApplication,
+) -> Result<(), String> {
+    use objc2_app_kit::NSApplicationActivationOptions;
+
+    if instance.isHidden() {
+        let _ = instance.unhide();
+    }
+
+    let pid = instance.processIdentifier();
+    let _ = instance.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+
+    if !process_has_on_screen_windows(pid) {
+        send_reopen_apple_event(pid)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn activate_or_launch_app_on_main_thread(bundle_id: &str) -> Result<(), String> {
-    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
+    use objc2_app_kit::{NSRunningApplication, NSWorkspace};
     use objc2_foundation::NSString;
 
     let ns_bundle_id = NSString::from_str(bundle_id);
     let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id);
 
     if let Some(instance) = running.iter().next() {
-        if instance.activateWithOptions(NSApplicationActivationOptions::empty()) {
-            return Ok(());
-        }
-        // Instance was listed as running but activation failed (e.g. quit race) — launch below.
+        return activate_running_application(&instance);
     }
 
     let workspace = NSWorkspace::sharedWorkspace();
@@ -1988,5 +2100,69 @@ mod geometry_tests {
         );
         assert_eq!(thickness_ext, 0.0);
         assert!(length_ext > 0.0);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod activation_tests {
+    use super::*;
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    fn running_pid(bundle_id: &str) -> Option<i32> {
+        let apps =
+            NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
+                bundle_id,
+            ));
+        apps.iter().next().map(|app| app.processIdentifier())
+    }
+
+    #[test]
+    fn process_has_on_screen_windows_does_not_panic_for_finder() {
+        if let Some(pid) = running_pid("com.apple.finder") {
+            let _ = process_has_on_screen_windows(pid);
+        }
+    }
+
+    /// Minimize TextEdit first: `osascript -e 'tell application "TextEdit" to set miniaturized of window 1 to true'`
+    #[test]
+    #[ignore = "manual: requires TextEdit running with a minimized window"]
+    fn reopen_restores_minimized_textedit() {
+        let Some(pid) = running_pid("com.apple.TextEdit") else {
+            panic!("TextEdit is not running");
+        };
+        assert!(
+            !process_has_on_screen_windows(pid),
+            "window 1 must be minimized before running this test"
+        );
+
+        send_reopen_apple_event(pid).expect("kAEReopenApplication should succeed");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            process_has_on_screen_windows(pid),
+            "TextEdit window should be visible after reopen"
+        );
+    }
+
+    /// Launch TextEdit with a document before running.
+    #[test]
+    #[ignore = "manual: requires TextEdit running"]
+    fn activate_running_application_unhides_textedit() {
+        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &NSString::from_str("com.apple.TextEdit"),
+        );
+        let Some(instance) = apps.iter().next() else {
+            panic!("TextEdit is not running");
+        };
+
+        let _ = instance.hide();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        activate_running_application(&instance).expect("activation should succeed");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            process_has_on_screen_windows(instance.processIdentifier()),
+            "TextEdit should be visible after activation"
+        );
     }
 }
