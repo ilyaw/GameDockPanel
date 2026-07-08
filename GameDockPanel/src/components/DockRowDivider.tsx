@@ -1,5 +1,9 @@
 import { motion, type MotionValue, useTransform } from "framer-motion";
-import { DOCK_ROW_DIVIDER_HEIGHT_RATIO } from "../lib/constants";
+import {
+  DOCK_ROW_DIVIDER_HEIGHT_RATIO,
+  LED_HEIGHT_PX,
+  getSizeMetrics,
+} from "../lib/constants";
 
 interface DockRowDividerProps {
   iconSizePx: MotionValue<number>;
@@ -20,12 +24,20 @@ export function DockRowDivider({
     iconSizePx,
     (px) => px * DOCK_ROW_DIVIDER_HEIGHT_RATIO,
   );
+  /** Lifts the hairline's bottom to the icons' bottom edge on horizontal
+   * docks — the `self-end` baseline is the LED bar's bottom, so the offset
+   * is the same scaled gap + LED height the icon column itself uses (was a
+   * fixed `mb-3`, which only matched the 56px default size). */
+  const endOffsetPx = useTransform(
+    iconSizePx,
+    (px) => getSizeMetrics(px).iconLedGapPx + LED_HEIGHT_PX,
+  );
 
   return (
     <motion.div
       aria-hidden
       className={`shrink-0 grow-0 ${
-        isVertical ? "mx-3 self-center" : "mb-3 self-end"
+        isVertical ? "mx-3 self-center" : "self-end"
       } ${className}`}
       style={
         isVertical
@@ -41,6 +53,7 @@ export function DockRowDivider({
               minWidth: 1,
               maxWidth: 1,
               height: lineSizePx,
+              marginBottom: endOffsetPx,
               backgroundColor: DIVIDER_COLOR,
             }
       }

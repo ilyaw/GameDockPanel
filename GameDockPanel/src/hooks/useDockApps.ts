@@ -324,6 +324,13 @@ export function useDockApps() {
   );
 
   const reorderItems = useCallback((newOrder: DockItem[]) => {
+    // Mirror into the ref synchronously (same rationale as the
+    // `apps-running-changed` listener above): `commitReorder` reads
+    // `itemsRef` from `onDragEnd`, and Framer can fire the final
+    // `onReorder` and `onDragEnd` in the same tick — waiting for the
+    // effect-based mirror would persist an order one swap behind what
+    // the user actually dropped.
+    itemsRef.current = newOrder;
     setItems(newOrder);
   }, []);
 

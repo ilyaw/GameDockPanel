@@ -26,8 +26,9 @@ import {
 import {
   magnifyOriginClassName,
   measureMagnifyCenter,
+  type MagnifyAxis,
 } from "../lib/dockPlacement";
-import type { DockItem } from "../lib/types";
+import type { DockItem, DockSettings } from "../lib/types";
 import { countDockSeparators, isDockAppItem } from "../lib/types";
 
 /**
@@ -117,27 +118,32 @@ function hitTestIcon(
   return bestId;
 }
 
-/** macOS Dock-style slot: insert before the first app icon whose center is
- * right of the cursor; otherwise append before settings. */
+/** macOS Dock-style slot: insert before the first app icon whose center
+ * lies past the cursor on the dock's *length* axis — X for `bottom`/`top`,
+ * Y for `left`/`right` (`orientation.magnifyAxis`, which names the same
+ * axis) — otherwise append before settings. Comparing X unconditionally
+ * broke vertical docks: every icon in a column shares one centerX, so a
+ * Finder drop always resolved to index 0. */
 function resolveInsertIndex(
   items: DockItem[],
   refs: Map<string, HTMLElement>,
   pillEl: HTMLElement | null,
   x: number,
   y: number,
+  axis: MagnifyAxis,
 ): number {
   if (pillEl && !pointInRect(x, y, pillEl)) {
     return items.length;
   }
 
+  const cursorMain = axis === "x" ? x : y;
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (!isDockAppItem(item)) continue;
     const el = refs.get(item.id);
     if (!el) continue;
-    const rect = el.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    if (x < centerX) return i;
+    const centerMain = measureMagnifyCenter(el.getBoundingClientRect(), axis);
+    if (cursorMain < centerMain) return i;
   }
   return items.length;
 }
@@ -158,34 +164,50 @@ function findAppIdAtOrAfter(items: DockItem[], index: number): string | null {
   return null;
 }
 
+/** Insert-marker line geometry, axis-neutral: `main` is the line's center
+ * along the dock's length axis, `crossStart`/`crossSize` its extent on the
+ * thickness axis — all pill-relative. Rendered as a vertical hairline on
+ * `bottom`/`top` docks and a horizontal one on `left`/`right`. */
+interface InsertMarkerMetrics {
+  main: number;
+  crossStart: number;
+  crossSize: number;
+}
+
 function getInsertMarkerMetrics(
   items: DockItem[],
   refs: Map<string, HTMLElement>,
   pillEl: HTMLElement,
   insertIndex: number,
-): { left: number; top: number; height: number } | null {
+  axis: MagnifyAxis,
+): InsertMarkerMetrics | null {
   const pillRect = pillEl.getBoundingClientRect();
-  let markerX: number | null = null;
-  let markerTop = 0;
-  let markerHeight = 0;
+  const mainStart = (rect: DOMRect) => (axis === "x" ? rect.left : rect.top);
+  const mainEnd = (rect: DOMRect) => (axis === "x" ? rect.right : rect.bottom);
+  const crossStartOf = (rect: DOMRect) => (axis === "x" ? rect.top : rect.left);
+  const crossSizeOf = (rect: DOMRect) => (axis === "x" ? rect.height : rect.width);
+
+  let markerMain: number | null = null;
+  let crossStart = 0;
+  let crossSize = 0;
 
   if (insertIndex <= 0) {
     const firstId = findAppIdAtOrAfter(items, 0);
     const first = firstId ? refs.get(firstId) : null;
     if (first) {
       const rect = first.getBoundingClientRect();
-      markerX = rect.left;
-      markerTop = rect.top;
-      markerHeight = rect.height;
+      markerMain = mainStart(rect);
+      crossStart = crossStartOf(rect);
+      crossSize = crossSizeOf(rect);
     }
   } else if (insertIndex >= items.length) {
     const lastId = findAppIdAtOrBefore(items, items.length - 1);
     const last = lastId ? refs.get(lastId) : null;
     if (last) {
       const rect = last.getBoundingClientRect();
-      markerX = rect.right;
-      markerTop = rect.top;
-      markerHeight = rect.height;
+      markerMain = mainEnd(rect);
+      crossStart = crossStartOf(rect);
+      crossSize = crossSizeOf(rect);
     }
   } else {
     const prevId = findAppIdAtOrBefore(items, insertIndex - 1);
@@ -195,31 +217,61 @@ function getInsertMarkerMetrics(
     if (prev && next) {
       const prevRect = prev.getBoundingClientRect();
       const nextRect = next.getBoundingClientRect();
-      markerX = (prevRect.right + nextRect.left) / 2;
-      markerTop = Math.min(prevRect.top, nextRect.top);
-      markerHeight = Math.max(prevRect.height, nextRect.height);
+      markerMain = (mainEnd(prevRect) + mainStart(nextRect)) / 2;
+      crossStart = Math.min(crossStartOf(prevRect), crossStartOf(nextRect));
+      crossSize = Math.max(crossSizeOf(prevRect), crossSizeOf(nextRect));
     } else if (prev) {
       const prevRect = prev.getBoundingClientRect();
-      markerX = prevRect.right;
-      markerTop = prevRect.top;
-      markerHeight = prevRect.height;
+      markerMain = mainEnd(prevRect);
+      crossStart = crossStartOf(prevRect);
+      crossSize = crossSizeOf(prevRect);
     } else if (next) {
       const nextRect = next.getBoundingClientRect();
-      markerX = nextRect.left;
-      markerTop = nextRect.top;
-      markerHeight = nextRect.height;
+      markerMain = mainStart(nextRect);
+      crossStart = crossStartOf(nextRect);
+      crossSize = crossSizeOf(nextRect);
     }
   }
 
-  if (markerX === null || markerHeight < 1) return null;
+  if (markerMain === null || crossSize < 1) return null;
+  const pillMain = axis === "x" ? pillRect.left : pillRect.top;
+  const pillCross = axis === "x" ? pillRect.top : pillRect.left;
   return {
-    left: markerX - pillRect.left,
-    top: markerTop - pillRect.top,
-    height: markerHeight,
+    main: markerMain - pillMain,
+    crossStart: crossStart - pillCross,
+    crossSize,
   };
 }
 
+/**
+ * Renders nothing until the first `get_dock_settings` pull lands, then
+ * mounts the real dock with the persisted values as the *initial* state.
+ * Deliberately a mount gate, not a `jump()` after mount: every Motion-driven
+ * style writes its correct value through React's own first commit this way.
+ * The post-mount correction path (`MotionValue.jump` + Framer's frame
+ * scheduler) proved unreliable on cold start — WKWebView can withhold
+ * animation frames from the freshly shown, unfocused dock window for tens
+ * of seconds, which left the dock rendered at the 56px/bottom defaults
+ * while `dock-settings.json` said otherwise (found in the PROMPT_17 QA
+ * pass with a persisted 44px size). Gating also removes the transient
+ * default-orientation first mount on left/right/top docks.
+ */
 export function DockPanel() {
+  // Apps stay in the outer, never-unmounted component so their snapshot
+  // pull runs in parallel with the settings pull instead of behind it.
+  const dockApps = useDockApps();
+  const { settings, hydrated } = useDockSettings();
+  if (!hydrated) return null;
+  return <HydratedDockPanel settings={settings} dockApps={dockApps} />;
+}
+
+function HydratedDockPanel({
+  settings,
+  dockApps,
+}: {
+  settings: DockSettings;
+  dockApps: ReturnType<typeof useDockApps>;
+}) {
   const {
     items,
     activateApp,
@@ -236,9 +288,8 @@ export function DockPanel() {
     showInFinder,
     quitApp,
     setIndicatorColor,
-  } = useDockApps();
+  } = dockApps;
   const separatorsFull = countDockSeparators(items) >= MAX_SEPARATORS;
-  const { settings, hydrated } = useDockSettings();
   const orientation = useDockOrientation(settings.dockPosition);
   const iconSizeTarget = useMotionValue(settings.iconSizePx);
   const iconSizeAnimated = useSpring(iconSizeTarget, ICON_SIZE_SPRING);
@@ -254,8 +305,10 @@ export function DockPanel() {
   );
 
   useEffect(() => {
-    if (!hydrated) return;
-
+    // First run is a no-op by construction (the motion values were created
+    // from the same hydrated `settings.iconSizePx` this component mounted
+    // with) — kept as a jump/set split so later settings pushes animate
+    // through the spring while a remount stays snap-exact.
     if (!iconSizeSyncedRef.current) {
       iconSizeTarget.jump(settings.iconSizePx);
       iconSizeAnimated.jump(settings.iconSizePx);
@@ -264,7 +317,7 @@ export function DockPanel() {
     }
 
     iconSizeTarget.set(settings.iconSizePx);
-  }, [settings.iconSizePx, hydrated, iconSizeTarget, iconSizeAnimated]);
+  }, [settings.iconSizePx, iconSizeTarget, iconSizeAnimated]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -283,7 +336,19 @@ export function DockPanel() {
   const pillThicknessPx = useTransform(iconSizeAnimated, (px) =>
     getSizeMetrics(px, { ledAlongThickness }).pillThicknessPx,
   );
-  const pillGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
+  /**
+   * Every flex `gap` fed by a MotionValue below is a `"<n>px"` *string*,
+   * not a number: `gap` is missing from Framer Motion's px-append value-type
+   * map (`numberValueTypes` in motion-dom), so post-mount imperative updates
+   * would write a unitless number that CSS silently ignores — the gap then
+   * stays frozen at whatever React wrote on mount (React itself does append
+   * `px`), which desynced the DOM pill from the Rust length formula by
+   * ~17px after every icon-size change until a remount.
+   */
+  const pillGapPx = useTransform(
+    iconSizeAnimated,
+    (px) => `${getSizeMetrics(px).dockGapPx}px`,
+  );
   /**
    * `X`/`Y` here name the padding's *role* (along the growth axis vs along
    * the thickness axis), not a literal CSS side — which of `paddingInline`/
@@ -300,7 +365,18 @@ export function DockPanel() {
     iconSizeAnimated,
     (px) => getSizeMetrics(px).dockPaddingYPx,
   );
-  const iconRowGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
+  const iconRowGapPx = useTransform(
+    iconSizeAnimated,
+    (px) => `${getSizeMetrics(px).dockGapPx}px`,
+  );
+  /** Icon↔LED gap for the settings gear column — same scaled metric the
+   * pill-thickness formula uses (`iconLedGapPx`), not a fixed `gap-2`:
+   * a fixed 8px drifts against the formula at non-default icon sizes.
+   * String with units — see `pillGapPx`. */
+  const settingsLedGapPx = useTransform(
+    iconSizeAnimated,
+    (px) => `${getSizeMetrics(px).iconLedGapPx}px`,
+  );
   const settingsSlotSizePx = useTransform(iconSizeAnimated, (px) => px);
   const settingsCornerRadiusPx = useTransform(
     iconSizeAnimated,
@@ -337,11 +413,9 @@ export function DockPanel() {
     undefined,
   );
   const [isRejecting, setIsRejecting] = useState(false);
-  const [insertMarker, setInsertMarker] = useState<{
-    left: number;
-    top: number;
-    height: number;
-  } | null>(null);
+  const [insertMarker, setInsertMarker] = useState<InsertMarkerMetrics | null>(
+    null,
+  );
 
   const mouseX = useMotionValue(Infinity);
   const mouseY = useMotionValue(Infinity);
@@ -366,8 +440,15 @@ export function DockPanel() {
 
   useEffect(() => {
     resolveInsertIndexRef.current = (x, y) =>
-      resolveInsertIndex(items, iconRefs.current, pillRef.current, x, y);
-  }, [items, resolveInsertIndexRef]);
+      resolveInsertIndex(
+        items,
+        iconRefs.current,
+        pillRef.current,
+        x,
+        y,
+        orientation.magnifyAxis,
+      );
+  }, [items, resolveInsertIndexRef, orientation.magnifyAxis]);
 
   useLayoutEffect(() => {
     const pillEl = pillRef.current;
@@ -381,9 +462,10 @@ export function DockPanel() {
       iconRefs.current,
       pillEl,
       fileDragInsertIndex,
+      orientation.magnifyAxis,
     );
     setInsertMarker(metrics);
-  }, [items, fileDragOver, fileDragInsertIndex, iconSizeAnimated]);
+  }, [items, fileDragOver, fileDragInsertIndex, iconSizeAnimated, orientation.magnifyAxis]);
 
   useEffect(() => {
     isDraggingRef.current = isDragging;
@@ -1004,12 +1086,24 @@ export function DockPanel() {
         {insertMarker && (
           <div
             aria-hidden
-            className="pointer-events-none absolute z-30 w-0.5 -translate-x-1/2 rounded-full bg-zinc-200/90 shadow-[0_0_8px_2px_rgb(255_255_255/0.35)]"
-            style={{
-              left: insertMarker.left,
-              top: insertMarker.top,
-              height: insertMarker.height,
-            }}
+            className={`pointer-events-none absolute z-30 rounded-full bg-zinc-200/90 shadow-[0_0_8px_2px_rgb(255_255_255/0.35)] ${
+              orientation.magnifyAxis === "x"
+                ? "w-0.5 -translate-x-1/2"
+                : "h-0.5 -translate-y-1/2"
+            }`}
+            style={
+              orientation.magnifyAxis === "x"
+                ? {
+                    left: insertMarker.main,
+                    top: insertMarker.crossStart,
+                    height: insertMarker.crossSize,
+                  }
+                : {
+                    top: insertMarker.main,
+                    left: insertMarker.crossStart,
+                    width: insertMarker.crossSize,
+                  }
+            }
           />
         )}
         <Reorder.Group
@@ -1086,12 +1180,17 @@ export function DockPanel() {
           isVertical={orientation.isVertical}
           className="mx-1"
         />
-        {/* Settings gear — horizontal docks reserve space for the LED bar. */}
-        <div
+        {/* Settings gear — horizontal docks reserve space for the LED bar.
+            `gap` always present with a 0 fallback (never undefined) — same
+            stale-motion-style-key trap as the pill's width/height above. */}
+        <motion.div
+          style={{
+            gap: orientation.ledAxis === "horizontal" ? settingsLedGapPx : 0,
+          }}
           className={`flex shrink-0 ${
             orientation.ledAxis === "vertical"
               ? "items-center"
-              : "flex-col items-center gap-2"
+              : "flex-col items-center"
           }`}
         >
           <motion.div
@@ -1156,7 +1255,7 @@ export function DockPanel() {
           {orientation.ledAxis === "horizontal" ? (
             <span aria-hidden className="h-[3px] w-6 shrink-0" />
           ) : null}
-        </div>
+        </motion.div>
         {showPanelEffect && (
           // Painted above the icon row (see `.dock-panel-scanline`/
           // `.dock-panel-hologram`'s `mix-blend-mode: screen` in

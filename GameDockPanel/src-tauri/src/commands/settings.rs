@@ -197,6 +197,16 @@ const RGB_GLOW_COLOR_COUNT: usize = 6;
 #[derive(Default)]
 pub struct SettingsState {
     pub settings: Mutex<DockSettings>,
+    /// Live icon size while the settings slider drags (and while the dock's
+    /// size spring settles) — written by geometry syncs
+    /// (`platform::macos::sync_icon_size_preview`), read as an override by
+    /// `current_icon_size_dip` so native hit-tests track the on-screen size.
+    /// Kept OUT of `settings.icon_size_px`: `apply_dock_settings` compares
+    /// the incoming commit against the persisted value to decide whether to
+    /// re-rasterize icons, and preview writes into that same field used to
+    /// make the two sides equal by commit time — silently skipping
+    /// `refresh_dock_icons` after slider-driven size changes.
+    pub preview_icon_size_px: Mutex<Option<f64>>,
 }
 
 fn config_file_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -306,6 +316,16 @@ fn apply_dock_settings(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = settings.clone();
+    }
+    {
+        // The committed value supersedes any in-flight preview; geometry
+        // syncs from the spring's tail re-populate it and converge to the
+        // same committed value, so this is a consistency reset, not a gate.
+        let mut preview = state
+            .preview_icon_size_px
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *preview = None;
     }
 
     // Window geometry during icon-size (or dock-position) changes is

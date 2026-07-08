@@ -33,18 +33,35 @@ fn icon_export_px(icon_size_dip: f64, scale_factor: f64) -> f64 {
         .clamp(ICON_EXPORT_MIN_PX, ICON_EXPORT_MAX_PX)
 }
 
+/// Records the live (preview/spring) icon size into its own
+/// `SettingsState.preview_icon_size_px` slot — NOT into
+/// `settings.icon_size_px`. Writing the persisted field here used to make
+/// `apply_dock_settings`'s before/after comparison see two equal values by
+/// commit time, silently skipping `refresh_dock_icons` after slider-driven
+/// size changes (see the field's doc comment in commands/settings.rs).
 fn sync_icon_size_preview(window: &WebviewWindow, icon_size_dip: f64) {
     let clamped = icon_size_dip.round().clamp(44.0, 72.0);
     let settings_state = window.state::<SettingsState>();
     let mut guard = settings_state
-        .settings
+        .preview_icon_size_px
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.icon_size_px = clamped;
+    *guard = Some(clamped);
 }
 
+/// Live icon size for geometry/hit-testing: the in-flight preview value
+/// when a slider drag / size spring is active, else the committed setting.
 fn current_icon_size_dip(window: &WebviewWindow) -> f64 {
     let state = window.state::<SettingsState>();
+    {
+        let preview = state
+            .preview_icon_size_px
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(px) = *preview {
+            return px;
+        }
+    }
     let guard = state
         .settings
         .lock()
@@ -1444,10 +1461,13 @@ fn emit_apps_icons_updated(app: &AppHandle, updates: Vec<crate::commands::apps::
 pub fn refresh_dock_icons(app: &AppHandle, state: &AppsState) {
     let icon_size_dip = current_icon_size_dip_from_app(app);
     let scale_factor = dock_window_scale_factor(app);
-    let entries = state
-        .entries
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Cloned snapshot, NOT a held `entries` guard: `icons_snapshot()` below
+    // re-locks `entries` on this same thread, so keeping the guard alive
+    // across the loop self-deadlocked the main thread (std::sync::Mutex is
+    // not reentrant). Masked for a while by the preview-write bug in
+    // `sync_icon_size_preview` that made `apply_dock_settings` skip this
+    // refresh — found live in the PROMPT_17 QA pass once that was fixed.
+    let entries = state.entries_snapshot();
 
     for item in entries.iter() {
         let DockItem::App(entry) = item else {

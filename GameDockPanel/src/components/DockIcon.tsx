@@ -366,6 +366,14 @@ export function DockIcon({
    * between the two, unlike the reorder/magnify interaction above (which is
    * a different mechanism: `Reorder.Item`'s own layout-projection transform
    * on the *outer* wrapper, not a style prop on this inner node).
+   *
+   * Deliberately `translateY` on every `dockPosition`, not perpendicular to
+   * the anchored edge (QA pass, PROMPT_17): the real macOS Dock's launch
+   * bounce stays vertical even on a side dock, and the hop's amplitude
+   * (`launchBounceAmplitudePx` ≈ the scaled padding) keeps the icon inside
+   * the pill on all four positions at every icon size — checked at
+   * 44/56/72. On `top` this means hopping toward the screen edge; accepted
+   * as the price of "always vertical" rather than special-casing one edge.
    */
   const bounceY = useMotionValue(0);
   const bounceAmplitudePx = useTransform(
@@ -414,10 +422,31 @@ export function DockIcon({
     iconSizePx,
     (px) => px * ICON_CORNER_RADIUS_RATIO,
   );
+  /** Icon↔LED gap — the same scaled metric the pill-thickness formula
+   * (`getSizeMetrics().iconLedGapPx`) accounts for, not a fixed `gap-2`:
+   * a fixed 8px drifts 1–3px against the formula at non-default sizes.
+   * A `"<n>px"` string, not a number — `gap` is missing from Framer's
+   * px-append map, so numeric post-mount updates are ignored by CSS (see
+   * `pillGapPx` in DockPanel.tsx). */
+  const iconLedGap = useTransform(
+    iconSizePx,
+    (px) => `${getSizeMetrics(px).iconLedGapPx}px`,
+  );
 
   // `null` means Rust couldn't resolve a native icon (app not installed) —
   // same fallback badge as a broken/failed `<img>` load.
   const showFallback = broken || !app.iconUrl;
+
+  // "Before/after in the item list" reads as left/right only while the dock
+  // is a row — on a Left/Right dock the column makes it above/below. The
+  // insert command itself is order-based and orientation-agnostic.
+  const isColumnLayout = magnifyAxis === "y";
+  const separatorBeforeLabel = isColumnLayout
+    ? "Разделитель сверху"
+    : "Разделитель слева";
+  const separatorAfterLabel = isColumnLayout
+    ? "Разделитель снизу"
+    : "Разделитель справа";
 
   const edgeLedOffsetPx = useTransform(iconSizePx, (px) => {
     const pad = getSizeMetrics(px, { ledAlongThickness: false }).dockPaddingYPx;
@@ -522,7 +551,7 @@ export function DockIcon({
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Minus className="h-3.5 w-3.5" />
-            Разделитель слева
+            {separatorBeforeLabel}
           </button>
 
           <button
@@ -535,7 +564,7 @@ export function DockIcon({
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Minus className="h-3.5 w-3.5" />
-            Разделитель справа
+            {separatorAfterLabel}
           </button>
 
           <div className="h-px bg-zinc-700/70" />
@@ -634,7 +663,10 @@ export function DockIcon({
     // `dock-click`/`hitTestIcon` dispatch in DockPanel.tsx), so `role`/
     // `aria-*` here are purely there to keep the same assistive-tech
     // semantics `<button>` had.
-    <div
+    // `gap` always present with a 0 fallback (never undefined) — same
+    // stale-motion-style-key trap documented on the pill's width/height
+    // in DockPanel, since `ledAxis` can flip on a live position change.
+    <motion.div
       role="button"
       tabIndex={0}
       ref={buttonRef}
@@ -644,14 +676,13 @@ export function DockIcon({
         event.preventDefault();
         setMenuOpen(true);
       }}
+      style={{ gap: ledAxis === "horizontal" ? iconLedGap : 0 }}
       className={`relative flex flex-col items-center outline-none ${
-        ledAxis === "horizontal" ? "gap-2" : ""
-      } ${isDragging ? "cursor-grabbing" : "cursor-grab"} ${
-        isHovered || menuOpen ? "z-10" : "z-0"
-      }`}
+        isDragging ? "cursor-grabbing" : "cursor-grab"
+      } ${isHovered || menuOpen ? "z-10" : "z-0"}`}
     >
       {iconNode}
       {ledAxis === "horizontal" ? horizontalLedBar : null}
-    </div>
+    </motion.div>
   );
 }
