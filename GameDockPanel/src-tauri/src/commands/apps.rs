@@ -259,6 +259,45 @@ pub struct AppIconUpdatePayload {
 /// see the `tauri-glass-dock` skill for why: AppKit objects aren't `Send`,
 /// and Tauri commands run off the main thread where `NSWorkspace`
 /// notifications are delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MenuOverlaySide {
+    #[default]
+    None,
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl MenuOverlaySide {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "top" => Self::Top,
+            "bottom" => Self::Bottom,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::None,
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MenuOverlayState {
+    pub side: MenuOverlaySide,
+    pub width_dip: f64,
+    pub height_dip: f64,
+}
+
+impl MenuOverlayState {
+    pub fn is_active(&self) -> bool {
+        self.side.is_active() && (self.width_dip > 0.0 || self.height_dip > 0.0)
+    }
+}
+
 #[derive(Default)]
 pub struct AppsState {
     pub entries: Mutex<Vec<DockItem>>,
@@ -267,7 +306,7 @@ pub struct AppsState {
     pub auto_colors: Mutex<HashMap<String, String>>,
     pub pill_width_dip: Mutex<f64>,
     pub pill_height_dip: Mutex<f64>,
-    pub menu_overlay_height_dip: Mutex<f64>,
+    pub menu_overlay: Mutex<MenuOverlayState>,
 }
 
 pub(crate) fn resolve_indicator_color(

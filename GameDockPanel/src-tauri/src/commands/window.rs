@@ -1,6 +1,6 @@
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
-use crate::commands::apps::AppsState;
+use crate::commands::apps::{AppsState, MenuOverlaySide, MenuOverlayState};
 use crate::platform;
 
 /// Resizes the native window to fit the measured pill width/height (inner
@@ -38,9 +38,9 @@ pub fn sync_vibrancy_pill(
 }
 
 /// Called by `DockIcon` whenever its context menu opens or closes, with the
-/// menu's own measured `getBoundingClientRect().height`. See
-/// `AppsState::menu_overlay_height_dip` for why the native click-through
-/// hit-test needs this — a bare `Ok(())` here (rather than routing through
+/// menu's measured footprint and resolved placement side. See
+/// `AppsState::menu_overlay` for why the native click-through hit-test
+/// needs this — a bare `Ok(())` here (rather than routing through
 /// `platform::`) is enough since this only ever writes shared state, no
 /// AppKit calls are involved.
 #[tauri::command]
@@ -48,17 +48,31 @@ pub fn set_menu_overlay(
     app: AppHandle,
     state: State<AppsState>,
     active: bool,
+    side: String,
+    width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let mut overlay_height = state
-        .menu_overlay_height_dip
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *overlay_height = if active { height.max(0.0) } else { 0.0 };
+    let overlay = if active && (width > 0.0 || height > 0.0) {
+        MenuOverlayState {
+            side: MenuOverlaySide::parse(&side),
+            width_dip: width.max(0.0),
+            height_dip: height.max(0.0),
+        }
+    } else {
+        MenuOverlayState::default()
+    };
 
-    if active && height > 0.0 {
+    {
+        let mut guard = state
+            .menu_overlay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = overlay;
+    }
+
+    if overlay.is_active() {
         if let Some(window) = app.get_webview_window("main") {
-            platform::ensure_window_fits_menu_overlay(&window, height)?;
+            platform::ensure_window_fits_menu_overlay(&window, overlay)?;
         }
     }
 
@@ -79,10 +93,8 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     // picks the UI to render from `getCurrentWebviewWindow().label`.
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("GameDockPanel — Настройки")
-        .inner_size(560.0, 680.0)
-        .min_inner_size(480.0, 480.0)
+        .inner_size(480.0, 640.0)
         .resizable(true)
-        .decorations(true)
         .build()
         .map_err(|e| e.to_string())?;
 

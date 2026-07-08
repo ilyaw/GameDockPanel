@@ -85,11 +85,11 @@ const BASE_DOCK_PADDING_Y_PX = 12;
 const BASE_ICON_LED_GAP_PX = 8;
 
 /**
- * Upper bound for hover-magnify scale (`origin-bottom` on the icon) — a
- * ratio, not a pixel value, so it applies unchanged at every preset. The
- * *pixel* amplitude it produces (`magnifyHeightOverflowPx` in
- * `SizeMetrics`) already scales on its own because it multiplies against
- * `iconSizePx`, so this doesn't need its own per-preset value.
+ * Upper bound for hover-magnify scale — a ratio, not a pixel value, so it
+ * applies unchanged at every preset. Transform-origin is set per
+ * `dockPosition` (see `useDockOrientation`) so the icon grows toward the
+ * desktop center. The *pixel* amplitude (`magnifyHeightOverflowPx` in
+ * `SizeMetrics`) scales with `iconSizePx`.
  */
 export const MAGNIFY_MAX_SCALE = 1.4;
 
@@ -191,7 +191,8 @@ export interface SizeMetrics {
   dockPaddingXPx: number;
   dockPaddingYPx: number;
   iconLedGapPx: number;
-  /** How far a peak-magnified icon grows above its rest top (`origin-bottom`). */
+  /** How far a peak-magnified icon grows past its rest edge on the magnify
+   * axis (magnitude only — direction comes from `magnifyTransformOrigin`). */
   magnifyHeightOverflowPx: number;
   /** Cursor-to-icon-center distance (px, viewport coords) beyond which
    * magnify falls back to rest scale (1). Spans roughly two neighboring
@@ -217,8 +218,7 @@ export interface SizeMetrics {
    * (this dock only ever anchored to the bottom when it was introduced) —
    * still literally "above the pill" for `dockPosition: "bottom"|"top"`,
    * but for `"left"|"right"` it maps onto the far side of the *thickness*
-   * axis rather than the true overflow direction (magnify/tooltip stay
-   * screen-"up" — see PROMPT_15_POSITION_PHASE1.md's known trade-off).
+   * axis — the direction magnify/tooltip/menu grow after Phase 2.
    */
   pillFarReservePx: number;
   /** Tauri window logical size along the thickness axis — keep in sync

@@ -6,6 +6,7 @@ import { Settings } from "lucide-react";
 import { DockIcon } from "./DockIcon";
 import { DockRowDivider } from "./DockRowDivider";
 import { DockSeparator } from "./DockSeparator";
+import { DockOverlayAnchor } from "./DockOverlayAnchor";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockOrientation } from "../hooks/useDockOrientation";
 import { useDockSettings } from "../hooks/useDockSettings";
@@ -22,6 +23,10 @@ import {
   getPanelEffectPreset,
   getSizeMetrics,
 } from "../lib/constants";
+import {
+  magnifyOriginClassName,
+  measureMagnifyCenter,
+} from "../lib/dockPlacement";
 import type { DockItem } from "../lib/types";
 import { countDockSeparators, isDockAppItem } from "../lib/types";
 
@@ -338,18 +343,19 @@ export function DockPanel() {
   } | null>(null);
 
   const mouseX = useMotionValue(Infinity);
+  const mouseY = useMotionValue(Infinity);
   /** Separate cursor channel for the settings slot — when the pointer is over
-   * settings, `mouseX` is forced to `Infinity` so app icons don't pick up a
-   * distant magnify curve from the far-right cursor X (which was making the
-   * leftmost icon grow). Settings reads this value instead. */
+   * settings, the app-icon magnify axis is forced to `Infinity` so icons
+   * don't pick up a distant magnify curve from the far edge cursor position. */
   const settingsMouseX = useMotionValue(Infinity);
+  const settingsMouseY = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement | null>(null);
   const settingsSlotRef = useRef<HTMLDivElement>(null);
-  const settingsCenterX = useMotionValue(0);
+  const settingsCenterMain = useMotionValue(0);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
@@ -396,27 +402,42 @@ export function DockPanel() {
       if (isDraggingRef.current || isReorderSettlingRef.current) return;
       const settingsEl = settingsSlotRef.current;
       if (settingsEl && pointInRect(x, y, settingsEl)) {
-        mouseX.set(Infinity);
-        settingsMouseX.set(x);
+        if (orientation.magnifyAxis === "x") {
+          mouseX.set(Infinity);
+          settingsMouseX.set(x);
+        } else {
+          mouseY.set(Infinity);
+          settingsMouseY.set(y);
+        }
         setHoveredIconId(null);
         setIsSettingsHovered(true);
         return;
       }
       settingsMouseX.set(Infinity);
+      settingsMouseY.set(Infinity);
       setIsSettingsHovered(false);
       mouseX.set(x);
+      mouseY.set(y);
       setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
     },
-    [mouseX, settingsMouseX],
+    [
+      mouseX,
+      mouseY,
+      settingsMouseX,
+      settingsMouseY,
+      orientation.magnifyAxis,
+    ],
   );
 
   const leaveDock = useCallback(() => {
     dockHoveredRef.current = false;
     mouseX.set(Infinity);
+    mouseY.set(Infinity);
     settingsMouseX.set(Infinity);
+    settingsMouseY.set(Infinity);
     setHoveredIconId(null);
     setIsSettingsHovered(false);
-  }, [mouseX, settingsMouseX]);
+  }, [mouseX, mouseY, settingsMouseX, settingsMouseY]);
 
   const enterDock = useCallback(() => {
     dockHoveredRef.current = true;
@@ -444,10 +465,12 @@ export function DockPanel() {
     setReorderSettledId((id) => id + 1);
 
     mouseX.set(Infinity);
+    mouseY.set(Infinity);
     settingsMouseX.set(Infinity);
+    settingsMouseY.set(Infinity);
     setHoveredIconId(null);
     setIsSettingsHovered(false);
-  }, [mouseX, settingsMouseX]);
+  }, [mouseX, mouseY, settingsMouseX, settingsMouseY]);
 
   const scheduleFinishSettle = useCallback(() => {
     clearTimeout(settleDebounceRef.current);
@@ -460,10 +483,12 @@ export function DockPanel() {
     orderAtDragStartRef.current = items.map((item) => item.id);
     setIsDragging(true);
     mouseX.set(Infinity);
+    mouseY.set(Infinity);
     settingsMouseX.set(Infinity);
+    settingsMouseY.set(Infinity);
     setHoveredIconId(null);
     setIsSettingsHovered(false);
-  }, [items, mouseX, settingsMouseX]);
+  }, [items, mouseX, mouseY, settingsMouseX, settingsMouseY]);
 
   /** The one discrete "drop" event — persists the final order exactly once
    * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
@@ -513,7 +538,9 @@ export function DockPanel() {
           } else {
             dockHoveredRef.current = false;
             mouseX.set(Infinity);
+            mouseY.set(Infinity);
             settingsMouseX.set(Infinity);
+            settingsMouseY.set(Infinity);
             setHoveredIconId(null);
             setIsSettingsHovered(false);
           }
@@ -571,7 +598,7 @@ export function DockPanel() {
         unlisten();
       }
     };
-  }, [activateApp, mouseX, applyCursor, enterDock]);
+  }, [activateApp, mouseX, mouseY, applyCursor, enterDock]);
 
   useEffect(() => {
     if (rejectPulseKey === 0) return;
@@ -701,26 +728,37 @@ export function DockPanel() {
 
     const measure = () => {
       const rect = el.getBoundingClientRect();
-      settingsCenterX.set(rect.left + rect.width / 2);
+      settingsCenterMain.set(
+        measureMagnifyCenter(rect, orientation.magnifyAxis),
+      );
     };
 
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [settingsCenterX, items, hoverSessionId, reorderSettledId]);
+  }, [settingsCenterMain, items, hoverSessionId, reorderSettledId, orientation.magnifyAxis]);
 
   const settingsScaleRaw = useTransform(
-    [settingsMouseX, settingsCenterX, settingsMagnifyRadiusPx],
-    ([mx, cx, radius]: number[]) => {
-      if (!Number.isFinite(mx)) return 1;
-      const distance = mx - cx;
+    [
+      settingsMouseX,
+      settingsMouseY,
+      settingsCenterMain,
+      settingsMagnifyRadiusPx,
+    ],
+    ([mx, my, cm, radius]: number[]) => {
+      const m = orientation.magnifyAxis === "x" ? mx : my;
+      if (!Number.isFinite(m)) return 1;
+      const distance = m - cm;
       const t = Math.abs(distance) / radius;
       if (t >= 1) return 1;
       return 1 + (MAGNIFY_MAX_SCALE - 1) * (1 - t);
     },
   );
   const settingsScale = useSpring(settingsScaleRaw, MAGNIFY_SPRING);
+  const settingsOriginClass = magnifyOriginClassName(
+    orientation.magnifyTransformOrigin,
+  );
 
   const activeBorderStyle = getBorderStylePreset(settings.borderStyle);
   const activeBgPreset = getBackgroundPreset(settings.backgroundPreset);
@@ -954,6 +992,10 @@ export function DockPanel() {
                 iconSizePx={iconSizeAnimated}
                 registerRef={registerIconRef}
                 mouseX={mouseX}
+                mouseY={mouseY}
+                magnifyAxis={orientation.magnifyAxis}
+                magnifyTransformOrigin={orientation.magnifyTransformOrigin}
+                overlayPreferredSide={orientation.overlayPreferredSide}
                 isHovered={
                   !isDragging && !isReorderSettling && hoveredIconId === item.id
                 }
@@ -979,6 +1021,8 @@ export function DockPanel() {
               <DockSeparator
                 id={item.id}
                 iconSizePx={iconSizeAnimated}
+                isVertical={orientation.isVertical}
+                overlayPreferredSide={orientation.overlayPreferredSide}
                 onRemove={removeSeparator}
                 isDragging={isDragging}
               />
@@ -986,7 +1030,11 @@ export function DockPanel() {
           </Reorder.Item>
         ))}
         </Reorder.Group>
-        <DockRowDivider iconSizePx={iconSizeAnimated} className="mx-1" />
+        <DockRowDivider
+          iconSizePx={iconSizeAnimated}
+          isVertical={orientation.isVertical}
+          className="mx-1"
+        />
         {/* Matches DockIcon's own `flex-col items-center gap-2` shape (icon +
             gap + LED) with an invisible spacer standing in for the LED — the
             pill row is `items-end`, so without this the button's bottom
@@ -999,19 +1047,20 @@ export function DockPanel() {
               isSettingsHovered && !isDragging && !isReorderSettling ? "z-10" : ""
             }`}
           >
-            <span
-              style={{ marginBottom: TOOLTIP_GAP_PX }}
-              className={`pointer-events-none absolute bottom-full left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
+            <DockOverlayAnchor
+              side={orientation.overlayPreferredSide}
+              gap={TOOLTIP_GAP_PX}
+              className={`pointer-events-none whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
                 isSettingsHovered && !isDragging && !isReorderSettling
                   ? "scale-100 opacity-100"
                   : "scale-90 opacity-0"
               }`}
             >
               Настройки
-            </span>
+            </DockOverlayAnchor>
             <motion.div
               style={{ scale: isDragging || isReorderSettling ? 1 : settingsScale }}
-              className="h-full w-full origin-bottom"
+              className={`h-full w-full ${settingsOriginClass}`}
             >
               <motion.button
                 type="button"

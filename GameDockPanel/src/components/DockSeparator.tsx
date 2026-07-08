@@ -4,7 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Trash2 } from "lucide-react";
 import { DockRowDivider } from "./DockRowDivider";
+import { DockOverlayAnchor } from "./DockOverlayAnchor";
 import { DOCK_SEPARATOR_WIDTH_PX, TOOLTIP_GAP_PX } from "../lib/constants";
+import {
+  resolveOverlaySide,
+  type OverlaySide,
+} from "../lib/dockPlacement";
 
 interface WindowLogicalPoint {
   x: number;
@@ -14,6 +19,8 @@ interface WindowLogicalPoint {
 interface DockSeparatorProps {
   id: string;
   iconSizePx: MotionValue<number>;
+  isVertical?: boolean;
+  overlayPreferredSide: OverlaySide;
   onRemove?: (separatorId: string) => void;
   isDragging?: boolean;
 }
@@ -21,10 +28,14 @@ interface DockSeparatorProps {
 export function DockSeparator({
   id,
   iconSizePx,
+  isVertical = false,
+  overlayPreferredSide,
   onRemove,
   isDragging = false,
 }: DockSeparatorProps) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
+  const anchorRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -72,19 +83,39 @@ export function DockSeparator({
   }, [menuOpen]);
 
   useLayoutEffect(() => {
-    const reportMenuOverlay = (active: boolean, height: number) => {
-      invoke("set_menu_overlay", { active, height }).catch((error: unknown) => {
-        console.error("Failed to sync menu overlay hit-test region:", error);
-      });
+    const reportMenuOverlay = (
+      active: boolean,
+      side: OverlaySide,
+      width: number,
+      height: number,
+    ) => {
+      invoke("set_menu_overlay", { active, side, width, height }).catch(
+        (error: unknown) => {
+          console.error("Failed to sync menu overlay hit-test region:", error);
+        },
+      );
     };
 
     if (!menuOpen) {
-      reportMenuOverlay(false, 0);
+      reportMenuOverlay(false, overlayPreferredSide, 0, 0);
       return;
     }
 
     const measure = () => {
-      reportMenuOverlay(true, menuRef.current?.getBoundingClientRect().height ?? 0);
+      const anchorEl = anchorRef.current;
+      const menuEl = menuRef.current;
+      if (!anchorEl || !menuEl) return;
+
+      const anchorRect = anchorEl.getBoundingClientRect();
+      const menuRect = menuEl.getBoundingClientRect();
+      const resolvedSide = resolveOverlaySide(
+        anchorRect,
+        { width: menuRect.width, height: menuRect.height },
+        overlayPreferredSide,
+        TOOLTIP_GAP_PX,
+      );
+      setMenuSide(resolvedSide);
+      reportMenuOverlay(true, resolvedSide, menuRect.width, menuRect.height);
     };
 
     measure();
@@ -94,28 +125,32 @@ export function DockSeparator({
     observer.observe(menuEl);
     return () => {
       observer.disconnect();
-      reportMenuOverlay(false, 0);
+      reportMenuOverlay(false, overlayPreferredSide, 0, 0);
     };
-  }, [menuOpen]);
+  }, [menuOpen, overlayPreferredSide]);
 
   return (
     <div
+      ref={anchorRef}
       role="separator"
-      aria-orientation="vertical"
+      aria-orientation={isVertical ? "horizontal" : "vertical"}
       onContextMenu={(event) => {
         event.preventDefault();
         setMenuOpen(true);
       }}
-      style={{ width: DOCK_SEPARATOR_WIDTH_PX }}
-      className={`relative flex shrink-0 items-end justify-center self-end outline-none ${
-        isDragging ? "cursor-grabbing" : "cursor-grab"
-      } ${menuOpen ? "z-10" : "z-0"}`}
+      style={isVertical ? { height: DOCK_SEPARATOR_WIDTH_PX } : { width: DOCK_SEPARATOR_WIDTH_PX }}
+      className={`relative flex shrink-0 outline-none ${
+        isVertical
+          ? "flex-col items-center justify-center self-center"
+          : "items-end justify-center self-end"
+      } ${isDragging ? "cursor-grabbing" : "cursor-grab"} ${menuOpen ? "z-10" : "z-0"}`}
     >
       {menuOpen && (
-        <div
-          ref={menuRef}
-          style={{ marginBottom: TOOLTIP_GAP_PX }}
-          className="pointer-events-auto absolute bottom-full left-1/2 z-30 -translate-x-1/2 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
+        <DockOverlayAnchor
+          innerRef={menuRef}
+          side={menuSide}
+          gap={TOOLTIP_GAP_PX}
+          className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
         >
           <button
             type="button"
@@ -128,10 +163,10 @@ export function DockSeparator({
             <Trash2 className="h-3.5 w-3.5" />
             Удалить разделитель
           </button>
-        </div>
+        </DockOverlayAnchor>
       )}
 
-      <DockRowDivider iconSizePx={iconSizePx} />
+      <DockRowDivider iconSizePx={iconSizePx} isVertical={isVertical} />
     </div>
   );
 }

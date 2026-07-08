@@ -1,11 +1,16 @@
 import { useMemo } from "react";
+import type {
+  MagnifyAxis,
+  MagnifyTransformOrigin,
+  OverlaySide,
+} from "../lib/dockPlacement";
 import type { DockPosition } from "../lib/types";
 
 /**
  * Single source of truth for how `DockPosition` maps onto layout — Phase 1
  * of the positioning initiative (see PROMPT_15_POSITION_PHASE1.md).
- * `DockPanel` consumes this instead of hardcoding `flex-col justify-end`
- * for the window-anchor wrapper and `items-end` for the pill itself.
+ * Phase 2 adds magnify axis, transform-origin, and overlay preferred side
+ * so tooltip/menu/magnify share one orientation model.
  */
 export interface DockOrientation {
   position: DockPosition;
@@ -14,6 +19,12 @@ export interface DockOrientation {
   /** `Reorder.Group`'s own drag axis — it already supports both out of the
    * box, no custom reorder logic needed for the vertical case. */
   reorderAxis: "x" | "y";
+  /** Viewport axis for magnify distance (`x` = horizontal docks, `y` = vertical). */
+  magnifyAxis: MagnifyAxis;
+  /** Icon scale grows toward the desktop center, away from the anchored edge. */
+  magnifyTransformOrigin: MagnifyTransformOrigin;
+  /** Default tooltip/menu side before viewport collision flip. */
+  overlayPreferredSide: OverlaySide;
   /**
    * Classes for the full-screen window-anchor wrapper: flex direction +
    * near-edge `justify-*` (which side the dock is pinned to) + `items-center`
@@ -49,24 +60,36 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
   bottom: {
     isVertical: false,
     reorderAxis: "x",
+    magnifyAxis: "x",
+    magnifyTransformOrigin: "bottom",
+    overlayPreferredSide: "top",
     wrapperClassName: "flex-col justify-end items-center pb-2",
     pillClassName: "flex-row items-end",
   },
   top: {
     isVertical: false,
     reorderAxis: "x",
+    magnifyAxis: "x",
+    magnifyTransformOrigin: "top",
+    overlayPreferredSide: "bottom",
     wrapperClassName: "flex-col justify-start items-center pt-2",
     pillClassName: "flex-row items-end",
   },
   left: {
     isVertical: true,
     reorderAxis: "y",
+    magnifyAxis: "y",
+    magnifyTransformOrigin: "left",
+    overlayPreferredSide: "right",
     wrapperClassName: "flex-row justify-start items-center pl-2",
     pillClassName: "flex-col items-center",
   },
   right: {
     isVertical: true,
     reorderAxis: "y",
+    magnifyAxis: "y",
+    magnifyTransformOrigin: "right",
+    overlayPreferredSide: "left",
     wrapperClassName: "flex-row justify-end items-center pr-2",
     pillClassName: "flex-col items-center",
   },

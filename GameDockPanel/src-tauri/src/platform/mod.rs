@@ -92,7 +92,7 @@ pub fn resize_dock_window_for_app_count(
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_window_fits_menu_overlay(
     _window: &tauri::WebviewWindow,
-    _menu_height_dip: f64,
+    _overlay: crate::commands::apps::MenuOverlayState,
 ) -> Result<(), String> {
     Ok(())
 }

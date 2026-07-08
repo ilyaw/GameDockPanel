@@ -17,6 +17,15 @@ import {
   TOOLTIP_GAP_PX,
   getSizeMetrics,
 } from "../lib/constants";
+import {
+  magnifyOriginClassName,
+  measureMagnifyCenter,
+  resolveOverlaySide,
+  type MagnifyAxis,
+  type MagnifyTransformOrigin,
+  type OverlaySide,
+} from "../lib/dockPlacement";
+import { DockOverlayAnchor } from "./DockOverlayAnchor";
 
 interface WindowLogicalPoint {
   x: number;
@@ -63,6 +72,10 @@ interface DockIconProps {
   /** Scaled visual node — hit-test uses its transformed bounding box at click time. */
   registerRef?: (id: string, el: HTMLElement | null) => void;
   mouseX: MotionValue<number>;
+  mouseY: MotionValue<number>;
+  magnifyAxis: MagnifyAxis;
+  magnifyTransformOrigin: MagnifyTransformOrigin;
+  overlayPreferredSide: OverlaySide;
   isHovered?: boolean;
   /**
    * Bumped by `DockPanel` at the start of every hover session (pill
@@ -114,6 +127,10 @@ export function DockIcon({
   iconSizePx,
   registerRef,
   mouseX,
+  mouseY,
+  magnifyAxis,
+  magnifyTransformOrigin,
+  overlayPreferredSide,
   isHovered = false,
   hoverSessionId = 0,
   reorderSettledId = 0,
@@ -134,7 +151,9 @@ export function DockIcon({
   const buttonRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const colorPickActiveRef = useRef(false);
-  const centerX = useMotionValue(0);
+  const centerMain = useMotionValue(0);
+  const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
+  const magnifyOriginClass = magnifyOriginClassName(magnifyTransformOrigin);
 
   useEffect(() => {
     setBroken(false);
@@ -217,20 +236,40 @@ export function DockIcon({
   // same render), so there's no extra frame where it's visible but not yet
   // reachable.
   useLayoutEffect(() => {
-    const reportMenuOverlay = (active: boolean, height: number) => {
-      invoke("set_menu_overlay", { active, height }).catch((error: unknown) => {
-        console.error("Failed to sync menu overlay hit-test region:", error);
-      });
+    const reportMenuOverlay = (
+      active: boolean,
+      side: OverlaySide,
+      width: number,
+      height: number,
+    ) => {
+      invoke("set_menu_overlay", { active, side, width, height }).catch(
+        (error: unknown) => {
+          console.error("Failed to sync menu overlay hit-test region:", error);
+        },
+      );
     };
 
     if (!menuOpen) {
       colorPickActiveRef.current = false;
-      reportMenuOverlay(false, 0);
+      reportMenuOverlay(false, overlayPreferredSide, 0, 0);
       return;
     }
 
     const measure = () => {
-      reportMenuOverlay(true, menuRef.current?.getBoundingClientRect().height ?? 0);
+      const anchorEl = buttonRef.current;
+      const menuEl = menuRef.current;
+      if (!anchorEl || !menuEl) return;
+
+      const anchorRect = anchorEl.getBoundingClientRect();
+      const menuRect = menuEl.getBoundingClientRect();
+      const resolvedSide = resolveOverlaySide(
+        anchorRect,
+        { width: menuRect.width, height: menuRect.height },
+        overlayPreferredSide,
+        TOOLTIP_GAP_PX,
+      );
+      setMenuSide(resolvedSide);
+      reportMenuOverlay(true, resolvedSide, menuRect.width, menuRect.height);
     };
 
     measure();
@@ -241,42 +280,43 @@ export function DockIcon({
     return () => {
       observer.disconnect();
       colorPickActiveRef.current = false;
-      reportMenuOverlay(false, 0);
+      reportMenuOverlay(false, overlayPreferredSide, 0, 0);
     };
-  }, [menuOpen, app.isActive, app.indicatorColorOverride]);
+  }, [menuOpen, app.isActive, app.indicatorColorOverride, overlayPreferredSide]);
 
-  // Rest-layout center X for the magnify distance curve — re-measured on layout
-  // shifts (DPI, icon count), not on every mousemove frame.
+  // Rest-layout center on the magnify main axis — re-measured on layout shifts
+  // (DPI, icon count), not on every mousemove frame.
   useLayoutEffect(() => {
     const el = buttonRef.current;
     if (!el) return;
 
     const measure = () => {
       const rect = el.getBoundingClientRect();
-      centerX.set(rect.left + rect.width / 2);
+      centerMain.set(measureMagnifyCenter(rect, magnifyAxis));
     };
 
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [centerX]);
+  }, [centerMain, magnifyAxis]);
 
   useLayoutEffect(() => {
     const el = buttonRef.current;
     if (!el || (hoverSessionId === 0 && reorderSettledId === 0)) return;
     const rect = el.getBoundingClientRect();
-    centerX.set(rect.left + rect.width / 2);
-  }, [hoverSessionId, reorderSettledId, centerX]);
+    centerMain.set(measureMagnifyCenter(rect, magnifyAxis));
+  }, [hoverSessionId, reorderSettledId, centerMain, magnifyAxis]);
 
   const magnifyInfluenceRadiusPx = useTransform(iconSizePx, (px) =>
     getSizeMetrics(px).magnifyInfluenceRadiusPx,
   );
   const scaleRaw = useTransform(
-    [mouseX, centerX, magnifyInfluenceRadiusPx],
-    ([mx, cx, radius]: number[]) => {
-      if (!Number.isFinite(mx)) return 1;
-      const distance = mx - cx;
+    [mouseX, mouseY, centerMain, magnifyInfluenceRadiusPx],
+    ([mx, my, cm, radius]: number[]) => {
+      const m = magnifyAxis === "x" ? mx : my;
+      if (!Number.isFinite(m)) return 1;
+      const distance = m - cm;
       const t = Math.abs(distance) / radius;
       if (t >= 1) return 1;
       return 1 + (MAGNIFY_MAX_SCALE - 1) * (1 - t);
@@ -379,22 +419,24 @@ export function DockIcon({
       } ${isHovered || menuOpen ? "z-10" : "z-0"}`}
     >
       <div className="relative shrink-0">
-        <span
-          style={{ marginBottom: TOOLTIP_GAP_PX }}
-          className={`pointer-events-none absolute bottom-full left-1/2 z-20 -translate-x-1/2 whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
+        <DockOverlayAnchor
+          side={overlayPreferredSide}
+          gap={TOOLTIP_GAP_PX}
+          className={`pointer-events-none whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
             isHovered && !menuOpen
               ? "scale-100 opacity-100"
               : "scale-90 opacity-0"
           }`}
         >
           {app.name}
-        </span>
+        </DockOverlayAnchor>
 
         {menuOpen && (
-          <div
-            ref={menuRef}
-            style={{ marginBottom: TOOLTIP_GAP_PX }}
-            className="pointer-events-auto absolute bottom-full left-1/2 z-30 -translate-x-1/2 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
+          <DockOverlayAnchor
+            innerRef={menuRef}
+            side={menuSide}
+            gap={TOOLTIP_GAP_PX}
+            className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
           >
             <button
               type="button"
@@ -503,7 +545,7 @@ export function DockIcon({
                 </button>
               </>
             )}
-          </div>
+          </DockOverlayAnchor>
         )}
 
         {showFallback ? (
@@ -517,7 +559,7 @@ export function DockIcon({
               y: bounceY,
               color: app.indicatorColor,
             }}
-            className="flex origin-bottom items-center justify-center bg-zinc-800 text-lg font-semibold"
+            className={`flex ${magnifyOriginClass} items-center justify-center bg-zinc-800 text-lg font-semibold`}
           >
             {app.name.slice(0, 2).toUpperCase()}
           </motion.div>
@@ -535,7 +577,7 @@ export function DockIcon({
             alt={app.name}
             draggable={false}
             onError={() => setBroken(true)}
-            className="origin-bottom object-contain"
+            className={`${magnifyOriginClass} object-contain`}
           />
         )}
       </div>

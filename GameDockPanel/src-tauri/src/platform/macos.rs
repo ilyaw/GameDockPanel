@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use crate::commands::apps::{AppsState, DockItem};
+use crate::commands::apps::{AppsState, DockItem, MenuOverlaySide, MenuOverlayState};
 use crate::commands::settings::{DockAxis, DockPosition, SettingsState};
 use crate::platform::IconResolveResult;
 
@@ -121,8 +121,91 @@ const CLICK_POLL_MS: u64 = 50;
 /// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts — the gap between the
 /// open context menu's own bottom edge and the icon it hangs off of. Used
 /// to extend the click-through hit-test up through that gap and into the
-/// menu itself (see `AppsState::menu_overlay_height_dip`).
+/// menu itself (see `AppsState::menu_overlay`).
 const MENU_OVERLAY_GAP_DIP: f64 = 16.0;
+
+/// How far a menu extends along the dock thickness vs length axis, given
+/// which side of the anchor icon it opens on.
+fn menu_overlay_axis_extents(
+    position: DockPosition,
+    side: MenuOverlaySide,
+    width_dip: f64,
+    height_dip: f64,
+) -> (f64, f64) {
+    if !side.is_active() {
+        return (0.0, 0.0);
+    }
+    match position.axis() {
+        DockAxis::Horizontal => match side {
+            MenuOverlaySide::Top | MenuOverlaySide::Bottom => {
+                (MENU_OVERLAY_GAP_DIP + height_dip, 0.0)
+            }
+            MenuOverlaySide::Left | MenuOverlaySide::Right => (0.0, MENU_OVERLAY_GAP_DIP + width_dip),
+            MenuOverlaySide::None => (0.0, 0.0),
+        },
+        DockAxis::Vertical => match side {
+            MenuOverlaySide::Left | MenuOverlaySide::Right => {
+                (MENU_OVERLAY_GAP_DIP + width_dip, 0.0)
+            }
+            MenuOverlaySide::Top | MenuOverlaySide::Bottom => {
+                (0.0, MENU_OVERLAY_GAP_DIP + height_dip)
+            }
+            MenuOverlaySide::None => (0.0, 0.0),
+        },
+    }
+}
+
+/// Hit-test pill length/thickness in DIP, including open-menu extensions.
+fn pill_hit_dims_for_cursor(window: &WebviewWindow, dock_hovered: bool) -> (f64, f64) {
+    let position = current_dock_position(window);
+    let icon_size_dip = current_icon_size_dip(window);
+    let pill_thickness_rest_dip = current_pill_thickness_rest_dip(window);
+
+    let (rest_length_dip, _) = {
+        let state = window.state::<AppsState>();
+        let stored_width = *state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stored_height = *state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        axis_css_dims(position.axis(), stored_width, stored_height)
+    };
+
+    let menu_overlay = {
+        let state = window.state::<AppsState>();
+        let guard = state
+            .menu_overlay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard
+    };
+
+    let (menu_thickness_ext, menu_length_ext) = menu_overlay_axis_extents(
+        position,
+        menu_overlay.side,
+        menu_overlay.width_dip,
+        menu_overlay.height_dip,
+    );
+
+    let thickness = if menu_overlay.is_active() {
+        pill_thickness_rest_dip + menu_thickness_ext
+    } else if dock_hovered {
+        pill_thickness_hover_dip(pill_thickness_rest_dip, icon_size_dip)
+    } else {
+        pill_thickness_rest_dip
+    };
+
+    let length = if menu_overlay.is_active() && menu_length_ext > 0.0 {
+        rest_length_dip + menu_length_ext
+    } else {
+        rest_length_dip
+    };
+
+    (length, thickness)
+}
 
 /// Raster export cap for native icon PNGs — sized from icon display metrics
 /// via `icon_export_px`, not a fixed constant.
@@ -153,13 +236,8 @@ struct SizeMetrics {
 /// Named for history (this dock only ever anchored to the bottom when it
 /// was introduced) — still literally "above the pill" for
 /// `DockPosition::Bottom`/`Top`, but for `Left`/`Right` this reserve maps
-/// onto the far side of the *thickness* axis (screen-horizontal) rather
-/// than the true overflow direction, which stays screen-"up" regardless of
-/// orientation (magnify/tooltip direction are unchanged — see
-/// PROMPT_15_POSITION_PHASE1.md's explicitly deferred items). That's a
-/// known, accepted trade-off for this phase: the reserve exists and is
-/// harmless (transparent, click-through) even where it isn't the axis the
-/// real overflow needs.
+/// onto the far side of the *thickness* axis (screen-horizontal) — the
+/// direction magnify/tooltip/menu now grow after Phase 2.
 fn pill_far_reserve_dip(icon_size_dip: f64) -> f64 {
     let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
     let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
@@ -586,27 +664,22 @@ pub fn resize_dock_window_for_pill(
     Ok(changed)
 }
 
-/// Grows the dock window when an open context menu is taller than the
-/// current far reserve — prevents the menu from being clipped by the
-/// webview's `overflow: hidden` boundary. Grows the thickness-axis CSS
-/// dimension (height for Bottom/Top, width for Left/Right), leaving the
-/// length axis untouched. Note: the menu still only ever pops
-/// screen-"up" off its icon (unchanged this phase — see
-/// PROMPT_15_POSITION_PHASE1.md), so on Left/Right this grows the axis
-/// that actually holds the far reserve, not necessarily the one the menu
-/// visually needs; screen-edge collision remains explicitly out of scope.
+/// Grows the dock window when an open context menu exceeds the current far
+/// reserve — prevents the menu from being clipped by the webview's
+/// `overflow: hidden` boundary. Grows the thickness and/or length axis as
+/// needed based on the menu's resolved placement side.
 #[cfg(target_os = "macos")]
 pub fn ensure_window_fits_menu_overlay(
     window: &WebviewWindow,
-    menu_height_dip: f64,
+    overlay: MenuOverlayState,
 ) -> Result<(), String> {
-    if menu_height_dip <= 0.0 {
+    if !overlay.is_active() {
         return Ok(());
     }
 
     let icon_size_dip = current_icon_size_dip(window);
     let position = current_dock_position(window);
-    let pill_thickness_dip = {
+    let (pill_length_dip, pill_thickness_dip) = {
         let state = window.state::<AppsState>();
         let stored_width = *state
             .pill_width_dip
@@ -616,23 +689,36 @@ pub fn ensure_window_fits_menu_overlay(
             .pill_height_dip
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_, stored_thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
-        if stored_thickness > 0.0 {
-            stored_thickness
+        let (length, thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
+        if thickness > 0.0 {
+            (length, thickness)
         } else {
-            size_metrics(icon_size_dip).pill_thickness_dip
+            let metrics = size_metrics(icon_size_dip);
+            (length, metrics.pill_thickness_dip)
         }
     };
+
+    let (menu_thickness_ext, menu_length_ext) = menu_overlay_axis_extents(
+        position,
+        overlay.side,
+        overlay.width_dip,
+        overlay.height_dip,
+    );
 
     let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
     let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
     let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
-    let menu_stack_dip = MENU_OVERLAY_GAP_DIP + menu_height_dip;
+    let menu_stack_on_thickness = if menu_thickness_ext > 0.0 {
+        menu_thickness_ext
+    } else {
+        MENU_OVERLAY_GAP_DIP + overlay.height_dip
+    };
     let far_reserve_dip = magnify_height_overflow_dip
         .max(TOOLTIP_GAP_DIP + TOOLTIP_HEIGHT_DIP)
-        .max(menu_stack_dip)
+        .max(menu_stack_on_thickness)
         - dock_padding_y_dip;
     let target_thickness_dip = DOCK_EDGE_INSET_DIP + pill_thickness_dip + far_reserve_dip;
+    let target_length_dip = window_length_dip(pill_length_dip, icon_size_dip) + menu_length_ext;
 
     let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
     let inner = window.inner_size().map_err(|e| e.to_string())?;
@@ -641,12 +727,17 @@ pub fn ensure_window_fits_menu_overlay(
     let (current_length_dip, current_thickness_dip) =
         axis_css_dims(position.axis(), current_width_dip, current_height_dip);
 
-    if target_thickness_dip <= current_thickness_dip + 0.5 {
+    let final_length_dip = current_length_dip.max(target_length_dip);
+    let final_thickness_dip = current_thickness_dip.max(target_thickness_dip);
+
+    if final_length_dip <= current_length_dip + 0.5
+        && final_thickness_dip <= current_thickness_dip + 0.5
+    {
         return Ok(());
     }
 
     let (target_width_dip, target_height_dip) =
-        axis_css_dims(position.axis(), current_length_dip, target_thickness_dip);
+        axis_css_dims(position.axis(), final_length_dip, final_thickness_dip);
     set_window_frame_instant(window, target_width_dip, target_height_dip, position)?;
     Ok(())
 }
@@ -802,26 +893,15 @@ fn pill_cursor_at_screen(
     window: &WebviewWindow,
     screen_x: i32,
     screen_y: i32,
-    pill_thickness_dip: f64,
+    dock_hovered: bool,
 ) -> Option<DockCursorPayload> {
     let scale = window.scale_factor().ok()?;
     let outer_pos = window.outer_position().ok()?;
     let outer_size = window.outer_size().ok()?;
     let position = current_dock_position(window);
 
-    let pill_length_dip = {
-        let state = window.state::<AppsState>();
-        let stored_width = *state
-            .pill_width_dip
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let stored_height = *state
-            .pill_height_dip
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (length, _thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
-        length
-    };
+    let (pill_length_dip, pill_thickness_dip) =
+        pill_hit_dims_for_cursor(window, dock_hovered);
 
     let (pill_w_dip, pill_h_dip) =
         axis_css_dims(position.axis(), pill_length_dip, pill_thickness_dip);
@@ -981,18 +1061,11 @@ fn start_dock_click_tap(window: WebviewWindow) {
                             if let Ok(cursor) = window.cursor_position() {
                                 let cursor_x = cursor.x.round() as i32;
                                 let cursor_y = cursor.y.round() as i32;
-                                let pill_thickness_rest_dip =
-                                    current_pill_thickness_rest_dip(&window);
-                                let icon_size_dip = current_icon_size_dip(&window);
-                                let pill_thickness_hover = pill_thickness_hover_dip(
-                                    pill_thickness_rest_dip,
-                                    icon_size_dip,
-                                );
                                 if let Some(payload) = pill_cursor_at_screen(
                                     &window,
                                     cursor_x,
                                     cursor_y,
-                                    pill_thickness_hover,
+                                    true,
                                 ) {
                                     let _ = window.emit("dock-click", payload);
                                 }
@@ -1067,32 +1140,7 @@ fn start_click_through_poller(window: WebviewWindow) {
             let cursor_x = cursor.x.round() as i32;
             let cursor_y = cursor.y.round() as i32;
 
-            let menu_overlay_height_dip = {
-                let state = window.state::<AppsState>();
-                let guard = state
-                    .menu_overlay_height_dip
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *guard
-            };
-
-            let pill_thickness_rest_dip = current_pill_thickness_rest_dip(&window);
-
-            // While a `DockIcon` context menu is open, the hit-test rect has
-            // to reach all the way through it — the menu can render much
-            // larger than the fixed magnify-overflow band below, and any
-            // smaller test here means the OS re-engages click-through under
-            // the cursor before it reaches the far menu rows, making them
-            // permanently unreachable (see `AppsState::menu_overlay_height_dip`).
-            let pill_thickness_dip = if menu_overlay_height_dip > 0.0 {
-                pill_thickness_rest_dip + MENU_OVERLAY_GAP_DIP + menu_overlay_height_dip
-            } else if dock_hovered {
-                pill_thickness_hover_dip(pill_thickness_rest_dip, current_icon_size_dip(&window))
-            } else {
-                pill_thickness_rest_dip
-            };
-            let pill_cursor =
-                pill_cursor_at_screen(&window, cursor_x, cursor_y, pill_thickness_dip);
+            let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y, dock_hovered);
             let in_pill = pill_cursor.is_some();
 
             if in_pill != dock_hovered {
