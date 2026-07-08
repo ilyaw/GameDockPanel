@@ -13,10 +13,13 @@ import { FolderOpen, Minus, Power, Trash2 } from "lucide-react";
 import type { DockApp } from "../lib/types";
 import {
   ICON_CORNER_RADIUS_RATIO,
+  LED_EDGE_DOT_PX,
+  LED_EDGE_INSET_FROM_PILL_PX,
   MAGNIFY_MAX_SCALE,
   TOOLTIP_GAP_PX,
   getSizeMetrics,
 } from "../lib/constants";
+import type { LedAxis } from "../hooks/useDockOrientation";
 import {
   magnifyOriginClassName,
   measureMagnifyCenter,
@@ -76,6 +79,10 @@ interface DockIconProps {
   magnifyAxis: MagnifyAxis;
   magnifyTransformOrigin: MagnifyTransformOrigin;
   overlayPreferredSide: OverlaySide;
+  /** `horizontal` under the icon, `vertical` beside it toward the screen edge. */
+  ledAxis?: LedAxis;
+  /** When `ledAxis` is `vertical`, LED renders before the icon (`left` dock). */
+  ledBeforeIcon?: boolean;
   isHovered?: boolean;
   /**
    * Bumped by `DockPanel` at the start of every hover session (pill
@@ -135,6 +142,8 @@ export function DockIcon({
   magnifyAxis,
   magnifyTransformOrigin,
   overlayPreferredSide,
+  ledAxis = "horizontal",
+  ledBeforeIcon = false,
   isHovered = false,
   hoverSessionId = 0,
   reorderSettledId = 0,
@@ -410,6 +419,213 @@ export function DockIcon({
   // same fallback badge as a broken/failed `<img>` load.
   const showFallback = broken || !app.iconUrl;
 
+  const edgeLedOffsetPx = useTransform(iconSizePx, (px) => {
+    const pad = getSizeMetrics(px, { ledAlongThickness: false }).dockPaddingYPx;
+    return Math.max(0, pad - LED_EDGE_INSET_FROM_PILL_PX - LED_EDGE_DOT_PX / 2);
+  });
+  const edgeLedInsetPx = useTransform(edgeLedOffsetPx, (offset) => -offset);
+
+  const horizontalLedBar = (
+    <span
+      style={{ color: app.indicatorColor }}
+      className={`h-[3px] w-6 shrink-0 rounded-full bg-current transition-all duration-300 ease-out ${
+        app.isActive
+          ? `opacity-100 ${
+              animationsEnabled
+                ? "animate-led-pulse"
+                : "shadow-[0_0_10px_2px_currentColor]"
+            }`
+          : "scale-0 text-transparent opacity-0"
+      }`}
+    />
+  );
+
+  const edgeLedDot =
+    ledAxis === "vertical" ? (
+      <motion.span
+        aria-hidden={!app.isActive}
+        style={{
+          color: app.indicatorColor,
+          width: LED_EDGE_DOT_PX,
+          height: LED_EDGE_DOT_PX,
+          top: "50%",
+          y: "-50%",
+          ...(ledBeforeIcon ? { left: edgeLedInsetPx } : { right: edgeLedInsetPx }),
+        }}
+        className={`pointer-events-none absolute z-10 rounded-full bg-current transition-all duration-300 ease-out ${
+          app.isActive
+            ? `opacity-100 ${
+                animationsEnabled
+                  ? "animate-led-pulse"
+                  : "shadow-[0_0_10px_2px_currentColor]"
+              }`
+            : "scale-0 opacity-0"
+        }`}
+      />
+    ) : null;
+
+  const iconNode = (
+    <div className="relative shrink-0">
+      {edgeLedDot}
+      <DockOverlayAnchor
+        side={overlayPreferredSide}
+        gap={TOOLTIP_GAP_PX}
+        className={`pointer-events-none whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
+          isHovered && !menuOpen
+            ? "scale-100 opacity-100"
+            : "scale-90 opacity-0"
+        }`}
+      >
+        {app.name}
+      </DockOverlayAnchor>
+
+      {menuOpen && (
+        <DockOverlayAnchor
+          innerRef={menuRef}
+          side={menuSide}
+          gap={TOOLTIP_GAP_PX}
+          className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(false);
+              onShowInFinder?.(app.bundleId);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            Show in Finder
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(false);
+              onRemove?.(app.bundleId);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Remove from Dock
+          </button>
+
+          <div className="h-px bg-zinc-700/70" />
+
+          <button
+            type="button"
+            disabled={separatorsFull}
+            onClick={() => {
+              setMenuOpen(false);
+              onInsertSeparatorBefore?.(app.bundleId);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Minus className="h-3.5 w-3.5" />
+            Разделитель слева
+          </button>
+
+          <button
+            type="button"
+            disabled={separatorsFull}
+            onClick={() => {
+              setMenuOpen(false);
+              onInsertSeparatorAfter?.(app.bundleId);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Minus className="h-3.5 w-3.5" />
+            Разделитель справа
+          </button>
+
+          <div className="h-px bg-zinc-700/70" />
+
+          <div className="flex items-center justify-between gap-3 px-3 py-1.5">
+            <span className="text-zinc-300">Цвет индикатора</span>
+            <input
+              type="color"
+              value={app.indicatorColorOverride ?? app.indicatorColorAuto}
+              onPointerDown={() => {
+                colorPickActiveRef.current = true;
+              }}
+              onBlur={() => {
+                colorPickActiveRef.current = false;
+              }}
+              onChange={(event) => {
+                colorPickActiveRef.current = false;
+                onSetIndicatorColor?.(app.bundleId, event.target.value);
+              }}
+              className="h-7 w-7 cursor-pointer rounded border border-zinc-600 bg-transparent p-0"
+              aria-label={`Цвет индикатора для ${app.name}`}
+            />
+          </div>
+          {app.indicatorColorOverride && (
+            <button
+              type="button"
+              onClick={() => {
+                onSetIndicatorColor?.(app.bundleId, null);
+              }}
+              className="flex w-full items-center px-3 py-1.5 text-left text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              Сбросить к авто
+            </button>
+          )}
+
+          {app.isActive && (
+            <>
+              <div className="h-px bg-zinc-700/70" />
+
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onQuit?.(app.bundleId);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+              >
+                <Power className="h-3.5 w-3.5" />
+                Quit
+              </button>
+            </>
+          )}
+        </DockOverlayAnchor>
+      )}
+
+      {showFallback ? (
+        <motion.div
+          ref={(el) => registerRef?.(app.id, el)}
+          style={{
+            width: iconWidth,
+            height: iconHeight,
+            borderRadius: iconCornerRadius,
+            scale: magnifySuppressed ? 1 : scale,
+            y: bounceY,
+            color: app.indicatorColor,
+          }}
+          className={`flex ${magnifyOriginClass} items-center justify-center bg-zinc-800 text-lg font-semibold`}
+        >
+          {app.name.slice(0, 2).toUpperCase()}
+        </motion.div>
+      ) : (
+        <motion.img
+          ref={(el) => registerRef?.(app.id, el)}
+          style={{
+            width: iconWidth,
+            height: iconHeight,
+            borderRadius: iconCornerRadius,
+            scale: magnifySuppressed ? 1 : scale,
+            y: bounceY,
+          }}
+          src={app.iconUrl ?? undefined}
+          alt={app.name}
+          draggable={false}
+          onError={() => setBroken(true)}
+          className={`${magnifyOriginClass} object-contain`}
+        />
+      )}
+    </div>
+  );
+
   return (
     // A `<div>`, not `<button>`: it now has to contain the "Remove from
     // Dock" menu's own real `<button>`, and nested `<button>`s are invalid
@@ -428,186 +644,14 @@ export function DockIcon({
         event.preventDefault();
         setMenuOpen(true);
       }}
-      className={`relative flex flex-col items-center gap-2 outline-none ${
-        isDragging ? "cursor-grabbing" : "cursor-grab"
-      } ${isHovered || menuOpen ? "z-10" : "z-0"}`}
+      className={`relative flex flex-col items-center outline-none ${
+        ledAxis === "horizontal" ? "gap-2" : ""
+      } ${isDragging ? "cursor-grabbing" : "cursor-grab"} ${
+        isHovered || menuOpen ? "z-10" : "z-0"
+      }`}
     >
-      <div className="relative shrink-0">
-        <DockOverlayAnchor
-          side={overlayPreferredSide}
-          gap={TOOLTIP_GAP_PX}
-          className={`pointer-events-none whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
-            isHovered && !menuOpen
-              ? "scale-100 opacity-100"
-              : "scale-90 opacity-0"
-          }`}
-        >
-          {app.name}
-        </DockOverlayAnchor>
-
-        {menuOpen && (
-          <DockOverlayAnchor
-            innerRef={menuRef}
-            side={menuSide}
-            gap={TOOLTIP_GAP_PX}
-            className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
-          >
-            <button
-              type="button"
-              onClick={() => {
-                setMenuOpen(false);
-                onShowInFinder?.(app.bundleId);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
-            >
-              <FolderOpen className="h-3.5 w-3.5" />
-              Show in Finder
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setMenuOpen(false);
-                onRemove?.(app.bundleId);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Remove from Dock
-            </button>
-
-            <div className="h-px bg-zinc-700/70" />
-
-            <button
-              type="button"
-              disabled={separatorsFull}
-              onClick={() => {
-                setMenuOpen(false);
-                onInsertSeparatorBefore?.(app.bundleId);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Minus className="h-3.5 w-3.5" />
-              Разделитель слева
-            </button>
-
-            <button
-              type="button"
-              disabled={separatorsFull}
-              onClick={() => {
-                setMenuOpen(false);
-                onInsertSeparatorAfter?.(app.bundleId);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Minus className="h-3.5 w-3.5" />
-              Разделитель справа
-            </button>
-
-            <div className="h-px bg-zinc-700/70" />
-
-            <div className="flex items-center justify-between gap-3 px-3 py-1.5">
-              <span className="text-zinc-300">Цвет индикатора</span>
-              <input
-                type="color"
-                value={app.indicatorColorOverride ?? app.indicatorColorAuto}
-                onPointerDown={() => {
-                  colorPickActiveRef.current = true;
-                }}
-                onBlur={() => {
-                  colorPickActiveRef.current = false;
-                }}
-                onChange={(event) => {
-                  colorPickActiveRef.current = false;
-                  onSetIndicatorColor?.(app.bundleId, event.target.value);
-                }}
-                className="h-7 w-7 cursor-pointer rounded border border-zinc-600 bg-transparent p-0"
-                aria-label={`Цвет индикатора для ${app.name}`}
-              />
-            </div>
-            {app.indicatorColorOverride && (
-              <button
-                type="button"
-                onClick={() => {
-                  onSetIndicatorColor?.(app.bundleId, null);
-                }}
-                className="flex w-full items-center px-3 py-1.5 text-left text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              >
-                Сбросить к авто
-              </button>
-            )}
-
-            {/* Quit terminates the running process (soft `terminate()`) and
-                leaves the dock list untouched — the opposite of Remove,
-                which edits the dock list and never touches the process. Kept
-                alone at the bottom (after a divider) to mirror the real
-                macOS Dock, where Quit is always the last item. */}
-            {app.isActive && (
-              <>
-                <div className="h-px bg-zinc-700/70" />
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    onQuit?.(app.bundleId);
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
-                >
-                  <Power className="h-3.5 w-3.5" />
-                  Quit
-                </button>
-              </>
-            )}
-          </DockOverlayAnchor>
-        )}
-
-        {showFallback ? (
-          <motion.div
-            ref={(el) => registerRef?.(app.id, el)}
-            style={{
-              width: iconWidth,
-              height: iconHeight,
-              borderRadius: iconCornerRadius,
-              scale: magnifySuppressed ? 1 : scale,
-              y: bounceY,
-              color: app.indicatorColor,
-            }}
-            className={`flex ${magnifyOriginClass} items-center justify-center bg-zinc-800 text-lg font-semibold`}
-          >
-            {app.name.slice(0, 2).toUpperCase()}
-          </motion.div>
-        ) : (
-          <motion.img
-            ref={(el) => registerRef?.(app.id, el)}
-            style={{
-              width: iconWidth,
-              height: iconHeight,
-              borderRadius: iconCornerRadius,
-              scale: magnifySuppressed ? 1 : scale,
-              y: bounceY,
-            }}
-            src={app.iconUrl ?? undefined}
-            alt={app.name}
-            draggable={false}
-            onError={() => setBroken(true)}
-            className={`${magnifyOriginClass} object-contain`}
-          />
-        )}
-      </div>
-
-      <span
-        style={{ color: app.indicatorColor }}
-        className={`h-[3px] w-6 rounded-full bg-current transition-all duration-300 ease-out ${
-          app.isActive
-            ? `opacity-100 ${
-                animationsEnabled
-                  ? "animate-led-pulse"
-                  : "shadow-[0_0_10px_2px_currentColor]"
-              }`
-            : "scale-0 text-transparent opacity-0"
-        }`}
-      />
+      {iconNode}
+      {ledAxis === "horizontal" ? horizontalLedBar : null}
     </div>
   );
 }

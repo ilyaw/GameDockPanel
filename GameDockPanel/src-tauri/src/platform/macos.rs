@@ -260,15 +260,19 @@ fn window_thickness_dip(pill_thickness_dip: f64, icon_size_dip: f64) -> f64 {
     DOCK_EDGE_INSET_DIP + pill_thickness_dip + pill_far_reserve_dip(icon_size_dip)
 }
 
-fn size_metrics(icon_size_dip: f64) -> SizeMetrics {
+fn size_metrics(icon_size_dip: f64, position: DockPosition) -> SizeMetrics {
     let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
     let dock_gap_dip = (BASE_DOCK_GAP_DIP * scale).round();
     let dock_padding_x_dip = (BASE_DOCK_PADDING_X_DIP * scale).round();
     let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
     let icon_led_gap_dip = (BASE_ICON_LED_GAP_DIP * scale).round();
 
-    let pill_thickness_dip =
-        dock_padding_y_dip * 2.0 + icon_size_dip + icon_led_gap_dip + LED_HEIGHT_DIP;
+    let led_along_thickness = matches!(position, DockPosition::Bottom | DockPosition::Top);
+    let pill_thickness_dip = if led_along_thickness {
+        dock_padding_y_dip * 2.0 + icon_size_dip + icon_led_gap_dip + LED_HEIGHT_DIP
+    } else {
+        dock_padding_y_dip * 2.0 + icon_size_dip
+    };
 
     SizeMetrics {
         dock_gap_dip,
@@ -292,8 +296,8 @@ fn pill_thickness_hover_dip(pill_thickness_rest_dip: f64, icon_size_dip: f64) ->
 /// Pill size along the length axis (grows/shrinks with item count) — maps
 /// onto CSS width for `DockPosition::Bottom`/`Top`, CSS height for
 /// `Left`/`Right`. Mirrors `pillLengthPx` in src/lib/constants.ts.
-fn pill_length_dip(entries: &[DockItem], icon_size_dip: f64) -> f64 {
-    let metrics = size_metrics(icon_size_dip);
+fn pill_length_dip(entries: &[DockItem], icon_size_dip: f64, position: DockPosition) -> f64 {
+    let metrics = size_metrics(icon_size_dip, position);
     let mut row_length = 0.0;
     for (index, item) in entries.iter().enumerate() {
         if index > 0 {
@@ -333,8 +337,8 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     let icon_size_dip = current_icon_size_dip(&window);
     let position = current_dock_position(&window);
     let entries = app.state::<AppsState>().entries_snapshot();
-    let pill_length = pill_length_dip(&entries, icon_size_dip);
-    let metrics = size_metrics(icon_size_dip);
+    let pill_length = pill_length_dip(&entries, icon_size_dip, position);
+    let metrics = size_metrics(icon_size_dip, position);
     let (pill_width, pill_height) =
         axis_css_dims(position.axis(), pill_length, metrics.pill_thickness_dip);
     let window_length = window_length_dip(pill_length, icon_size_dip);
@@ -714,7 +718,7 @@ pub fn ensure_window_fits_menu_overlay(
         if thickness > 0.0 {
             (length, thickness)
         } else {
-            let metrics = size_metrics(icon_size_dip);
+            let metrics = size_metrics(icon_size_dip, position);
             (length, metrics.pill_thickness_dip)
         }
     };
@@ -773,8 +777,8 @@ pub fn resize_dock_window_for_app_count(
 ) -> Result<bool, String> {
     let icon_size_dip = current_icon_size_dip(window);
     let position = current_dock_position(window);
-    let pill_length = pill_length_dip(entries, icon_size_dip);
-    let pill_thickness = size_metrics(icon_size_dip).pill_thickness_dip;
+    let pill_length = pill_length_dip(entries, icon_size_dip, position);
+    let pill_thickness = size_metrics(icon_size_dip, position).pill_thickness_dip;
     let (pill_width, pill_height) = axis_css_dims(position.axis(), pill_length, pill_thickness);
     resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)
 }

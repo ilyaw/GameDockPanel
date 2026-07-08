@@ -6,6 +6,9 @@ import type {
 } from "../lib/dockPlacement";
 import type { DockPosition } from "../lib/types";
 
+/** Bar orientation for the running-app LED dot. */
+export type LedAxis = "horizontal" | "vertical";
+
 /**
  * Single source of truth for how `DockPosition` maps onto layout — Phase 1
  * of the positioning initiative (see PROMPT_15_POSITION_PHASE1.md).
@@ -25,6 +28,12 @@ export interface DockOrientation {
   magnifyTransformOrigin: MagnifyTransformOrigin;
   /** Default tooltip/menu side before viewport collision flip. */
   overlayPreferredSide: OverlaySide;
+  /** `horizontal` — bar under the icon (`bottom`/`top`); `vertical` — bar
+   * beside the icon toward the screen edge (`left`/`right`). */
+  ledAxis: LedAxis;
+  /** When `ledAxis` is `vertical`, render the LED before the icon (`left`
+   * dock) or after it (`right` dock). Ignored for horizontal docks. */
+  ledBeforeIcon: boolean;
   /**
    * Classes for the full-screen window-anchor wrapper: flex direction +
    * near-edge `justify-*` (which side the dock is pinned to) + `items-center`
@@ -63,6 +72,8 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     magnifyAxis: "x",
     magnifyTransformOrigin: "bottom",
     overlayPreferredSide: "top",
+    ledAxis: "horizontal",
+    ledBeforeIcon: false,
     wrapperClassName: "flex-col justify-end items-center pb-2",
     pillClassName: "flex-row items-end",
   },
@@ -72,6 +83,8 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     magnifyAxis: "x",
     magnifyTransformOrigin: "top",
     overlayPreferredSide: "bottom",
+    ledAxis: "horizontal",
+    ledBeforeIcon: false,
     wrapperClassName: "flex-col justify-start items-center pt-2",
     pillClassName: "flex-row items-end",
   },
@@ -81,6 +94,8 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     magnifyAxis: "y",
     magnifyTransformOrigin: "left",
     overlayPreferredSide: "right",
+    ledAxis: "vertical",
+    ledBeforeIcon: true,
     wrapperClassName: "flex-row justify-start items-center pl-2",
     pillClassName: "flex-col items-center",
   },
@@ -90,6 +105,8 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     magnifyAxis: "y",
     magnifyTransformOrigin: "right",
     overlayPreferredSide: "left",
+    ledAxis: "vertical",
+    ledBeforeIcon: false,
     wrapperClassName: "flex-row justify-end items-center pr-2",
     pillClassName: "flex-col items-center",
   },

@@ -120,6 +120,12 @@ export const LAUNCH_BOUNCE_AMPLITUDE_RATIO = 0.55;
  * in src-tauri/src/platform/macos.rs. */
 export const DOCK_EDGE_INSET_PX = 8;
 export const LED_HEIGHT_PX = 3;
+/** Edge-running-app dot for `left`/`right` docks — painted into the pill's
+ * near-edge padding, not beside the icon in the flex flow. */
+export const LED_EDGE_DOT_PX = 6;
+/** Min inset of the dot center from the pill's inner near-edge (max toward
+ * the screen edge without leaving the dock panel). */
+export const LED_EDGE_INSET_FROM_PILL_PX = 3;
 /** Mirrors the vertical divider between the app icons and the settings
  * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
 export const DOCK_DIVIDER_WIDTH_PX = 9;
@@ -202,8 +208,9 @@ export interface SizeMetrics {
    * see `LAUNCH_BOUNCE_AMPLITUDE_RATIO` for why this is derived from
    * `magnifyHeightOverflowPx` rather than its own independent constant. */
   launchBounceAmplitudePx: number;
-  /** Pill's thickness-axis size at rest: py + icon + gap + LED; magnify
-   * overflows past it on the far side (see `pillFarReservePx`). */
+  /** Pill's thickness-axis size at rest. When the LED sits under the icon
+   * (`ledAlongThickness`), thickness includes gap + bar; for edge dots on
+   * `left`/`right` the dot is absolutely positioned in padding instead. */
   pillThicknessPx: number;
   /** Native hit-test band past the pill's near edge (magnify overflow, not
    * the CSS thickness itself). */
@@ -227,7 +234,11 @@ export interface SizeMetrics {
   windowThicknessDip: number;
 }
 
-export function getSizeMetrics(iconSizePx: number): SizeMetrics {
+export function getSizeMetrics(
+  iconSizePx: number,
+  options?: { ledAlongThickness?: boolean },
+): SizeMetrics {
+  const ledAlongThickness = options?.ledAlongThickness ?? true;
   const scale = iconSizePx / BASE_ICON_SIZE_PX;
   const dockGapPx = BASE_DOCK_GAP_PX * scale;
   const dockPaddingXPx = BASE_DOCK_PADDING_X_PX * scale;
@@ -239,7 +250,9 @@ export function getSizeMetrics(iconSizePx: number): SizeMetrics {
   const launchBounceAmplitudePx =
     magnifyHeightOverflowPx * LAUNCH_BOUNCE_AMPLITUDE_RATIO;
 
-  const pillThicknessPx = dockPaddingYPx * 2 + iconSizePx + iconLedGapPx + LED_HEIGHT_PX;
+  const pillThicknessPx = ledAlongThickness
+    ? dockPaddingYPx * 2 + iconSizePx + iconLedGapPx + LED_HEIGHT_PX
+    : dockPaddingYPx * 2 + iconSizePx;
   const pillThicknessHoverPx = pillThicknessPx + magnifyHeightOverflowPx;
 
   const pillFarReservePx =

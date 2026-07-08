@@ -245,11 +245,12 @@ export function DockPanel() {
   const iconSizeSyncedRef = useRef(false);
   const geometrySyncRafRef = useRef(0);
   const scheduleGeometrySyncRef = useRef<(() => void) | null>(null);
+  const ledAlongThickness = orientation.ledAxis === "horizontal";
   /** Static layout numbers for the first paint — guarantees a non-zero pill
    * rect before Motion values land in the DOM. */
   const restMetrics = useMemo(
-    () => getSizeMetrics(settings.iconSizePx),
-    [settings.iconSizePx],
+    () => getSizeMetrics(settings.iconSizePx, { ledAlongThickness }),
+    [settings.iconSizePx, ledAlongThickness],
   );
 
   useEffect(() => {
@@ -279,9 +280,8 @@ export function DockPanel() {
     };
   }, [iconSizeTarget]);
 
-  const pillThicknessPx = useTransform(
-    iconSizeAnimated,
-    (px) => getSizeMetrics(px).pillThicknessPx,
+  const pillThicknessPx = useTransform(iconSizeAnimated, (px) =>
+    getSizeMetrics(px, { ledAlongThickness }).pillThicknessPx,
   );
   const pillGapPx = useTransform(iconSizeAnimated, (px) => getSizeMetrics(px).dockGapPx);
   /**
@@ -1041,6 +1041,8 @@ export function DockPanel() {
                 magnifyAxis={orientation.magnifyAxis}
                 magnifyTransformOrigin={orientation.magnifyTransformOrigin}
                 overlayPreferredSide={orientation.overlayPreferredSide}
+                ledAxis={orientation.ledAxis}
+                ledBeforeIcon={orientation.ledBeforeIcon}
                 isHovered={
                   !isDragging && !isReorderSettling && hoveredIconId === item.id
                 }
@@ -1084,11 +1086,14 @@ export function DockPanel() {
           isVertical={orientation.isVertical}
           className="mx-1"
         />
-        {/* Matches DockIcon's own `flex-col items-center gap-2` shape (icon +
-            gap + LED) with an invisible spacer standing in for the LED — the
-            pill row is `items-end`, so without this the button's bottom
-            (and thus its glyph) lands 11px lower than every app icon's. */}
-        <div className="flex shrink-0 flex-col items-center gap-2">
+        {/* Settings gear — horizontal docks reserve space for the LED bar. */}
+        <div
+          className={`flex shrink-0 ${
+            orientation.ledAxis === "vertical"
+              ? "items-center"
+              : "flex-col items-center gap-2"
+          }`}
+        >
           <motion.div
             ref={settingsSlotRef}
             style={{ height: settingsSlotSizePx, width: settingsSlotSizePx }}
@@ -1148,7 +1153,9 @@ export function DockPanel() {
               </motion.button>
             </motion.div>
           </motion.div>
-          <span aria-hidden className="h-[3px] w-6" />
+          {orientation.ledAxis === "horizontal" ? (
+            <span aria-hidden className="h-[3px] w-6 shrink-0" />
+          ) : null}
         </div>
         {showPanelEffect && (
           // Painted above the icon row (see `.dock-panel-scanline`/

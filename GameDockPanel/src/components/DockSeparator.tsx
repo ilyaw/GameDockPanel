@@ -151,7 +151,7 @@ export function DockSeparator({
       style={isVertical ? { height: DOCK_SEPARATOR_WIDTH_PX } : { width: DOCK_SEPARATOR_WIDTH_PX }}
       className={`relative flex shrink-0 outline-none ${
         isVertical
-          ? "flex-col items-center justify-center self-center"
+          ? "items-center justify-center self-center"
           : "items-end justify-center self-end"
       } ${isDragging ? "cursor-grabbing" : "cursor-grab"} ${menuOpen ? "z-10" : "z-0"}`}
     >
