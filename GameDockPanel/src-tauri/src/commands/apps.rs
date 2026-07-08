@@ -298,6 +298,21 @@ impl MenuOverlayState {
     }
 }
 
+/// Pre-zoom window frame saved per AX window key — toggled back on repeat
+/// double-click, mirroring macOS Dock zoom behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct SavedWindowFrame {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Default)]
+pub struct ZoomState {
+    pub saved_frames: Mutex<HashMap<String, SavedWindowFrame>>,
+}
+
 #[derive(Default)]
 pub struct AppsState {
     pub entries: Mutex<Vec<DockItem>>,
@@ -571,6 +586,11 @@ pub fn get_apps_snapshot(app: AppHandle, state: State<AppsState>) -> Vec<DockIte
 #[tauri::command]
 pub fn launch_or_activate_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
     platform::activate_or_launch_app(app, bundle_id)
+}
+
+#[tauri::command]
+pub fn zoom_app_above_dock(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    platform::zoom_app_above_dock(app, bundle_id)
 }
 
 #[tauri::command]

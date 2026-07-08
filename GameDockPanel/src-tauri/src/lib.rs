@@ -8,10 +8,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(commands::apps::AppsState::default())
+        .manage(commands::apps::ZoomState::default())
         .manage(commands::settings::SettingsState::default())
         .invoke_handler(tauri::generate_handler![
             commands::apps::get_apps_snapshot,
             commands::apps::launch_or_activate_app,
+            commands::apps::zoom_app_above_dock,
             commands::apps::add_app_from_path,
             commands::apps::remove_app,
             commands::apps::reorder_apps,

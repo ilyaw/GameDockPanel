@@ -281,7 +281,9 @@ function HydratedDockPanel({
 }) {
   const {
     items,
+    itemsRef,
     activateApp,
+    zoomApp,
     bouncingIds,
     reorderItems,
     commitReorder,
@@ -702,6 +704,20 @@ function HydratedDockPanel({
         }),
       );
 
+      unlisteners.push(
+        await listen<DockCursorPayload>("dock-double-click", (event) => {
+          if (isDraggingRef.current || isReorderSettlingRef.current) return;
+          const { x, y } = event.payload;
+          const id = hitTestIcon(iconRefs.current, x, y);
+          if (!id) return;
+          const app = itemsRef.current.find(
+            (candidate): candidate is Extract<DockItem, { type: "app" }> =>
+              isDockAppItem(candidate) && candidate.id === id,
+          );
+          if (app?.isActive) zoomApp(app.bundleId);
+        }),
+      );
+
       if (cancelled) {
         for (const unlisten of unlisteners) {
           unlisten();
@@ -715,7 +731,7 @@ function HydratedDockPanel({
         unlisten();
       }
     };
-  }, [activateApp, mouseX, mouseY, applyCursor, enterDock]);
+  }, [activateApp, zoomApp, itemsRef, mouseX, mouseY, applyCursor, enterDock]);
 
   useEffect(() => {
     if (rejectPulseKey === 0) return;

@@ -135,6 +135,13 @@ const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
 /// Finder/Remove/color/reset/quit + dividers).
 const CONTEXT_MENU_HEIGHT_DIP: f64 = 214.0;
 const CLICK_POLL_MS: u64 = 50;
+/// Matches `NSEvent.doubleClickInterval` (~500 ms on macOS).
+const DOUBLE_CLICK_INTERVAL_MS: u64 = 500;
+/// Visual gap between a zoomed window edge and the dock pill — mirrors the
+/// small breathing room macOS leaves above the system Dock.
+const ZOOM_DOCK_GAP_PX: i32 = 4;
+/// Frame comparison tolerance when deciding whether a window is already zoomed.
+const ZOOM_FRAME_TOLERANCE_PX: i32 = 4;
 /// Mirrors `TOOLTIP_GAP_PX` in src/lib/constants.ts — the gap between the
 /// open context menu's own bottom edge and the icon it hangs off of. Used
 /// to extend the click-through hit-test up through that gap and into the
@@ -1033,11 +1040,19 @@ fn start_dock_click_tap(window: WebviewWindow) {
         y: i32,
     }
 
+    struct LastTap {
+        at: std::time::Instant,
+        screen_x: i32,
+        screen_y: i32,
+    }
+
     std::thread::spawn(move || {
         let mach_port: Arc<Mutex<Option<CFMachPort>>> = Arc::new(Mutex::new(None));
         let mach_port_cb = Arc::clone(&mach_port);
         let pending_down: Arc<Mutex<Option<PendingDown>>> = Arc::new(Mutex::new(None));
         let pending_down_cb = Arc::clone(&pending_down);
+        let last_tap: Arc<Mutex<Option<LastTap>>> = Arc::new(Mutex::new(None));
+        let last_tap_cb = Arc::clone(&last_tap);
 
         let tap = match CGEventTap::new(
             CGEventTapLocation::HID,
@@ -1109,7 +1124,38 @@ fn start_dock_click_tap(window: WebviewWindow) {
                                     cursor_y,
                                     true,
                                 ) {
+                                    let scale = window.scale_factor().unwrap_or(2.0);
+                                    let icon_tol = (current_icon_size_dip(&window) * scale * 1.5)
+                                        .round()
+                                        .max(24.0) as i32;
+                                    let is_double = match last_tap_cb.lock() {
+                                        Ok(mut guard) => {
+                                            let now = std::time::Instant::now();
+                                            let double = guard.as_ref().is_some_and(|prev| {
+                                                now.duration_since(prev.at)
+                                                    < std::time::Duration::from_millis(
+                                                        DOUBLE_CLICK_INTERVAL_MS,
+                                                    )
+                                                    && (prev.screen_x - cursor_x).abs() <= icon_tol
+                                                    && (prev.screen_y - cursor_y).abs() <= icon_tol
+                                            });
+                                            if double {
+                                                *guard = None;
+                                            } else {
+                                                *guard = Some(LastTap {
+                                                    at: now,
+                                                    screen_x: cursor_x,
+                                                    screen_y: cursor_y,
+                                                });
+                                            }
+                                            double
+                                        }
+                                        Err(_) => false,
+                                    };
                                     let _ = window.emit("dock-click", payload);
+                                    if is_double {
+                                        let _ = window.emit("dock-double-click", payload);
+                                    }
                                 }
                             }
                         }
@@ -1823,6 +1869,595 @@ pub fn resolve_bundle_id_from_path(path: &str) -> Result<String, String> {
     Ok(bundle_id.to_string())
 }
 
+// ── Dock-aware window zoom (double-click on running app) ───────────────────
+
+/// Screen-space rectangle in Tauri physical pixels (global top-left origin).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScreenRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl ScreenRect {
+    fn right(&self) -> i32 {
+        self.x + self.width
+    }
+
+    fn bottom(&self) -> i32 {
+        self.y + self.height
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+type AxUiElementRef = *mut std::ffi::c_void;
+type CfTypeRef = *const std::ffi::c_void;
+
+const K_AX_ERROR_SUCCESS: i32 = 0;
+const K_AX_VALUE_CGPOINT_TYPE: u32 = 1;
+const K_AX_VALUE_CGSIZE_TYPE: u32 = 2;
+
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXUIElementCreateApplication(pid: i32) -> AxUiElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AxUiElementRef,
+        attribute: CfTypeRef,
+        value: *mut CfTypeRef,
+    ) -> i32;
+    fn AXUIElementSetAttributeValue(
+        element: AxUiElementRef,
+        attribute: CfTypeRef,
+        value: CfTypeRef,
+    ) -> i32;
+    fn AXIsProcessTrustedWithOptions(options: CfTypeRef) -> bool;
+    fn AXValueCreate(value_type: u32, value_ptr: *const std::ffi::c_void) -> CfTypeRef;
+    fn AXValueGetValue(value: CfTypeRef, value_type: u32, value_ptr: *mut std::ffi::c_void) -> bool;
+    fn CFRelease(cf: CfTypeRef);
+}
+
+#[cfg(target_os = "macos")]
+fn primary_cocoa_height_points(mtm: objc2::MainThreadMarker) -> f64 {
+    use objc2_app_kit::NSScreen;
+
+    NSScreen::mainScreen(mtm)
+        .map(|screen| screen.frame().size.height)
+        .unwrap_or(0.0)
+}
+
+#[cfg(target_os = "macos")]
+fn cfstring_attr(name: &str) -> core_foundation::string::CFString {
+    core_foundation::string::CFString::new(name)
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_ax_trusted() -> Result<(), String> {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+
+    let key = cfstring_attr("AXTrustedCheckOptionPrompt");
+    let prompt = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(key, prompt)]);
+    let trusted =
+        unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as CfTypeRef) };
+    if trusted {
+        Ok(())
+    } else {
+        Err(
+            "enable Accessibility for GameDockPanel in System Settings → Privacy & Security → Accessibility"
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn nsscreen_visible_tauri(screen: &objc2_app_kit::NSScreen, primary_cocoa_h: f64) -> ScreenRect {
+    let frame = screen.frame();
+    let visible = screen.visibleFrame();
+    let backing = screen.backingScaleFactor();
+
+    let x = (visible.origin.x * backing).round() as i32;
+    let width = (visible.size.width * backing).round() as i32;
+    let height = (visible.size.height * backing).round() as i32;
+    let y = (primary_cocoa_h * backing
+        - visible.origin.y * backing
+        - visible.size.height * backing)
+        .round() as i32;
+
+    // Silence unused `frame` when visible spans the full screen height.
+    let _ = frame;
+
+    ScreenRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn visible_frame_tauri_for_monitor(
+    monitor: &tauri::Monitor,
+    mtm: objc2::MainThreadMarker,
+) -> ScreenRect {
+    use objc2_app_kit::NSScreen;
+
+    let primary_cocoa_h = primary_cocoa_height_points(mtm);
+    let mon_size = monitor.size();
+    let mon_pos = monitor.position();
+    let scale = monitor.scale_factor();
+
+    for screen in NSScreen::screens(mtm).iter() {
+        let frame = screen.frame();
+        let backing = screen.backingScaleFactor();
+        let screen_w = (frame.size.width * backing).round() as u32;
+        let screen_h = (frame.size.height * backing).round() as u32;
+        let screen_x = (frame.origin.x * backing).round() as i32;
+        let screen_y = (primary_cocoa_h * backing
+            - frame.origin.y * backing
+            - frame.size.height * backing)
+            .round() as i32;
+
+        if screen_w == mon_size.width
+            && screen_h == mon_size.height
+            && screen_x == mon_pos.x
+            && (screen_y - mon_pos.y).abs() <= 2
+        {
+            return nsscreen_visible_tauri(&screen, primary_cocoa_h);
+        }
+    }
+
+    // Fallback when no NSScreen match — menu bar only, no system-dock guess.
+    let menu_bar = (25.0 * scale).round() as i32;
+    ScreenRect {
+        x: mon_pos.x,
+        y: mon_pos.y + menu_bar,
+        width: mon_size.width as i32,
+        height: mon_size.height as i32 - menu_bar,
+    }
+}
+
+/// Shrinks the NSScreen `visibleFrame` (menu bar + system dock already
+/// excluded) so the near edge stops above/outside the GameDockPanel pill.
+#[cfg(target_os = "macos")]
+fn shrink_visible_for_dock(
+    visible: ScreenRect,
+    pill_left: i32,
+    pill_top: i32,
+    pill_right: i32,
+    pill_bottom: i32,
+    position: DockPosition,
+    gap: i32,
+) -> Option<ScreenRect> {
+    match position {
+        DockPosition::Bottom => {
+            let bottom = pill_top.saturating_sub(gap);
+            let height = bottom.saturating_sub(visible.y);
+            if height < 32 {
+                return None;
+            }
+            Some(ScreenRect {
+                x: visible.x,
+                y: visible.y,
+                width: visible.width,
+                height,
+            })
+        }
+        DockPosition::Top => {
+            let top = pill_bottom.saturating_add(gap);
+            let bottom = visible.bottom();
+            let height = bottom.saturating_sub(top);
+            if height < 32 {
+                return None;
+            }
+            Some(ScreenRect {
+                x: visible.x,
+                y: top,
+                width: visible.width,
+                height,
+            })
+        }
+        DockPosition::Left => {
+            let left = pill_right.saturating_add(gap);
+            let right = visible.right();
+            let width = right.saturating_sub(left);
+            if width < 32 {
+                return None;
+            }
+            Some(ScreenRect {
+                x: left,
+                y: visible.y,
+                width,
+                height: visible.height,
+            })
+        }
+        DockPosition::Right => {
+            let right = pill_left.saturating_sub(gap);
+            let width = right.saturating_sub(visible.x);
+            if width < 32 {
+                return None;
+            }
+            Some(ScreenRect {
+                x: visible.x,
+                y: visible.y,
+                width,
+                height: visible.height,
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_pill_screen_rect(window: &WebviewWindow) -> Result<(i32, i32, i32, i32), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let outer_pos = window.outer_position().map_err(|e| e.to_string())?;
+    let outer_size = window.outer_size().map_err(|e| e.to_string())?;
+    let position = current_dock_position(window);
+    let pill_thickness = current_pill_thickness_rest_dip(window);
+    let state = window.state::<AppsState>();
+    let stored_width = *state
+        .pill_width_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let stored_height = *state
+        .pill_height_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (pill_length_dip, _) = axis_css_dims(position.axis(), stored_width, stored_height);
+    let (pill_w_dip, pill_h_dip) =
+        axis_css_dims(position.axis(), pill_length_dip, pill_thickness);
+    let pill_w = (pill_w_dip * scale).round() as i32;
+    let pill_h = (pill_h_dip * scale).round() as i32;
+    let inset = (DOCK_EDGE_INSET_DIP * scale).round() as i32;
+    Ok(pill_rect_for_position(
+        position,
+        outer_pos,
+        outer_size,
+        pill_w,
+        pill_h,
+        inset,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn usable_screen_rect_for_zoom(
+    window: &WebviewWindow,
+    mtm: objc2::MainThreadMarker,
+) -> Result<ScreenRect, String> {
+    let monitor = window
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no primary monitor".to_string())?;
+    let visible = visible_frame_tauri_for_monitor(&monitor, mtm);
+    let (pill_left, pill_top, pill_right, pill_bottom) = current_pill_screen_rect(window)?;
+    let position = current_dock_position(window);
+    shrink_visible_for_dock(
+        visible,
+        pill_left,
+        pill_top,
+        pill_right,
+        pill_bottom,
+        position,
+        ZOOM_DOCK_GAP_PX,
+    )
+    .ok_or_else(|| "usable zoom area is too small".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn rects_approximately_equal(a: ScreenRect, b: ScreenRect, tolerance: i32) -> bool {
+    (a.x - b.x).abs() <= tolerance
+        && (a.y - b.y).abs() <= tolerance
+        && (a.width - b.width).abs() <= tolerance
+        && (a.height - b.height).abs() <= tolerance
+}
+
+#[cfg(target_os = "macos")]
+fn ax_copy_attr(element: AxUiElementRef, attr: &str) -> Option<CfTypeRef> {
+    use core_foundation::base::TCFType;
+
+    let attr_cf = cfstring_attr(attr);
+    let mut value: CfTypeRef = std::ptr::null();
+    let status = unsafe {
+        AXUIElementCopyAttributeValue(
+            element,
+            attr_cf.as_concrete_TypeRef() as CfTypeRef,
+            &mut value,
+        )
+    };
+    if status == K_AX_ERROR_SUCCESS && !value.is_null() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_cfstring_value(value: CfTypeRef) -> Option<String> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+
+    if value.is_null() {
+        return None;
+    }
+    let cf = unsafe { CFString::wrap_under_create_rule(value as _) };
+    Some(cf.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn ax_window_storage_key(window_el: AxUiElementRef, bundle_id: &str) -> String {
+    if let Some(id_ref) = ax_copy_attr(window_el, "AXIdentifier") {
+        let id = ax_cfstring_value(id_ref);
+        unsafe {
+            CFRelease(id_ref);
+        }
+        if let Some(id) = id.filter(|value| !value.is_empty()) {
+            return format!("{bundle_id}:{id}");
+        }
+    }
+    if let Some(title_ref) = ax_copy_attr(window_el, "AXTitle") {
+        let title = ax_cfstring_value(title_ref);
+        unsafe {
+            CFRelease(title_ref);
+        }
+        if let Some(title) = title.filter(|value| !value.is_empty()) {
+            return format!("{bundle_id}:{title}");
+        }
+    }
+    format!("{bundle_id}:front")
+}
+
+#[cfg(target_os = "macos")]
+fn ax_window_frame_tauri(
+    window_el: AxUiElementRef,
+    primary_cocoa_h: f64,
+    scale: f64,
+) -> Result<ScreenRect, String> {
+    let pos_ref = ax_copy_attr(window_el, "AXPosition").ok_or("window has no AXPosition")?;
+    let size_ref = ax_copy_attr(window_el, "AXSize").ok_or("window has no AXSize")?;
+
+    let mut pos = CGPoint { x: 0.0, y: 0.0 };
+    let mut size = CGSize {
+        width: 0.0,
+        height: 0.0,
+    };
+    let ok_pos = unsafe {
+        AXValueGetValue(
+            pos_ref,
+            K_AX_VALUE_CGPOINT_TYPE,
+            &mut pos as *mut _ as *mut std::ffi::c_void,
+        )
+    };
+    let ok_size = unsafe {
+        AXValueGetValue(
+            size_ref,
+            K_AX_VALUE_CGSIZE_TYPE,
+            &mut size as *mut _ as *mut std::ffi::c_void,
+        )
+    };
+    unsafe {
+        CFRelease(pos_ref);
+        CFRelease(size_ref);
+    }
+    if !ok_pos || !ok_size {
+        return Err("failed to read window frame from Accessibility".to_string());
+    }
+
+    let width = (size.width * scale).round() as i32;
+    let height = (size.height * scale).round() as i32;
+    let x = (pos.x * scale).round() as i32;
+    let y = (primary_cocoa_h * scale - pos.y * scale - height as f64).round() as i32;
+    Ok(ScreenRect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn set_ax_window_frame_tauri(
+    window_el: AxUiElementRef,
+    rect: ScreenRect,
+    primary_cocoa_h: f64,
+    scale: f64,
+) -> Result<(), String> {
+    use core_foundation::base::TCFType;
+
+    let w_pts = rect.width as f64 / scale;
+    let h_pts = rect.height as f64 / scale;
+    let x_pts = rect.x as f64 / scale;
+    let y_top_pts = rect.y as f64 / scale;
+    let ax_y_pts = primary_cocoa_h - y_top_pts - h_pts;
+
+    let pos = CGPoint {
+        x: x_pts,
+        y: ax_y_pts,
+    };
+    let size = CGSize {
+        width: w_pts,
+        height: h_pts,
+    };
+
+    let pos_val = unsafe { AXValueCreate(K_AX_VALUE_CGPOINT_TYPE, &pos as *const _ as *const _) };
+    let size_val = unsafe { AXValueCreate(K_AX_VALUE_CGSIZE_TYPE, &size as *const _ as *const _) };
+    if pos_val.is_null() || size_val.is_null() {
+        return Err("failed to create AXValue for window frame".to_string());
+    }
+
+    let pos_attr = cfstring_attr("AXPosition");
+    let size_attr = cfstring_attr("AXSize");
+    let status_pos = unsafe {
+        AXUIElementSetAttributeValue(
+            window_el,
+            pos_attr.as_concrete_TypeRef() as CfTypeRef,
+            pos_val,
+        )
+    };
+    let status_size = unsafe {
+        AXUIElementSetAttributeValue(
+            window_el,
+            size_attr.as_concrete_TypeRef() as CfTypeRef,
+            size_val,
+        )
+    };
+    unsafe {
+        CFRelease(pos_val);
+        CFRelease(size_val);
+    }
+
+    if status_pos != K_AX_ERROR_SUCCESS || status_size != K_AX_ERROR_SUCCESS {
+        return Err(
+            "failed to resize window via Accessibility — the app may be fullscreen or block AX"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ax_focused_window(app_el: AxUiElementRef) -> Option<AxUiElementRef> {
+    if let Some(win) = ax_copy_attr(app_el, "AXFocusedWindow") {
+        return Some(win as AxUiElementRef);
+    }
+    if let Some(win) = ax_copy_attr(app_el, "AXMainWindow") {
+        return Some(win as AxUiElementRef);
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn zoom_app_above_dock_on_main_thread(
+    dock_window: &WebviewWindow,
+    zoom_state: &crate::commands::apps::ZoomState,
+    bundle_id: &str,
+) -> Result<(), String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let mtm = MainThreadMarker::new().ok_or("not on main thread")?;
+    ensure_ax_trusted()?;
+
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id);
+    let instance = running
+        .iter()
+        .next()
+        .ok_or_else(|| format!("{bundle_id} is not running"))?;
+
+    activate_running_application(&instance)?;
+
+    let pid = instance.processIdentifier();
+    let scale = dock_window.scale_factor().map_err(|e| e.to_string())?;
+    let primary_cocoa_h = primary_cocoa_height_points(mtm);
+    let usable = usable_screen_rect_for_zoom(dock_window, mtm)?;
+
+    let app_el = unsafe { AXUIElementCreateApplication(pid) };
+    if app_el.is_null() {
+        return Err("failed to create AXUIElement for application".to_string());
+    }
+
+    let window_el = ax_focused_window(app_el).ok_or_else(|| {
+        unsafe {
+            CFRelease(app_el as CfTypeRef);
+        }
+        "no focused window to zoom".to_string()
+    })?;
+
+    let current = ax_window_frame_tauri(window_el, primary_cocoa_h, scale)?;
+    let storage_key = ax_window_storage_key(window_el, bundle_id);
+
+    let result = if rects_approximately_equal(current, usable, ZOOM_FRAME_TOLERANCE_PX) {
+        let saved = zoom_state
+            .saved_frames
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&storage_key);
+        if let Some(saved) = saved {
+            set_ax_window_frame_tauri(
+                window_el,
+                ScreenRect {
+                    x: saved.x,
+                    y: saved.y,
+                    width: saved.width,
+                    height: saved.height,
+                },
+                primary_cocoa_h,
+                scale,
+            )
+        } else {
+            Err("window is already zoomed but no saved frame to restore".to_string())
+        }
+    } else {
+        {
+            let mut guard = zoom_state
+                .saved_frames
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.insert(
+                storage_key,
+                crate::commands::apps::SavedWindowFrame {
+                    x: current.x,
+                    y: current.y,
+                    width: current.width,
+                    height: current.height,
+                },
+            );
+        }
+        set_ax_window_frame_tauri(window_el, usable, primary_cocoa_h, scale)
+    };
+
+    unsafe {
+        CFRelease(window_el as CfTypeRef);
+        CFRelease(app_el as CfTypeRef);
+    }
+
+    result
+}
+
+/// Zooms the focused window of a running app to fill the screen area above
+/// (or beside) the dock pill; toggles back to the pre-zoom frame on repeat.
+#[cfg(target_os = "macos")]
+pub fn zoom_app_above_dock(app: AppHandle, bundle_id: String) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let bundle_id_for_thread = bundle_id.clone();
+    let app_for_thread = app.clone();
+
+    app.run_on_main_thread(move || {
+        let result = match app_for_thread.get_webview_window("main") {
+            Some(dock_window) => {
+                let zoom_state = app_for_thread.state::<crate::commands::apps::ZoomState>();
+                zoom_app_above_dock_on_main_thread(
+                    &dock_window,
+                    &zoom_state,
+                    &bundle_id_for_thread,
+                )
+            }
+            None => Err("main window missing".to_string()),
+        };
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+
+    rx.recv()
+        .map_err(|_| "zoom_app_above_dock did not complete".to_string())?
+}
+
 /// Activates the app if a running instance exists (brings its windows to
 /// front, does not spawn a second instance); otherwise launches it.
 /// Dispatched onto the main thread — `NSRunningApplication`/`NSWorkspace`
@@ -2124,6 +2759,36 @@ mod geometry_tests {
         );
         assert_eq!(thickness_ext, 0.0);
         assert!(length_ext > 0.0);
+    }
+
+    #[test]
+    fn shrink_visible_for_bottom_dock_stops_above_pill() {
+        let visible = ScreenRect {
+            x: 0,
+            y: 50,
+            width: 1920,
+            height: 1030,
+        };
+        let shrunk = shrink_visible_for_dock(visible, 800, 980, 1120, 1070, DockPosition::Bottom, 4)
+            .expect("should shrink");
+        assert_eq!(shrunk.x, 0);
+        assert_eq!(shrunk.y, 50);
+        assert_eq!(shrunk.width, 1920);
+        assert_eq!(shrunk.height, 980 - 50 - 4);
+    }
+
+    #[test]
+    fn shrink_visible_for_top_dock_starts_below_pill() {
+        let visible = ScreenRect {
+            x: 0,
+            y: 25,
+            width: 1440,
+            height: 875,
+        };
+        let shrunk = shrink_visible_for_dock(visible, 600, 25, 840, 120, DockPosition::Top, 4)
+            .expect("should shrink");
+        assert_eq!(shrunk.y, 124);
+        assert_eq!(shrunk.height, 25 + 875 - 124);
     }
 }
 

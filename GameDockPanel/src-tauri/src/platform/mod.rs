@@ -19,6 +19,7 @@ pub use macos::{
     reveal_app_in_finder, resize_dock_window_for_pill, setup_dock_window,
     start_apps_monitoring, sync_vibrancy_pill_from_web,
     ensure_window_fits_menu_overlay, shrink_dock_window_to_stored_pill,
+    zoom_app_above_dock,
 };
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
@@ -121,4 +122,9 @@ pub fn quit_app(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String
 #[cfg(not(target_os = "macos"))]
 pub fn reveal_app_in_finder(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
     Err("process monitoring is not implemented on this platform yet".to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn zoom_app_above_dock(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
+    Err("dock zoom is not implemented on this platform yet".to_string())
 }
