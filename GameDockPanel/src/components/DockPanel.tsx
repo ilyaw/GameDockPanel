@@ -54,7 +54,8 @@ type StyleWithBgVars = Record<`--dock-bg-${number}`, string> &
 
 type PillStyle = StyleWithGlowVars &
   StyleWithBgVars &
-  Record<"--dock-border-width", string>;
+  Record<"--dock-border-width", string> &
+  Record<"--dock-pill-radius", string>;
 
 type BorderRingStyle = React.CSSProperties &
   Record<"--dock-border-width", string>;
@@ -809,8 +810,8 @@ function HydratedDockPanel({
 
     const initialRect = measurePill();
     setPillMaskSize({
-      width: Math.round(initialRect.width),
-      height: Math.round(initialRect.height),
+      width: initialRect.width,
+      height: initialRect.height,
     });
 
     let lastPillWidth = initialRect.width;
@@ -821,12 +822,11 @@ function HydratedDockPanel({
       const widthChanged = Math.abs(rect.width - lastPillWidth) > 0.5;
       const heightChanged = Math.abs(rect.height - lastPillHeight) > 0.5;
       const topChanged = Math.abs(rect.top - lastPillTop) > 0.5;
-      const maskW = Math.round(rect.width);
-      const maskH = Math.round(rect.height);
       setPillMaskSize((prev) =>
-        prev.width === maskW && prev.height === maskH
+        Math.abs(prev.width - rect.width) < 0.01 &&
+        Math.abs(prev.height - rect.height) < 0.01
           ? prev
-          : { width: maskW, height: maskH },
+          : { width: rect.width, height: rect.height },
       );
       if (widthChanged || heightChanged || topChanged) {
         lastPillWidth = rect.width;
@@ -943,6 +943,7 @@ function HydratedDockPanel({
         ? "none"
         : `0 0 ${glowSpread}px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
       "--dock-border-width": `${borderWidthPx}px`,
+      "--dock-pill-radius": `${PILL_CORNER_RADIUS_PX}px`,
       "--dock-glow-1": settings.rgbGlowColors[0],
       "--dock-glow-2": settings.rgbGlowColors[1],
       "--dock-glow-3": settings.rgbGlowColors[2],
@@ -1039,48 +1040,43 @@ function HydratedDockPanel({
           minHeight: orientation.isVertical ? 0 : restMetrics.pillThicknessPx,
           borderWidth: showBorderRing ? 0 : `${borderWidthPx}px`,
         }}
-        className={`pointer-events-auto relative m-0 flex shrink-0 overflow-visible rounded-[28px] border transition-colors ${orientation.pillClassName} ${
+        className={`pointer-events-auto relative m-0 flex shrink-0 overflow-visible rounded-[28px] border bg-transparent transition-colors ${orientation.pillClassName} ${
           isRejecting ? "animate-reject-pulse" : ""
         } ${
-          fileDragOver
-            ? "border-zinc-400 bg-zinc-900/90"
-            : "border-transparent bg-black/40"
+          fileDragOver ? "border-zinc-400" : "border-transparent"
         }`}
       >
-        {showBorderRing && pillMaskSize.width > 0 && pillMaskSize.height > 0 && (
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 z-[-5] overflow-hidden rounded-[28px]"
-          >
+        <div
+          aria-hidden
+          className="dock-pill-decor-clip pointer-events-none absolute inset-0 z-0"
+        >
+          {settings.backgroundAnimationEnabled && !fileDragOver && (
+            // Oversized + blurred inner layer; the decor clip boundary
+            // keeps the soft falloff from showing a hard edge at the pill.
             <div
-              aria-hidden
-              className={`pointer-events-none absolute inset-0 ${getBorderRingClasses(settings.borderStyle)}`}
-              style={{
-                ...borderRingStyle,
-                width: pillMaskSize.width,
-                height: pillMaskSize.height,
-              }}
-            />
-          </div>
-        )}
-        {settings.backgroundAnimationEnabled && !fileDragOver && (
-          // Negative z-index puts this behind the icons/button below
-          // automatically (static in-flow siblings paint above negative-
-          // z-index descendants per the stacking spec) — no z-index needed
-          // on them. The outer wrapper stays unblurred so it can clip to
-          // the pill's own rounded corners; the inner layer is the one
-          // that's oversized + blurred, so the blur's soft falloff never
-          // shows a hard, unblurred edge at the clip boundary.
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-[28px]"
-          >
-            <div
-              className={`${bgAnimClasses} absolute -inset-8 blur-2xl`}
+              className={`${bgAnimClasses} pointer-events-none absolute -inset-8 blur-2xl`}
               style={bgFlowStyle}
             />
-          </div>
-        )}
+          )}
+          <div
+            aria-hidden
+            className={`pointer-events-none absolute inset-0 ${
+              fileDragOver ? "bg-zinc-900/90" : "bg-black/40"
+            }`}
+          />
+          {showBorderRing && pillMaskSize.width > 0 && pillMaskSize.height > 0 && (
+            <div
+              aria-hidden
+              className="dock-border-clip pointer-events-none absolute inset-0 z-[1]"
+            >
+              <div
+                aria-hidden
+                className={`pointer-events-none absolute inset-0 ${getBorderRingClasses(settings.borderStyle)}`}
+                style={borderRingStyle}
+              />
+            </div>
+          )}
+        </div>
         {insertMarker && (
           <div
             aria-hidden
@@ -1109,7 +1105,7 @@ function HydratedDockPanel({
           values={items}
           onReorder={handleReorder}
           style={{ gap: iconRowGapPx }}
-          className={`m-0 flex list-none ${orientation.pillClassName}`}
+          className={`relative z-[2] m-0 flex list-none ${orientation.pillClassName}`}
           as="ul"
         >
         {items.map((item) => (
@@ -1176,7 +1172,7 @@ function HydratedDockPanel({
         <DockRowDivider
           iconSizePx={iconSizeAnimated}
           isVertical={orientation.isVertical}
-          className="mx-1"
+          className="relative z-[2] mx-1"
         />
         {/* Settings gear — horizontal docks reserve space for the LED bar.
             `gap` always present with a 0 fallback (never undefined) — same
@@ -1185,7 +1181,7 @@ function HydratedDockPanel({
           style={{
             gap: orientation.ledAxis === "horizontal" ? settingsLedGapPx : 0,
           }}
-          className={`flex shrink-0 ${
+          className={`relative z-[2] flex shrink-0 ${
             orientation.ledAxis === "vertical"
               ? "items-center"
               : "flex-col items-center"

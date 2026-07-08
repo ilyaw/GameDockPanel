@@ -32,6 +32,8 @@ img {
   @theme, as usual.
 */
 @theme {
+  /* Single source for pill corner radius — must match PILL_CORNER_RADIUS_PX. */
+  --dock-pill-radius: 28px;
   --animate-rgb-glow: rgb-glow 6s linear infinite;
   --animate-led-pulse: led-pulse 1.8s ease-in-out infinite;
   --animate-reject-pulse: reject-pulse 0.4s ease-out;
@@ -236,13 +238,36 @@ img {
   }
 }
 
+/*
+  Decorative layers only (glass, ring, bg flow) — clipped to the pill
+  footprint. The pill shell itself stays `overflow-visible` so tooltips,
+  context menus, and magnify can paint into PILL_TOP_RESERVE above the
+  pill without being cut off.
+*/
+.dock-pill-decor-clip {
+  clip-path: inset(0 round var(--dock-pill-radius, 28px));
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/*
+  Border-ring wrapper — `contain: paint` keeps `filter: drop-shadow` from
+  bleeding past the rounded contour at corners (parent decor clip handles
+  the shape).
+*/
+.dock-border-clip {
+  overflow: hidden;
+  contain: paint;
+}
+
 .dock-border-ring {
   overflow: hidden;
-  border-radius: 28px;
   -webkit-mask-repeat: no-repeat;
   mask-repeat: no-repeat;
   -webkit-mask-position: center;
   mask-position: center;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
   --dock-border-dim: color-mix(in srgb, var(--dock-glow-1) 52%, transparent);
 }
 
@@ -473,7 +498,7 @@ img {
 */
 .dock-panel-effect-clip {
   overflow: hidden;
-  border-radius: 28px;
+  clip-path: inset(0 round var(--dock-pill-radius, 28px));
   isolation: isolate;
 }
 .dock-panel-scanline {
@@ -535,10 +560,9 @@ img {
 .dock-panel-hologram {
   background: color-mix(in srgb, var(--dock-bg-1, #fff) 16%, transparent);
   mix-blend-mode: screen;
-  border-radius: 28px;
   /* `overflow: hidden` on the parent is not enough for blend-mode in WKWebView
      — clip-path forces the compositor to treat the hologram as rounded. */
-  clip-path: inset(0 round 28px);
+  clip-path: inset(0 round var(--dock-pill-radius, 28px));
 }
 
 /*

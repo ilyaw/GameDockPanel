@@ -164,24 +164,23 @@ export function roundedRingMaskStyle(
   maskSize: string;
   WebkitMaskSize: string;
 } {
-  const w = Math.max(1, Math.round(widthPx));
-  const h = Math.max(1, Math.round(heightPx));
+  const w = Math.max(1, widthPx);
+  const h = Math.max(1, heightPx);
   const bw = Math.max(1, borderWidthPx);
   const half = bw / 2;
   const rx = Math.max(0, Math.min(outerRadiusPx - half, w / 2 - half, h / 2 - half));
   const svg = [
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`,
     `<rect x="${half}" y="${half}" width="${w - bw}" height="${h - bw}"`,
     ` rx="${rx}" ry="${rx}" fill="none" stroke="white" stroke-width="${bw}"/>`,
     `</svg>`,
   ].join("");
   const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-  const size = `${w}px ${h}px`;
   return {
     maskImage: url,
     WebkitMaskImage: url,
-    maskSize: size,
-    WebkitMaskSize: size,
+    maskSize: "100% 100%",
+    WebkitMaskSize: "100% 100%",
   };
 }
 /** Horizontal glow bleed (~14px box-shadow each side). */

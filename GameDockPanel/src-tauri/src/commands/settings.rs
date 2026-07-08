@@ -405,7 +405,9 @@ pub fn start_border_qa_poller(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let path = std::path::PathBuf::from("/tmp/gd-qa-border.json");
-        let mut last = String::new();
+        // Seed `last` so a leftover QA file from a prior session is not
+        // re-applied on every cold start and clobber real user settings.
+        let mut last = std::fs::read_to_string(&path).unwrap_or_default();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(300));
             let Ok(data) = std::fs::read_to_string(&path) else {
