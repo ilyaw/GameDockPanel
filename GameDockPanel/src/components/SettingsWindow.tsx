@@ -6,12 +6,15 @@ import { useDockSettings } from "../hooks/useDockSettings";
 import {
   BACKGROUND_PRESETS,
   BORDER_STYLE_PRESETS,
+  BORDER_WIDTH_MAX_PX,
+  BORDER_WIDTH_MIN_PX,
   DOCK_POSITION_OPTIONS,
   ICON_SIZE_PRESETS,
   ICON_SIZE_MAX_PX,
   ICON_SIZE_MIN_PX,
   LED_COLOR_MODE_OPTIONS,
   PANEL_EFFECT_PRESETS,
+  clampBorderWidthPx,
   clampIconSizePx,
   type BackgroundPreset,
   type BorderStylePreset,
@@ -77,6 +80,42 @@ function PercentSlider({
       />
       <span className="w-9 text-right text-xs tabular-nums text-zinc-400">
         {Math.round(value * 100)}%
+      </span>
+    </div>
+  );
+}
+
+/** Integer px slider for the RGB frame thickness (1–8 px). */
+function PxSlider({
+  value,
+  min,
+  max,
+  onChange,
+  disabled,
+  ariaLabel,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (next: number) => void;
+  disabled?: boolean;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="flex w-36 items-center gap-3">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={1}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="w-24 accent-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+        aria-label={ariaLabel}
+      />
+      <span className="w-9 text-right text-xs tabular-nums text-zinc-400">
+        {value} px
       </span>
     </div>
   );
@@ -398,6 +437,20 @@ export function SettingsWindow() {
               />
             ))}
           </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title="Толщина рамки"
+          description="Ширина кольца по всему периметру. Для заметной «бегущей линии» (Скан, Спектр, Поток) — 5–8 px."
+        >
+          <PxSlider
+            value={clampBorderWidthPx(settings.borderWidthPx)}
+            min={BORDER_WIDTH_MIN_PX}
+            max={BORDER_WIDTH_MAX_PX}
+            onChange={(value) => update({ borderWidthPx: value })}
+            disabled={!settings.animationsEnabled}
+            ariaLabel="Толщина рамки"
+          />
         </SettingsRow>
 
         <SettingsRow

@@ -84,6 +84,10 @@ export interface DockSettings {
    * rotating radar-style scan ring. Falls back to the first preset for an
    * unrecognized id, same convention as `backgroundPreset`. */
   borderStyle: string;
+  /** Perimeter frame width in logical px (1–8). Drives the unified gradient
+   * ring overlay (`--dock-border-width`) and the pill's static border when
+   * animations are off. */
+  borderWidthPx: number;
   /** Master toggle for the panel-body decorative overlay (scanlines / HUD
    * grid / hologram flicker) — independent of the border cycle and the
    * background gradient flow, each of which has its own on/off. */

@@ -138,6 +138,52 @@ export const DOCK_SEPARATOR_WIDTH_PX = 7;
 export const DOCK_ROW_DIVIDER_HEIGHT_RATIO = 0.6;
 /** Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx). */
 export const PILL_CORNER_RADIUS_PX = 28;
+
+/** Unified RGB frame ring thickness — all 9 border styles read
+ * `--dock-border-width` on the gradient overlay. */
+export const BORDER_WIDTH_MIN_PX = 1;
+export const BORDER_WIDTH_MAX_PX = 8;
+export const DEFAULT_BORDER_WIDTH_PX = 5;
+
+export function clampBorderWidthPx(px: number): number {
+  return Math.round(
+    Math.min(BORDER_WIDTH_MAX_PX, Math.max(BORDER_WIDTH_MIN_PX, px)),
+  );
+}
+
+/** SVG ring mask for gradient border overlays — a stroked rounded rect keeps
+ * inner/outer radii parallel at any thickness (innerR ≈ outerR − borderWidth). */
+export function roundedRingMaskStyle(
+  widthPx: number,
+  heightPx: number,
+  outerRadiusPx: number,
+  borderWidthPx: number,
+): {
+  maskImage: string;
+  WebkitMaskImage: string;
+  maskSize: string;
+  WebkitMaskSize: string;
+} {
+  const w = Math.max(1, Math.round(widthPx));
+  const h = Math.max(1, Math.round(heightPx));
+  const bw = Math.max(1, borderWidthPx);
+  const half = bw / 2;
+  const rx = Math.max(0, Math.min(outerRadiusPx - half, w / 2 - half, h / 2 - half));
+  const svg = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">`,
+    `<rect x="${half}" y="${half}" width="${w - bw}" height="${h - bw}"`,
+    ` rx="${rx}" ry="${rx}" fill="none" stroke="white" stroke-width="${bw}"/>`,
+    `</svg>`,
+  ].join("");
+  const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+  const size = `${w}px ${h}px`;
+  return {
+    maskImage: url,
+    WebkitMaskImage: url,
+    maskSize: size,
+    WebkitMaskSize: size,
+  };
+}
 /** Horizontal glow bleed (~14px box-shadow each side). */
 export const WINDOW_GLOW_BLEED_PX = 32;
 /** Gap between tooltip/menu bottom edge and icon top (`margin-bottom` on both). */
@@ -582,6 +628,29 @@ export function getFlowRingVariant(borderStyleId: string): FlowRingVariant | nul
   return FLOW_RING_VARIANT_BY_BORDER_STYLE[borderStyleId] ?? null;
 }
 
+/** CSS classes for the unified `.dock-border-ring` overlay per border style. */
+export const BORDER_RING_CLASSES: Record<string, string> = {
+  spectrum:
+    "dock-border-ring dock-border-spectrum animate-border-spectrum-overlay",
+  pulse: "dock-border-ring dock-border-pulse animate-border-pulse-overlay",
+  glitch: "dock-border-ring dock-border-glitch animate-border-glitch-overlay",
+  scan: "dock-border-ring dock-border-scan-ring animate-border-scan-rotate",
+  "flow-sweep":
+    "dock-border-ring dock-border-flow-ring dock-border-flow-sweep animate-border-flow-ring",
+  "flow-spin":
+    "dock-border-ring dock-border-flow-ring dock-border-flow-spin animate-border-flow-ring",
+  "flow-spin-tri":
+    "dock-border-ring dock-border-flow-ring dock-border-flow-spin-tri animate-border-flow-ring",
+  "flow-neon-pulse":
+    "dock-border-ring dock-border-flow-ring dock-border-flow-pulse animate-border-flow-ring animate-neon-pulse",
+  "flow-static":
+    "dock-border-ring dock-border-flow-ring dock-border-flow-static",
+};
+
+export function getBorderRingClasses(borderStyleId: string): string {
+  return BORDER_RING_CLASSES[borderStyleId] ?? BORDER_RING_CLASSES.spectrum;
+}
+
 /**
  * A cyberpunk-styled animation driving the pill's RGB frame while
  * `DockSettings.animationsEnabled` is on — picked by id in
@@ -621,7 +690,7 @@ export const BORDER_STYLE_PRESETS: BorderStylePreset[] = [
   {
     id: "scan",
     label: "Скан",
-    description: "Луч радара, вращающийся по периметру рамки.",
+    description: "Яркая бегущая линия с хвостом, вращается по периметру рамки.",
     animationClass: "",
   },
   {
@@ -725,6 +794,7 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   rgbGlowColors: ["#ff3b6b", "#ff9d3b", "#e9ff3b", "#3bffb0", "#3bb0ff", "#b03bff"],
   staticGlowColor: "#ff3b6b",
   borderStyle: "spectrum",
+  borderWidthPx: DEFAULT_BORDER_WIDTH_PX,
   panelEffectEnabled: true,
   panelEffect: "grid",
   backgroundAnimationEnabled: true,

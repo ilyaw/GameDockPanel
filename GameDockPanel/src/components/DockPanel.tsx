@@ -15,13 +15,14 @@ import {
   MAX_SEPARATORS,
   TOOLTIP_GAP_PX,
   BG_ANIMATION_CLASSES,
-  FLOW_RING_ANIMATION_CLASSES,
   getBackgroundPreset,
   backgroundPresetToDurationS,
-  getBorderStylePreset,
-  getFlowRingVariant,
+  getBorderRingClasses,
   getPanelEffectPreset,
   getSizeMetrics,
+  clampBorderWidthPx,
+  PILL_CORNER_RADIUS_PX,
+  roundedRingMaskStyle,
 } from "../lib/constants";
 import {
   magnifyOriginClassName,
@@ -51,7 +52,12 @@ type StyleWithBgVars = Record<`--dock-bg-${number}`, string> &
   Record<"--dock-bg-angle", string> &
   Record<"--gradient-angle", string>;
 
-type PillStyle = StyleWithGlowVars & StyleWithBgVars;
+type PillStyle = StyleWithGlowVars &
+  StyleWithBgVars &
+  Record<"--dock-border-width", string>;
+
+type BorderRingStyle = React.CSSProperties &
+  Record<"--dock-border-width", string>;
 
 /** Maps a `PANEL_EFFECT_PRESETS` id to its `index.css` overlay class + the
  * `--animate-panel-*` utility that drives it — kept here rather than on the
@@ -413,6 +419,7 @@ function HydratedDockPanel({
     undefined,
   );
   const [isRejecting, setIsRejecting] = useState(false);
+  const [pillMaskSize, setPillMaskSize] = useState({ width: 0, height: 0 });
   const [insertMarker, setInsertMarker] = useState<InsertMarkerMetrics | null>(
     null,
   );
@@ -800,14 +807,27 @@ function HydratedDockPanel({
 
     scheduleGeometrySync();
 
-    let lastPillWidth = measurePill().width;
-    let lastPillHeight = measurePill().height;
-    let lastPillTop = measurePill().top;
+    const initialRect = measurePill();
+    setPillMaskSize({
+      width: Math.round(initialRect.width),
+      height: Math.round(initialRect.height),
+    });
+
+    let lastPillWidth = initialRect.width;
+    let lastPillHeight = initialRect.height;
+    let lastPillTop = initialRect.top;
     const observer = new ResizeObserver(() => {
       const rect = measurePill();
       const widthChanged = Math.abs(rect.width - lastPillWidth) > 0.5;
       const heightChanged = Math.abs(rect.height - lastPillHeight) > 0.5;
       const topChanged = Math.abs(rect.top - lastPillTop) > 0.5;
+      const maskW = Math.round(rect.width);
+      const maskH = Math.round(rect.height);
+      setPillMaskSize((prev) =>
+        prev.width === maskW && prev.height === maskH
+          ? prev
+          : { width: maskW, height: maskH },
+      );
       if (widthChanged || heightChanged || topChanged) {
         lastPillWidth = rect.width;
         lastPillHeight = rect.height;
@@ -886,31 +906,16 @@ function HydratedDockPanel({
     orientation.magnifyTransformOrigin,
   );
 
-  const activeBorderStyle = getBorderStylePreset(settings.borderStyle);
+  const borderWidthPx = clampBorderWidthPx(settings.borderWidthPx);
   const activeBgPreset = getBackgroundPreset(settings.backgroundPreset);
-  const flowRingVariant = getFlowRingVariant(activeBorderStyle.id);
+
   /**
-   * "Scan" doesn't animate `border-color`/`box-shadow` like the other three
-   * styles — it gets a dedicated conic-gradient ring overlay instead (see
-   * `.dock-border-scan-ring` in index.css). Spotlight-style `flow-*` styles
-   * use `.dock-border-flow-ring` the same way. Suppressed during a reject
-   * flash or an active file drag-over, same as the other border styles,
-   * since both of those already communicate their own state through the
-   * pill's real border.
+   * Decorative RGB frame — always the unified gradient-ring overlay when
+   * animations are on. Suppressed during reject flash or file drag-over so
+   * the pill's functional border can show through.
    */
-  const showScanRing =
-    settings.animationsEnabled &&
-    activeBorderStyle.id === "scan" &&
-    !isRejecting &&
-    !fileDragOver;
-
-  const showFlowRing =
-    settings.animationsEnabled &&
-    flowRingVariant !== null &&
-    !isRejecting &&
-    !fileDragOver;
-
-  const showGradientRing = showScanRing || showFlowRing;
+  const showBorderRing =
+    settings.animationsEnabled && !isRejecting && !fileDragOver;
 
   const bgAnimClasses = BG_ANIMATION_CLASSES[activeBgPreset.animation];
 
@@ -920,22 +925,10 @@ function HydratedDockPanel({
     settings.panelEffectEnabled && !!panelEffectClasses && !fileDragOver;
 
   /**
-   * Static border/shadow (from `staticGlowColor`) sit alongside the CSS
-   * custom properties the animated cycle reads (`--dock-glow-1..6`) and
-   * the background flow's own (`--dock-bg-1..6`/`--dock-bg-duration`) —
-   * the latter live here (not just on the flow layer below) so the
-   * panel-effect overlay can read them too, by inheritance, without a
-   * second copy. Border custom properties live in the same inline style
-   * rather than switching classes: a running CSS animation
-   * (`animate-rgb-glow`/`animate-border-pulse`/etc., or
-   * `animate-reject-pulse`) always outranks a plain inline declaration on
-   * the same property per the cascade, so these static values simply show
-   * through whenever no animation class is applied (`animationsEnabled`
-   * off, not rejecting) — no extra branching needed to pick which one
-   * "wins". The scan ring is the one exception: it fully replaces the
-   * visible border, so `borderColor`/`boxShadow` are forced transparent
-   * while it's showing instead of leaving a static color to peek through
-   * underneath it.
+   * Static border/shadow (from `staticGlowColor`) and CSS custom properties
+   * for glow/background layers. When animations are on the decorative frame
+   * is painted by the unified gradient-ring overlay — pill border stays
+   * transparent so nothing doubles up underneath.
    */
   const pillStyle = useMemo<PillStyle>(() => {
     const preset = activeBgPreset;
@@ -943,11 +936,13 @@ function HydratedDockPanel({
       (color) =>
         `color-mix(in srgb, ${color} ${Math.round(settings.backgroundIntensity * 100)}%, black)`,
     );
+    const glowSpread = borderWidthPx * 4;
     return {
-      borderColor: showGradientRing ? "transparent" : settings.staticGlowColor,
-      boxShadow: showGradientRing
+      borderColor: showBorderRing ? "transparent" : settings.staticGlowColor,
+      boxShadow: showBorderRing
         ? "none"
-        : `0 0 14px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
+        : `0 0 ${glowSpread}px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
+      "--dock-border-width": `${borderWidthPx}px`,
       "--dock-glow-1": settings.rgbGlowColors[0],
       "--dock-glow-2": settings.rgbGlowColors[1],
       "--dock-glow-3": settings.rgbGlowColors[2],
@@ -967,12 +962,28 @@ function HydratedDockPanel({
     };
   }, [
     activeBgPreset,
+    borderWidthPx,
     settings.staticGlowColor,
     settings.rgbGlowColors,
     settings.backgroundIntensity,
     settings.backgroundSpeed,
-    showGradientRing,
+    showBorderRing,
   ]);
+
+  const borderRingStyle = useMemo<BorderRingStyle>(() => {
+    if (pillMaskSize.width < 1 || pillMaskSize.height < 1) {
+      return { "--dock-border-width": `${borderWidthPx}px` };
+    }
+    return {
+      "--dock-border-width": `${borderWidthPx}px`,
+      ...roundedRingMaskStyle(
+        pillMaskSize.width,
+        pillMaskSize.height,
+        PILL_CORNER_RADIUS_PX,
+        borderWidthPx,
+      ),
+    };
+  }, [borderWidthPx, pillMaskSize.height, pillMaskSize.width]);
 
   /** Just the flow layer's own opacity now — its color/duration custom
    * properties moved onto `pillStyle` above so other overlays can share
@@ -1026,43 +1037,30 @@ function HydratedDockPanel({
           // Static fallback until Motion values commit on the first frame.
           minWidth: orientation.isVertical ? restMetrics.pillThicknessPx : 0,
           minHeight: orientation.isVertical ? 0 : restMetrics.pillThicknessPx,
+          borderWidth: showBorderRing ? 0 : `${borderWidthPx}px`,
         }}
         className={`pointer-events-auto relative m-0 flex shrink-0 overflow-visible rounded-[28px] border transition-colors ${orientation.pillClassName} ${
-          isRejecting
-            ? "animate-reject-pulse"
-            : settings.animationsEnabled && !showGradientRing
-              ? activeBorderStyle.animationClass
-              : ""
+          isRejecting ? "animate-reject-pulse" : ""
         } ${
           fileDragOver
             ? "border-zinc-400 bg-zinc-900/90"
             : "border-transparent bg-black/40"
         }`}
       >
-        {(showScanRing || showFlowRing) && (
-          // Clip gradient rings to the pill footprint — conic-gradient fills
-          // a rectangular box and WebKit's mask-composite ring trick can leak
-          // square corners without an overflow-hidden rounded wrapper.
+        {showBorderRing && pillMaskSize.width > 0 && pillMaskSize.height > 0 && (
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-[28px]"
+            className="pointer-events-none absolute inset-0 z-[-5] overflow-hidden rounded-[28px]"
           >
-            {showScanRing && (
-              // Separate overlay, not a class on the pill itself — see the
-              // "scan" branch note on `showScanRing`/`activeBorderStyle` above
-              // for why a rotating gradient can't just replace `border-color`
-              // like the other three styles do.
-              <div
-                aria-hidden
-                className="dock-border-scan-ring animate-border-scan-rotate pointer-events-none absolute -inset-px rounded-[28px]"
-              />
-            )}
-            {showFlowRing && flowRingVariant && (
-              <div
-                aria-hidden
-                className={`dock-border-flow-ring ${FLOW_RING_ANIMATION_CLASSES[flowRingVariant]} pointer-events-none absolute -inset-px rounded-[28px]`}
-              />
-            )}
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-0 ${getBorderRingClasses(settings.borderStyle)}`}
+              style={{
+                ...borderRingStyle,
+                width: pillMaskSize.width,
+                height: pillMaskSize.height,
+              }}
+            />
           </div>
         )}
         {settings.backgroundAnimationEnabled && !fileDragOver && (

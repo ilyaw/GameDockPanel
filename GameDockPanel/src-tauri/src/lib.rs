@@ -27,6 +27,8 @@ pub fn run() {
             commands::window::open_settings,
             commands::settings::get_dock_settings,
             commands::settings::update_dock_settings,
+            #[cfg(debug_assertions)]
+            commands::settings::qa_set_border,
         ])
         .setup(|app| {
             // Populate AppsState.entries (persisted list, or first-run seed)
@@ -34,6 +36,8 @@ pub fn run() {
             // count to compute its initial width.
             commands::apps::init_entries(app.handle())?;
             commands::settings::init_settings(app.handle())?;
+            #[cfg(debug_assertions)]
+            commands::settings::start_border_qa_poller(app.handle());
             platform::setup_dock_window(app)?;
             platform::start_apps_monitoring(app)?;
             tray::setup(app)?;

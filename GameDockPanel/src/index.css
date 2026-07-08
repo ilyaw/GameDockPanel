@@ -47,7 +47,14 @@ img {
      these replaces `animate-rgb-glow` on the pill, never combined with it. */
   --animate-border-pulse: border-pulse 2.4s ease-in-out infinite;
   --animate-border-glitch: border-glitch 5s steps(1) infinite;
-  --animate-border-scan-rotate: border-scan-rotate 3s linear infinite;
+  --animate-border-scan-rotate: border-scan-rotate 2s linear infinite;
+  /* Unified gradient-ring overlay variants (spectrum/pulse/glitch migrated
+     off the pill's CSS border — see `.dock-border-ring` in DockPanel). */
+  --animate-border-spectrum-overlay: rgb-spin 3s linear infinite;
+  /* Border flow-* styles — fixed cadence, not tied to background duration. */
+  --animate-border-flow-ring: rgb-spin 3s linear infinite;
+  --animate-border-pulse-overlay: border-pulse-overlay 2.4s ease-in-out infinite;
+  --animate-border-glitch-overlay: border-glitch-overlay 5s steps(1) infinite;
   /* `PANEL_EFFECT_PRESETS` overlays — layered above the icons, tinted from
      the active background preset, independent of the border/background
      toggles above. */
@@ -180,8 +187,9 @@ img {
   to the pill: `@property --dock-scan-angle` lets `border-scan-rotate`
   animate the conic gradient's rotation smoothly (plain custom properties
   can't be interpolated), and the two masks combined with
-  `mask-composite: exclude` clip that gradient down to just a ring the
-  width of `padding` below — the classic CSS "gradient border" trick.
+  `mask-composite: exclude` clip that gradient down to just a ring — thickness
+  is driven by an SVG mask (`roundedRingMaskStyle` in constants.ts) sized to
+  the pill, not by `padding` here.
 */
 @property --dock-scan-angle {
   syntax: "<angle>";
@@ -228,50 +236,164 @@ img {
   }
 }
 
-.dock-border-scan-ring {
-  padding: 2px;
+.dock-border-ring {
   overflow: hidden;
-  background: conic-gradient(
-    from var(--dock-scan-angle),
-    transparent 0deg,
-    transparent 296deg,
-    color-mix(in srgb, var(--dock-glow-1) 65%, transparent) 328deg,
-    var(--dock-glow-1) 344deg,
-    #fff 352deg,
-    var(--dock-glow-1) 358deg,
-    transparent 360deg
+  border-radius: 28px;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  --dock-border-dim: color-mix(in srgb, var(--dock-glow-1) 52%, transparent);
+}
+
+.dock-border-spectrum {
+  filter: drop-shadow(
+    0 0 calc(var(--dock-border-width, 3px) * 2)
+      color-mix(in srgb, var(--dock-glow-3) 55%, transparent)
   );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-clip: content-box, border-box;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-clip: content-box, border-box;
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
+  background:
+    conic-gradient(
+      from var(--gradient-angle),
+      transparent 0deg,
+      transparent 302deg,
+      var(--dock-glow-1) 318deg,
+      var(--dock-glow-3) 332deg,
+      #fff 344deg,
+      var(--dock-glow-5) 352deg,
+      transparent 360deg
+    ),
+    linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
+}
+
+.dock-border-pulse {
+  background: var(--dock-glow-1);
+}
+
+@keyframes border-pulse-overlay {
+  0%,
+  100% {
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 3)
+        color-mix(in srgb, var(--dock-glow-1) 35%, transparent)
+    );
+  }
+  50% {
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 8)
+        calc(var(--dock-border-width, 3px) * 1.5)
+        color-mix(in srgb, var(--dock-glow-1) 75%, transparent)
+    );
+  }
+}
+
+.dock-border-glitch {
+  background: var(--dock-glow-1);
+}
+
+@keyframes border-glitch-overlay {
+  0%,
+  100% {
+    opacity: 1;
+    background: var(--dock-glow-1);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 4)
+        color-mix(in srgb, var(--dock-glow-1) 50%, transparent)
+    );
+  }
+  3% {
+    opacity: 0;
+    filter: none;
+  }
+  6% {
+    opacity: 1;
+    background: var(--dock-glow-3);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 5)
+        calc(var(--dock-border-width, 3px) * 0.5)
+        color-mix(in srgb, var(--dock-glow-3) 60%, transparent)
+    );
+  }
+  9%,
+  40% {
+    opacity: 1;
+    background: var(--dock-glow-1);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 4)
+        color-mix(in srgb, var(--dock-glow-1) 50%, transparent)
+    );
+  }
+  42% {
+    opacity: 0;
+    filter: none;
+  }
+  44% {
+    opacity: 1;
+    background: var(--dock-glow-5);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 6)
+        calc(var(--dock-border-width, 3px) * 0.75)
+        color-mix(in srgb, var(--dock-glow-5) 65%, transparent)
+    );
+  }
+  47%,
+  70% {
+    opacity: 1;
+    background: var(--dock-glow-1);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 4)
+        color-mix(in srgb, var(--dock-glow-1) 50%, transparent)
+    );
+  }
+  72% {
+    opacity: 0;
+    filter: none;
+  }
+  74% {
+    opacity: 1;
+    background: var(--dock-glow-2);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 5)
+        calc(var(--dock-border-width, 3px) * 0.5)
+        color-mix(in srgb, var(--dock-glow-2) 55%, transparent)
+    );
+  }
+  76% {
+    opacity: 1;
+    background: var(--dock-glow-1);
+    filter: drop-shadow(
+      0 0 calc(var(--dock-border-width, 3px) * 4)
+        color-mix(in srgb, var(--dock-glow-1) 50%, transparent)
+    );
+  }
+}
+
+.dock-border-scan-ring {
+  overflow: hidden;
+  filter: drop-shadow(
+    0 0 calc(var(--dock-border-width, 3px) * 2.5)
+      color-mix(in srgb, var(--dock-glow-1) 70%, transparent)
+  );
+  background:
+    conic-gradient(
+      from var(--dock-scan-angle),
+      transparent 0deg,
+      transparent 308deg,
+      color-mix(in srgb, var(--dock-glow-1) 50%, transparent) 322deg,
+      color-mix(in srgb, var(--dock-glow-1) 85%, transparent) 336deg,
+      #fff 346deg,
+      color-mix(in srgb, var(--dock-glow-3) 90%, transparent) 354deg,
+      transparent 360deg
+    ),
+    linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
 }
 
 /*
   Spotlight-style flow-ring border styles (`flow-*` in BORDER_STYLE_PRESETS).
-  Same mask-composite ring trick as `.dock-border-scan-ring` above, but the
-  gradient fills the full perimeter instead of a radar highlight wedge.
-  Colors come from `--dock-glow-1..3`; angle from `--dock-glow-angle`.
+  Gradient fills the full perimeter; ring thickness from SVG mask on the
+  `.dock-border-ring` wrapper in DockPanel.tsx.
 */
 .dock-border-flow-ring {
-  padding: 2px;
   overflow: hidden;
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-clip: content-box, border-box;
-  mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  mask-clip: content-box, border-box;
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
 }
 
 .dock-border-flow-static {
@@ -283,43 +405,57 @@ img {
 }
 
 .dock-border-flow-spin {
-  background: conic-gradient(
-    from var(--gradient-angle),
-    var(--dock-glow-1),
-    var(--dock-glow-2),
-    var(--dock-glow-1)
-  );
+  background:
+    conic-gradient(
+      from var(--gradient-angle),
+      var(--dock-glow-1),
+      var(--dock-glow-2),
+      var(--dock-glow-1)
+    ),
+    linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
 }
 
 .dock-border-flow-spin-tri {
-  background: conic-gradient(
-    from var(--gradient-angle),
-    var(--dock-glow-1),
-    var(--dock-glow-2),
-    var(--dock-glow-3),
-    var(--dock-glow-1)
-  );
+  background:
+    conic-gradient(
+      from var(--gradient-angle),
+      var(--dock-glow-1),
+      var(--dock-glow-2),
+      var(--dock-glow-3),
+      var(--dock-glow-1)
+    ),
+    linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
 }
 
 .dock-border-flow-sweep {
-  background: linear-gradient(
-    var(--dock-glow-angle, 135deg),
-    var(--dock-glow-1),
-    var(--dock-glow-2),
-    var(--dock-glow-3),
-    var(--dock-glow-1)
+  filter: drop-shadow(
+    0 0 calc(var(--dock-border-width, 3px) * 2)
+      color-mix(in srgb, var(--dock-glow-2) 60%, transparent)
   );
-  background-size: 200% 200%;
+  background:
+    conic-gradient(
+      from var(--gradient-angle),
+      transparent 0deg,
+      transparent 304deg,
+      color-mix(in srgb, var(--dock-glow-2) 55%, transparent) 318deg,
+      var(--dock-glow-2) 332deg,
+      var(--dock-glow-3) 342deg,
+      #fff 350deg,
+      transparent 360deg
+    ),
+    linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
 }
 
 .dock-border-flow-pulse {
-  background: conic-gradient(
-    from var(--gradient-angle),
-    var(--dock-glow-1),
-    var(--dock-glow-2),
-    var(--dock-glow-3),
-    var(--dock-glow-1)
-  );
+  background:
+    conic-gradient(
+      from var(--gradient-angle),
+      var(--dock-glow-1),
+      var(--dock-glow-2),
+      var(--dock-glow-3),
+      var(--dock-glow-1)
+    ),
+    linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
 }
 
 /*

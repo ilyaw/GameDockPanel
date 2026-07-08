@@ -72,6 +72,10 @@ pub struct DockSettings {
     /// Selects which keyframe animation drives the RGB frame: spectrum
     /// cycle, neon pulse, glitch flicker, or a rotating scan ring.
     pub border_style: String,
+    /// Perimeter frame width in logical px (1–8) — unified gradient ring
+    /// overlay and static pill border when animations are off.
+    #[serde(default = "default_border_width_px")]
+    pub border_width_px: f64,
     /// Master toggle for the panel-body decorative overlay (scanlines /
     /// HUD grid / hologram flicker), independent of `background_animation_enabled`.
     pub panel_effect_enabled: bool,
@@ -147,6 +151,17 @@ fn default_icon_size_px() -> f64 {
     56.0
 }
 
+fn default_border_width_px() -> f64 {
+    5.0
+}
+
+const BORDER_WIDTH_MIN_PX: f64 = 1.0;
+const BORDER_WIDTH_MAX_PX: f64 = 8.0;
+
+fn clamp_border_width_px(px: f64) -> f64 {
+    px.round().clamp(BORDER_WIDTH_MIN_PX, BORDER_WIDTH_MAX_PX)
+}
+
 const ICON_SIZE_MIN_PX: f64 = 44.0;
 const ICON_SIZE_MAX_PX: f64 = 72.0;
 
@@ -176,6 +191,7 @@ impl Default for DockSettings {
             ],
             static_glow_color: "#ff3b6b".to_string(),
             border_style: "spectrum".to_string(),
+            border_width_px: default_border_width_px(),
             panel_effect_enabled: true,
             panel_effect: "grid".to_string(),
             background_animation_enabled: true,
@@ -284,6 +300,7 @@ fn apply_dock_settings(
     settings.background_visibility = settings.background_visibility.clamp(0.0, 1.0);
     settings.background_speed = settings.background_speed.clamp(0.0, 1.0);
     settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
+    settings.border_width_px = clamp_border_width_px(settings.border_width_px);
     if !matches!(
         settings.led_color_mode.as_str(),
         "auto" | "fixed" | "override_only"
@@ -360,4 +377,60 @@ pub fn update_dock_settings(
     settings: DockSettings,
 ) -> Result<(), String> {
     apply_dock_settings(&app, &state, settings)
+}
+
+/// Debug-only helper for automated border QA — not registered in release builds.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn qa_set_border(
+    app: AppHandle,
+    state: State<SettingsState>,
+    border_style: String,
+    border_width_px: f64,
+) -> Result<(), String> {
+    let mut settings = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    settings.border_style = border_style;
+    settings.border_width_px = border_width_px;
+    apply_dock_settings(&app, &state, settings)
+}
+
+/// Watches `/tmp/gd-qa-border.json` for `{ "borderStyle", "borderWidthPx" }`
+/// and live-applies — dev QA only, not started in release builds.
+#[cfg(debug_assertions)]
+pub fn start_border_qa_poller(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let path = std::path::PathBuf::from("/tmp/gd-qa-border.json");
+        let mut last = String::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let Ok(data) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if data == last {
+                continue;
+            }
+            last = data.clone();
+            let Ok(partial) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            let state = app.state::<SettingsState>();
+            let mut settings = state
+                .settings
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(style) = partial.get("borderStyle").and_then(|v| v.as_str()) {
+                settings.border_style = style.to_string();
+            }
+            if let Some(width) = partial.get("borderWidthPx").and_then(|v| v.as_f64()) {
+                settings.border_width_px = width;
+            }
+            let _ = apply_dock_settings(&app, &state, settings);
+        }
+    });
 }
