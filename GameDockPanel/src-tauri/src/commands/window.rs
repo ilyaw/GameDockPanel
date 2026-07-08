@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 use crate::commands::apps::{AppsState, MenuOverlaySide, MenuOverlayState};
 use crate::platform;
@@ -52,6 +52,14 @@ pub fn set_menu_overlay(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
+    let was_active = {
+        let guard = state
+            .menu_overlay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.is_active()
+    };
+
     let overlay = if active && (width > 0.0 || height > 0.0) {
         MenuOverlayState {
             side: MenuOverlaySide::parse(&side),
@@ -70,9 +78,12 @@ pub fn set_menu_overlay(
         *guard = overlay;
     }
 
-    if overlay.is_active() {
-        if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window("main") {
+        if overlay.is_active() {
             platform::ensure_window_fits_menu_overlay(&window, overlay)?;
+        } else if was_active {
+            platform::shrink_dock_window_to_stored_pill(&window)?;
+            let _ = app.emit("dock-menu-overlay-closed", ());
         }
     }
 

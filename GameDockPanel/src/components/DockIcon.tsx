@@ -112,6 +112,10 @@ interface DockIconProps {
   isDragging?: boolean;
   /** Brief post-drop window while layout position animation settles. */
   isReorderSettling?: boolean;
+  /** True while any dock context menu is open — magnify is suppressed. */
+  contextMenuActive?: boolean;
+  /** Notifies `DockPanel` when this icon's context menu opens or closes. */
+  onContextMenuOpenChange?: (open: boolean) => void;
   /** Mirrors `DockSettings.animationsEnabled` — gates only the LED's
    * "breathing" pulse keyframe, not its on/off (active/inactive) state,
    * which is a functional signal, not decoration. */
@@ -143,6 +147,8 @@ export function DockIcon({
   separatorsFull = false,
   isDragging = false,
   isReorderSettling = false,
+  contextMenuActive = false,
+  onContextMenuOpenChange,
   animationsEnabled = true,
   isBouncing = false,
 }: DockIconProps) {
@@ -154,6 +160,13 @@ export function DockIcon({
   const centerMain = useMotionValue(0);
   const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
   const magnifyOriginClass = magnifyOriginClassName(magnifyTransformOrigin);
+
+  useEffect(() => {
+    onContextMenuOpenChange?.(menuOpen);
+    return () => {
+      if (menuOpen) onContextMenuOpenChange?.(false);
+    };
+  }, [menuOpen, onContextMenuOpenChange]);
 
   useEffect(() => {
     setBroken(false);
@@ -323,7 +336,8 @@ export function DockIcon({
     },
   );
   const scale = useSpring(scaleRaw, MAGNIFY_SPRING);
-  const magnifySuppressed = isDragging || isReorderSettling;
+  const magnifySuppressed =
+    isDragging || isReorderSettling || contextMenuActive;
 
   useLayoutEffect(() => {
     if (magnifySuppressed) {

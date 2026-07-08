@@ -244,6 +244,7 @@ export function DockPanel() {
   const iconSizeAnimated = useSpring(iconSizeTarget, ICON_SIZE_SPRING);
   const iconSizeSyncedRef = useRef(false);
   const geometrySyncRafRef = useRef(0);
+  const scheduleGeometrySyncRef = useRef<(() => void) | null>(null);
   /** Static layout numbers for the first paint — guarantees a non-zero pill
    * rect before Motion values land in the DOM. */
   const restMetrics = useMemo(
@@ -351,6 +352,8 @@ export function DockPanel() {
   const settingsMouseY = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
+  const contextMenuOpenCountRef = useRef(0);
+  const [contextMenuActive, setContextMenuActive] = useState(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement | null>(null);
@@ -397,8 +400,32 @@ export function DockPanel() {
     };
   }, []);
 
+  const resetMagnifyCursor = useCallback(() => {
+    mouseX.set(Infinity);
+    mouseY.set(Infinity);
+    settingsMouseX.set(Infinity);
+    settingsMouseY.set(Infinity);
+    setHoveredIconId(null);
+    setIsSettingsHovered(false);
+  }, [mouseX, mouseY, settingsMouseX, settingsMouseY]);
+
+  const handleContextMenuOpenChange = useCallback(
+    (open: boolean) => {
+      const next = open
+        ? contextMenuOpenCountRef.current + 1
+        : Math.max(0, contextMenuOpenCountRef.current - 1);
+      contextMenuOpenCountRef.current = next;
+      setContextMenuActive(next > 0);
+      if (open) {
+        resetMagnifyCursor();
+      }
+    },
+    [resetMagnifyCursor],
+  );
+
   const applyCursor = useCallback(
     (x: number, y: number) => {
+      if (contextMenuOpenCountRef.current > 0) return;
       if (isDraggingRef.current || isReorderSettlingRef.current) return;
       const settingsEl = settingsSlotRef.current;
       if (settingsEl && pointInRect(x, y, settingsEl)) {
@@ -687,6 +714,8 @@ export function DockPanel() {
       });
     };
 
+    scheduleGeometrySyncRef.current = scheduleGeometrySync;
+
     scheduleGeometrySync();
 
     let lastPillWidth = measurePill().width;
@@ -713,6 +742,7 @@ export function DockPanel() {
 
     return () => {
       alive = false;
+      scheduleGeometrySyncRef.current = null;
       unsubscribeIconSize();
       if (geometrySyncRafRef.current) {
         cancelAnimationFrame(geometrySyncRafRef.current);
@@ -721,6 +751,20 @@ export function DockPanel() {
       observer.disconnect();
     };
   }, [items, iconSizeAnimated]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void listen("dock-menu-overlay-closed", () => {
+      scheduleGeometrySyncRef.current?.();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   useLayoutEffect(() => {
     const el = settingsSlotRef.current;
@@ -866,6 +910,7 @@ export function DockPanel() {
         ref={pillRef}
         onMouseEnter={enterDock}
         onMouseMove={(event) => {
+          if (contextMenuOpenCountRef.current > 0) return;
           lastNativeMoveAt.current = performance.now();
           dockHoveredRef.current = true;
           applyCursor(event.clientX, event.clientY);
@@ -1005,6 +1050,8 @@ export function DockPanel() {
                 isReorderSettling={isReorderSettling}
                 animationsEnabled={settings.animationsEnabled}
                 isBouncing={bouncingIds.has(item.id)}
+                contextMenuActive={contextMenuActive}
+                onContextMenuOpenChange={handleContextMenuOpenChange}
                 onRemove={removeApp}
                 onShowInFinder={showInFinder}
                 onQuit={quitApp}
@@ -1025,6 +1072,8 @@ export function DockPanel() {
                 overlayPreferredSide={orientation.overlayPreferredSide}
                 onRemove={removeSeparator}
                 isDragging={isDragging}
+                contextMenuActive={contextMenuActive}
+                onContextMenuOpenChange={handleContextMenuOpenChange}
               />
             )}
           </Reorder.Item>
@@ -1044,14 +1093,22 @@ export function DockPanel() {
             ref={settingsSlotRef}
             style={{ height: settingsSlotSizePx, width: settingsSlotSizePx }}
             className={`relative shrink-0 ${
-              isSettingsHovered && !isDragging && !isReorderSettling ? "z-10" : ""
+              isSettingsHovered &&
+              !isDragging &&
+              !isReorderSettling &&
+              !contextMenuActive
+                ? "z-10"
+                : ""
             }`}
           >
             <DockOverlayAnchor
               side={orientation.overlayPreferredSide}
               gap={TOOLTIP_GAP_PX}
               className={`pointer-events-none whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
-                isSettingsHovered && !isDragging && !isReorderSettling
+                isSettingsHovered &&
+                !isDragging &&
+                !isReorderSettling &&
+                !contextMenuActive
                   ? "scale-100 opacity-100"
                   : "scale-90 opacity-0"
               }`}
@@ -1059,7 +1116,12 @@ export function DockPanel() {
               Настройки
             </DockOverlayAnchor>
             <motion.div
-              style={{ scale: isDragging || isReorderSettling ? 1 : settingsScale }}
+              style={{
+                scale:
+                  isDragging || isReorderSettling || contextMenuActive
+                    ? 1
+                    : settingsScale,
+              }}
               className={`h-full w-full ${settingsOriginClass}`}
             >
               <motion.button

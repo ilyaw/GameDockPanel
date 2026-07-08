@@ -664,6 +664,27 @@ pub fn resize_dock_window_for_pill(
     Ok(changed)
 }
 
+/// Restores the native window frame to the formula size for the last
+/// DOM-measured pill — called when a context menu closes after
+/// `ensure_window_fits_menu_overlay` may have grown the window.
+#[cfg(target_os = "macos")]
+pub fn shrink_dock_window_to_stored_pill(window: &WebviewWindow) -> Result<bool, String> {
+    let state = window.state::<AppsState>();
+    let pill_width = *state
+        .pill_width_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pill_height = *state
+        .pill_height_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if pill_width < 1.0 || pill_height < 1.0 {
+        return Ok(false);
+    }
+    let icon_size_dip = current_icon_size_dip(window);
+    resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)
+}
+
 /// Grows the dock window when an open context menu exceeds the current far
 /// reserve — prevents the menu from being clipped by the webview's
 /// `overflow: hidden` boundary. Grows the thickness and/or length axis as
@@ -1891,5 +1912,81 @@ fn quit_app_on_main_thread(bundle_id: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("failed to send terminate to {bundle_id}"))
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod geometry_tests {
+    use super::*;
+    use crate::commands::apps::MenuOverlaySide;
+
+    #[test]
+    fn axis_css_dims_maps_length_to_width_for_horizontal_dock() {
+        let (w, h) = axis_css_dims(DockAxis::Horizontal, 500.0, 90.0);
+        assert_eq!(w, 500.0);
+        assert_eq!(h, 90.0);
+    }
+
+    #[test]
+    fn axis_css_dims_maps_length_to_height_for_vertical_dock() {
+        let (w, h) = axis_css_dims(DockAxis::Vertical, 500.0, 90.0);
+        assert_eq!(w, 90.0);
+        assert_eq!(h, 500.0);
+    }
+
+    #[test]
+    fn add_remove_grows_width_on_bottom_dock_not_height() {
+        let icon = 56.0;
+        let pill_short = 400.0;
+        let pill_long = 480.0;
+        let thickness = 90.0;
+        let window_short = window_length_dip(pill_short, icon);
+        let window_long = window_length_dip(pill_long, icon);
+        let (w_short, h_short) =
+            axis_css_dims(DockAxis::Horizontal, window_short, window_thickness_dip(thickness, icon));
+        let (w_long, h_long) =
+            axis_css_dims(DockAxis::Horizontal, window_long, window_thickness_dip(thickness, icon));
+        assert!(w_long > w_short);
+        assert!((h_long - h_short).abs() < 0.5);
+    }
+
+    #[test]
+    fn add_remove_grows_height_on_right_dock_not_width() {
+        let icon = 56.0;
+        let pill_short = 400.0;
+        let pill_long = 480.0;
+        let thickness = 90.0;
+        let window_short = window_length_dip(pill_short, icon);
+        let window_long = window_length_dip(pill_long, icon);
+        let (w_short, h_short) =
+            axis_css_dims(DockAxis::Vertical, window_short, window_thickness_dip(thickness, icon));
+        let (w_long, h_long) =
+            axis_css_dims(DockAxis::Vertical, window_long, window_thickness_dip(thickness, icon));
+        assert!(h_long > h_short);
+        assert!((w_long - w_short).abs() < 0.5);
+    }
+
+    #[test]
+    fn menu_on_right_dock_extends_length_when_opened_to_side() {
+        let (thickness_ext, length_ext) = menu_overlay_axis_extents(
+            DockPosition::Right,
+            MenuOverlaySide::Left,
+            160.0,
+            220.0,
+        );
+        assert!(thickness_ext > 0.0);
+        assert_eq!(length_ext, 0.0);
+    }
+
+    #[test]
+    fn menu_on_bottom_dock_extends_length_when_opened_to_side() {
+        let (thickness_ext, length_ext) = menu_overlay_axis_extents(
+            DockPosition::Bottom,
+            MenuOverlaySide::Left,
+            160.0,
+            220.0,
+        );
+        assert_eq!(thickness_ext, 0.0);
+        assert!(length_ext > 0.0);
     }
 }

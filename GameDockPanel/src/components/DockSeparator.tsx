@@ -23,6 +23,8 @@ interface DockSeparatorProps {
   overlayPreferredSide: OverlaySide;
   onRemove?: (separatorId: string) => void;
   isDragging?: boolean;
+  contextMenuActive?: boolean;
+  onContextMenuOpenChange?: (open: boolean) => void;
 }
 
 export function DockSeparator({
@@ -32,11 +34,19 @@ export function DockSeparator({
   overlayPreferredSide,
   onRemove,
   isDragging = false,
+  onContextMenuOpenChange,
 }: DockSeparatorProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
   const anchorRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    onContextMenuOpenChange?.(menuOpen);
+    return () => {
+      if (menuOpen) onContextMenuOpenChange?.(false);
+    };
+  }, [menuOpen, onContextMenuOpenChange]);
 
   useEffect(() => {
     if (!menuOpen) return;

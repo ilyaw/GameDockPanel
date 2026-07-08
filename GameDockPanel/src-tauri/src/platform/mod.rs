@@ -18,7 +18,7 @@ pub use macos::{
     refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon,
     reveal_app_in_finder, resize_dock_window_for_pill, setup_dock_window,
     start_apps_monitoring, sync_vibrancy_pill_from_web,
-    ensure_window_fits_menu_overlay,
+    ensure_window_fits_menu_overlay, shrink_dock_window_to_stored_pill,
 };
 
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
@@ -95,6 +95,11 @@ pub fn ensure_window_fits_menu_overlay(
     _overlay: crate::commands::apps::MenuOverlayState,
 ) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn shrink_dock_window_to_stored_pill(_window: &tauri::WebviewWindow) -> Result<bool, String> {
+    Ok(false)
 }
 
 #[cfg(not(target_os = "macos"))]
