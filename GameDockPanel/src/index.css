@@ -230,6 +230,7 @@ img {
 
 .dock-border-scan-ring {
   padding: 2px;
+  overflow: hidden;
   background: conic-gradient(
     from var(--dock-scan-angle),
     transparent 0deg,
@@ -243,6 +244,11 @@ img {
   -webkit-mask:
     linear-gradient(#000 0 0) content-box,
     linear-gradient(#000 0 0);
+  -webkit-mask-clip: content-box, border-box;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-clip: content-box, border-box;
   -webkit-mask-composite: xor;
   mask-composite: exclude;
 }
@@ -255,9 +261,15 @@ img {
 */
 .dock-border-flow-ring {
   padding: 2px;
+  overflow: hidden;
   -webkit-mask:
     linear-gradient(#000 0 0) content-box,
     linear-gradient(#000 0 0);
+  -webkit-mask-clip: content-box, border-box;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-clip: content-box, border-box;
   -webkit-mask-composite: xor;
   mask-composite: exclude;
 }
@@ -317,7 +329,17 @@ img {
   `mix-blend-mode: screen` on the hologram overlay makes it add light onto
   the dark glass instead of painting an opaque patch over the icons
   underneath. Scanlines and grid stay as low-opacity layers without blend.
+
+  Wrapper clips every panel effect to the pill footprint. `isolation` is
+  required for hologram: WebKit composites `mix-blend-mode` against the
+  element's rectangular bounds unless blend is contained inside an isolated
+  group that is itself hard-clipped to the same radius.
 */
+.dock-panel-effect-clip {
+  overflow: hidden;
+  border-radius: 28px;
+  isolation: isolate;
+}
 .dock-panel-scanline {
   /*
     Real CRT-style horizontal scanlines — thin repeating rows tinted from
@@ -377,6 +399,10 @@ img {
 .dock-panel-hologram {
   background: color-mix(in srgb, var(--dock-bg-1, #fff) 16%, transparent);
   mix-blend-mode: screen;
+  border-radius: 28px;
+  /* `overflow: hidden` on the parent is not enough for blend-mode in WKWebView
+     — clip-path forces the compositor to treat the hologram as rounded. */
+  clip-path: inset(0 round 28px);
 }
 
 /*

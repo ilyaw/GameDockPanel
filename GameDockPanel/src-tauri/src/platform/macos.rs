@@ -328,6 +328,14 @@ fn set_vibrancy_pill_frame(
     blur_view.setClipsToBounds(true);
     blur_view.setFrame(pill_frame);
 
+    // `apply_vibrancy` sets this once at install time; re-apply after every
+    // frame resize so WKWebView geometry sync can't leave a rectangular blur
+    // halo peeking through the pill's rounded corners.
+    unsafe {
+        use objc2::msg_send;
+        let _: () = msg_send![&*blur_view, setCornerRadius: PILL_CORNER_RADIUS_DIP];
+    }
+
     Ok(())
 }
 

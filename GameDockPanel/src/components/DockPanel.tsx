@@ -842,21 +842,31 @@ export function DockPanel() {
             : "border-transparent bg-black/40"
         }`}
       >
-        {showScanRing && (
-          // Separate overlay, not a class on the pill itself — see the
-          // "scan" branch note on `showScanRing`/`activeBorderStyle` above
-          // for why a rotating gradient can't just replace `border-color`
-          // like the other three styles do.
+        {(showScanRing || showFlowRing) && (
+          // Clip gradient rings to the pill footprint — conic-gradient fills
+          // a rectangular box and WebKit's mask-composite ring trick can leak
+          // square corners without an overflow-hidden rounded wrapper.
           <div
             aria-hidden
-            className="dock-border-scan-ring animate-border-scan-rotate pointer-events-none absolute -inset-px -z-10 rounded-[28px]"
-          />
-        )}
-        {showFlowRing && flowRingVariant && (
-          <div
-            aria-hidden
-            className={`dock-border-flow-ring ${FLOW_RING_ANIMATION_CLASSES[flowRingVariant]} pointer-events-none absolute -inset-px -z-10 rounded-[28px]`}
-          />
+            className="pointer-events-none absolute inset-0 -z-10 overflow-hidden rounded-[28px]"
+          >
+            {showScanRing && (
+              // Separate overlay, not a class on the pill itself — see the
+              // "scan" branch note on `showScanRing`/`activeBorderStyle` above
+              // for why a rotating gradient can't just replace `border-color`
+              // like the other three styles do.
+              <div
+                aria-hidden
+                className="dock-border-scan-ring animate-border-scan-rotate pointer-events-none absolute -inset-px rounded-[28px]"
+              />
+            )}
+            {showFlowRing && flowRingVariant && (
+              <div
+                aria-hidden
+                className={`dock-border-flow-ring ${FLOW_RING_ANIMATION_CLASSES[flowRingVariant]} pointer-events-none absolute -inset-px rounded-[28px]`}
+              />
+            )}
+          </div>
         )}
         {settings.backgroundAnimationEnabled && !fileDragOver && (
           // Negative z-index puts this behind the icons/button below
@@ -1006,7 +1016,7 @@ export function DockPanel() {
           // where the two visually overlap.
           <div
             aria-hidden
-            className="pointer-events-none absolute inset-0 z-[5] overflow-hidden rounded-[28px]"
+            className="dock-panel-effect-clip pointer-events-none absolute inset-0 z-[5]"
           >
             <div
               className={`h-full w-full ${panelEffectClasses.overlay} ${panelEffectClasses.animation}`}
