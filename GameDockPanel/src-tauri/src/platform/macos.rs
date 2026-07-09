@@ -507,6 +507,24 @@ fn fallback_pill_origin(
     }
 }
 
+/// Snaps a webview-local pill rect to the physical-pixel grid as one unit.
+#[cfg(target_os = "macos")]
+fn snap_dip_rect(x: f64, y: f64, w: f64, h: f64, scale: f64) -> (f64, f64, f64, f64) {
+    if scale <= 0.0 {
+        return (x, y, w, h);
+    }
+    let left = (x * scale).round() / scale;
+    let top = (y * scale).round() / scale;
+    let right = ((x + w) * scale).round() / scale;
+    let bottom = ((y + h) * scale).round() / scale;
+    (
+        left,
+        top,
+        (right - left).max(0.0),
+        (bottom - top).max(0.0),
+    )
+}
+
 /// Resizes the masked vibrancy blur view to the given pill footprint.
 /// When `origin_x` / `origin_y` are `None`, the frame is anchored via
 /// `fallback_pill_origin` (startup before DOM measure). When provided,
@@ -537,6 +555,7 @@ fn set_vibrancy_pill_frame(
     };
     let bounds = parent.bounds();
     let is_flipped = parent.isFlipped();
+    let scale = window.scale_factor().unwrap_or(1.0);
 
     blur_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
 
@@ -549,15 +568,20 @@ fn set_vibrancy_pill_frame(
         is_flipped,
     );
 
-    let mut pill_frame = bounds;
-    pill_frame.size.width = width_dip;
-    pill_frame.size.height = height_dip;
-    pill_frame.origin.x = origin_x.unwrap_or(fallback_origin.0);
-    pill_frame.origin.y = match origin_y {
-        Some(y) if is_flipped => y,
-        Some(y) => bounds.size.height - y - height_dip,
-        None => fallback_origin.1,
+    let (local_x, local_y) = match (origin_x, origin_y) {
+        (Some(x), Some(y)) if is_flipped => (x, y),
+        (Some(x), Some(y)) => (x, bounds.size.height - y - height_dip),
+        _ => fallback_origin,
     };
+
+    let (local_x, local_y, local_w, local_h) =
+        snap_dip_rect(local_x, local_y, width_dip, height_dip, scale);
+
+    let mut pill_frame = bounds;
+    pill_frame.origin.x = local_x;
+    pill_frame.origin.y = local_y;
+    pill_frame.size.width = local_w;
+    pill_frame.size.height = local_h;
 
     blur_view.setClipsToBounds(true);
     blur_view.setFrame(pill_frame);

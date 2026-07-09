@@ -75,7 +75,7 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     ledAxis: "horizontal",
     ledBeforeIcon: false,
     wrapperClassName: "flex-col justify-end items-center pb-2",
-    pillClassName: "flex-row items-end",
+    pillClassName: "flex-row items-end justify-center",
   },
   top: {
     isVertical: false,
@@ -86,7 +86,7 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     ledAxis: "horizontal",
     ledBeforeIcon: false,
     wrapperClassName: "flex-col justify-start items-center pt-2",
-    pillClassName: "flex-row items-end",
+    pillClassName: "flex-row items-end justify-center",
   },
   left: {
     isVertical: true,
@@ -97,7 +97,7 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     ledAxis: "vertical",
     ledBeforeIcon: true,
     wrapperClassName: "flex-row justify-start items-center pl-2",
-    pillClassName: "flex-col items-center",
+    pillClassName: "flex-col items-center justify-center",
   },
   right: {
     isVertical: true,
@@ -108,7 +108,7 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
     ledAxis: "vertical",
     ledBeforeIcon: false,
     wrapperClassName: "flex-row justify-end items-center pr-2",
-    pillClassName: "flex-col items-center",
+    pillClassName: "flex-col items-center justify-center",
   },
 };
 

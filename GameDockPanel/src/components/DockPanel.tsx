@@ -20,7 +20,6 @@ import {
   getSizeMetrics,
   clampBorderWidthPx,
   PILL_CORNER_RADIUS_PX,
-  roundedRingMaskStyle,
 } from "../lib/constants";
 import {
   measureMagnifyCenter,
@@ -364,13 +363,18 @@ function HydratedDockPanel({
    * `paddingInline`/`paddingBlock` are writing-mode logical properties that
    * don't follow `flex-direction` on their own.
    */
+  /**
+   * Every flex `gap` / `padding*` fed by a MotionValue below is a `"<n>px"`
+   * *string* — same px-append gap as `pillGapPx`: `paddingInline` is not in
+   * Framer Motion's `numberValueTypes` map, so unitless updates are ignored.
+   */
   const pillPaddingXPx = useTransform(
     iconSizeAnimated,
-    (px) => getSizeMetrics(px).dockPaddingXPx,
+    (px) => `${getSizeMetrics(px).dockPaddingXPx}px`,
   );
   const pillPaddingYPx = useTransform(
     iconSizeAnimated,
-    (px) => getSizeMetrics(px).dockPaddingYPx,
+    (px) => `${getSizeMetrics(px).dockPaddingYPx}px`,
   );
   const iconRowGapPx = useTransform(
     iconSizeAnimated,
@@ -401,7 +405,6 @@ function HydratedDockPanel({
     undefined,
   );
   const [isRejecting, setIsRejecting] = useState(false);
-  const [pillMaskSize, setPillMaskSize] = useState({ width: 0, height: 0 });
   const [insertMarker, setInsertMarker] = useState<InsertMarkerMetrics | null>(
     null,
   );
@@ -812,10 +815,6 @@ function HydratedDockPanel({
     scheduleGeometrySync();
 
     const initialRect = measurePill();
-    setPillMaskSize({
-      width: initialRect.width,
-      height: initialRect.height,
-    });
 
     let lastPillWidth = initialRect.width;
     let lastPillHeight = initialRect.height;
@@ -825,12 +824,6 @@ function HydratedDockPanel({
       const widthChanged = Math.abs(rect.width - lastPillWidth) > 0.5;
       const heightChanged = Math.abs(rect.height - lastPillHeight) > 0.5;
       const topChanged = Math.abs(rect.top - lastPillTop) > 0.5;
-      setPillMaskSize((prev) =>
-        Math.abs(prev.width - rect.width) < 0.01 &&
-        Math.abs(prev.height - rect.height) < 0.01
-          ? prev
-          : { width: rect.width, height: rect.height },
-      );
       if (widthChanged || heightChanged || topChanged) {
         lastPillWidth = rect.width;
         lastPillHeight = rect.height;
@@ -909,6 +902,7 @@ function HydratedDockPanel({
         : `0 0 ${glowSpread}px 0 color-mix(in srgb, ${settings.staticGlowColor} 40%, transparent)`,
       "--dock-border-width": `${borderWidthPx}px`,
       "--dock-pill-radius": `${PILL_CORNER_RADIUS_PX}px`,
+      borderRadius: "var(--dock-pill-radius)",
       "--dock-glow-1": settings.rgbGlowColors[0],
       "--dock-glow-2": settings.rgbGlowColors[1],
       "--dock-glow-3": settings.rgbGlowColors[2],
@@ -935,21 +929,6 @@ function HydratedDockPanel({
     settings.backgroundSpeed,
     showBorderRing,
   ]);
-
-  const borderRingStyle = useMemo<BorderRingStyle>(() => {
-    if (pillMaskSize.width < 1 || pillMaskSize.height < 1) {
-      return { "--dock-border-width": `${borderWidthPx}px` };
-    }
-    return {
-      "--dock-border-width": `${borderWidthPx}px`,
-      ...roundedRingMaskStyle(
-        pillMaskSize.width,
-        pillMaskSize.height,
-        PILL_CORNER_RADIUS_PX,
-        borderWidthPx,
-      ),
-    };
-  }, [borderWidthPx, pillMaskSize.height, pillMaskSize.width]);
 
   /** Just the flow layer's own opacity now — its color/duration custom
    * properties moved onto `pillStyle` above so other overlays can share
@@ -993,8 +972,8 @@ function HydratedDockPanel({
           // briefly binds the *other* axis to this same motion value).
           // Always including both keys, just swapping which one holds
           // the live motion value, avoids that trap.
-          width: orientation.isVertical ? pillThicknessPx : "auto",
-          height: orientation.isVertical ? "auto" : pillThicknessPx,
+          width: orientation.isVertical ? pillThicknessPx : "max-content",
+          height: orientation.isVertical ? "max-content" : pillThicknessPx,
           gap: pillGapPx,
           // `paddingInline`/`paddingBlock` are writing-mode logical
           // properties — they don't follow `flex-direction` on their own,
@@ -1007,7 +986,7 @@ function HydratedDockPanel({
           minHeight: orientation.isVertical ? 0 : restMetrics.pillThicknessPx,
           borderWidth: showBorderRing ? 0 : `${borderWidthPx}px`,
         }}
-        className={`pointer-events-auto relative m-0 flex shrink-0 overflow-visible rounded-[28px] border bg-transparent transition-colors ${orientation.pillClassName} ${
+        className={`pointer-events-auto relative m-0 flex w-fit shrink-0 overflow-visible border bg-transparent transition-colors ${orientation.pillClassName} ${
           isRejecting ? "animate-reject-pulse" : ""
         } ${
           fileDragOver ? "border-zinc-400" : "border-transparent"
@@ -1018,12 +997,17 @@ function HydratedDockPanel({
           className="dock-pill-decor-clip pointer-events-none absolute inset-0 z-0"
         >
           {settings.backgroundAnimationEnabled && !fileDragOver && (
-            // Oversized + blurred inner layer; the decor clip boundary
-            // keeps the soft falloff from showing a hard edge at the pill.
+            // Isolated clip wrapper: `filter: blur()` on an oversized layer
+            // can bleed past a shared parent clip on one side in WKWebView.
             <div
-              className={`${bgAnimClasses} pointer-events-none absolute -inset-8 blur-2xl`}
-              style={bgFlowStyle}
-            />
+              aria-hidden
+              className="dock-pill-decor-clip pointer-events-none absolute inset-0"
+            >
+              <div
+                className={`${bgAnimClasses} pointer-events-none absolute -inset-8 blur-2xl`}
+                style={bgFlowStyle}
+              />
+            </div>
           )}
           <div
             aria-hidden
@@ -1031,19 +1015,21 @@ function HydratedDockPanel({
               fileDragOver ? "bg-zinc-900/90" : "bg-black/40"
             }`}
           />
-          {showBorderRing && pillMaskSize.width > 0 && pillMaskSize.height > 0 && (
+        </div>
+        {showBorderRing && (
+          <div
+            aria-hidden
+            className="dock-border-clip pointer-events-none absolute inset-0 z-[1]"
+          >
             <div
               aria-hidden
-              className="dock-border-clip pointer-events-none absolute inset-0 z-[1]"
-            >
-              <div
-                aria-hidden
-                className={`pointer-events-none absolute inset-0 ${getBorderRingClasses(settings.borderStyle)}`}
-                style={borderRingStyle}
-              />
-            </div>
-          )}
-        </div>
+              className={`dock-border-ring pointer-events-none absolute inset-0 ${getBorderRingClasses(settings.borderStyle)}`}
+              style={
+                { "--dock-border-width": `${borderWidthPx}px` } as BorderRingStyle
+              }
+            />
+          </div>
+        )}
         {insertMarker && (
           <div
             aria-hidden
@@ -1072,7 +1058,7 @@ function HydratedDockPanel({
           values={items}
           onReorder={handleReorder}
           style={{ gap: iconRowGapPx }}
-          className={`relative z-[2] m-0 flex list-none ${orientation.pillClassName}`}
+          className={`relative z-[2] m-0 flex list-none p-0 ${orientation.pillClassName}`}
           as="ul"
         >
         {items.map((item) => (

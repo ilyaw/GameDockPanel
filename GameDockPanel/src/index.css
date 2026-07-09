@@ -188,10 +188,9 @@ img {
   a separate absolutely-positioned `.dock-border-scan-ring` overlay sized
   to the pill: `@property --dock-scan-angle` lets `border-scan-rotate`
   animate the conic gradient's rotation smoothly (plain custom properties
-  can't be interpolated), and the two masks combined with
+  can't be interpolated),   and the two masks combined with
   `mask-composite: exclude` clip that gradient down to just a ring — thickness
-  is driven by an SVG mask (`roundedRingMaskStyle` in constants.ts) sized to
-  the pill, not by `padding` here.
+  is driven by `padding` + content-box mask on `.dock-border-ring`.
 */
 @property --dock-scan-angle {
   syntax: "<angle>";
@@ -245,29 +244,45 @@ img {
   pill without being cut off.
 */
 .dock-pill-decor-clip {
+  /* `clip-path` contains oversized `filter: blur()` children more reliably
+     than `border-radius` alone in WKWebView. The RGB ring is a sibling
+     outside this wrapper so stroke AA is not cut at the semicircle tips. */
   clip-path: inset(0 round var(--dock-pill-radius, 28px));
   overflow: hidden;
   isolation: isolate;
+  contain: paint;
 }
 
 /*
-  Border-ring wrapper — `contain: paint` keeps `filter: drop-shadow` from
-  bleeding past the rounded contour at corners (parent decor clip handles
-  the shape).
+  Border-ring wrapper — lives outside `.dock-pill-decor-clip` so stroke AA at
+  the semicircle tips is not clipped by the decor layer. Rounded clip contains
+  conic-gradient bleed (WKWebView draws a duplicate cap if overflow is visible).
 */
 .dock-border-clip {
+  border-radius: var(--dock-pill-radius, 28px);
+  clip-path: inset(0 round var(--dock-pill-radius, 28px));
   overflow: hidden;
   contain: paint;
 }
 
+/*
+  Ring thickness via padding + content-box mask — inset-0 on the pill, so the
+  frame tracks content geometry. (background-clip:border-box is unreliable in
+  WKWebView and paints the gradient over the whole pill.)
+*/
 .dock-border-ring {
+  box-sizing: border-box;
+  border-radius: inherit;
+  padding: var(--dock-border-width, 3px);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
   overflow: hidden;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-  mask-position: center;
-  -webkit-mask-size: 100% 100%;
-  mask-size: 100% 100%;
   --dock-border-dim: color-mix(in srgb, var(--dock-glow-1) 52%, transparent);
 }
 
@@ -414,8 +429,8 @@ img {
 
 /*
   Spotlight-style flow-ring border styles (`flow-*` in BORDER_STYLE_PRESETS).
-  Gradient fills the full perimeter; ring thickness from SVG mask on the
-  `.dock-border-ring` wrapper in DockPanel.tsx.
+  Gradient fills the full perimeter; ring thickness from `.dock-border-ring`
+  padding + content-box mask.
 */
 .dock-border-flow-ring {
   overflow: hidden;

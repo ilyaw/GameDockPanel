@@ -167,7 +167,7 @@ export const DOCK_ROW_DIVIDER_HEIGHT_RATIO = 0.6;
 export const PILL_CORNER_RADIUS_PX = 28;
 
 /** Unified RGB frame ring thickness — all 9 border styles read
- * `--dock-border-width` on the gradient overlay. */
+ * `--dock-border-width` on the gradient overlay (padding + content-box mask). */
 export const BORDER_WIDTH_MIN_PX = 1;
 export const BORDER_WIDTH_MAX_PX = 8;
 export const DEFAULT_BORDER_WIDTH_PX = 5;
@@ -178,38 +178,6 @@ export function clampBorderWidthPx(px: number): number {
   );
 }
 
-/** SVG ring mask for gradient border overlays — a stroked rounded rect keeps
- * inner/outer radii parallel at any thickness (innerR ≈ outerR − borderWidth). */
-export function roundedRingMaskStyle(
-  widthPx: number,
-  heightPx: number,
-  outerRadiusPx: number,
-  borderWidthPx: number,
-): {
-  maskImage: string;
-  WebkitMaskImage: string;
-  maskSize: string;
-  WebkitMaskSize: string;
-} {
-  const w = Math.max(1, widthPx);
-  const h = Math.max(1, heightPx);
-  const bw = Math.max(1, borderWidthPx);
-  const half = bw / 2;
-  const rx = Math.max(0, Math.min(outerRadiusPx - half, w / 2 - half, h / 2 - half));
-  const svg = [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`,
-    `<rect x="${half}" y="${half}" width="${w - bw}" height="${h - bw}"`,
-    ` rx="${rx}" ry="${rx}" fill="none" stroke="white" stroke-width="${bw}"/>`,
-    `</svg>`,
-  ].join("");
-  const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-  return {
-    maskImage: url,
-    WebkitMaskImage: url,
-    maskSize: "100% 100%",
-    WebkitMaskSize: "100% 100%",
-  };
-}
 /** Horizontal glow bleed (~14px box-shadow each side). */
 export const WINDOW_GLOW_BLEED_PX = 32;
 /** Gap between tooltip/menu bottom edge and icon top (`margin-bottom` on both). */
