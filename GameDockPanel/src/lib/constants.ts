@@ -157,6 +157,26 @@ export const LED_EDGE_INSET_FROM_PILL_PX = 3;
 /** Mirrors the vertical divider between the app icons and the settings
  * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
 export const DOCK_DIVIDER_WIDTH_PX = 9;
+/** Minimum hit target for the compact settings (⋯) control in DockPanel. */
+export const SETTINGS_CONTROL_HIT_PX = 28;
+/** Upper bound on the settings control slot along the dock length axis. */
+export const SETTINGS_CONTROL_MAX_PX = 36;
+
+/** Compact settings-button slot width/height — mirrors
+ * `settings_control_width_dip` in src-tauri/src/platform/macos.rs. */
+export function settingsControlWidthPx(iconSizePx: number): number {
+  return Math.round(
+    Math.min(
+      SETTINGS_CONTROL_MAX_PX,
+      Math.max(SETTINGS_CONTROL_HIT_PX, iconSizePx * 0.38),
+    ),
+  );
+}
+
+/** Ellipsis icon size inside the settings control. */
+export function settingsControlIconPx(iconSizePx: number): number {
+  return Math.round(Math.min(16, Math.max(14, iconSizePx * 0.26)));
+}
 /** Horizontal slot for an in-row dock separator — distinct from icon width
  * and from the apps↔settings divider above. Mirrors
  * `DOCK_SEPARATOR_WIDTH_DIP` in src-tauri/src/platform/macos.rs. */
@@ -383,9 +403,12 @@ export function pillLengthPx(items: DockItem[], iconSizePx: number): number {
     rowLength +=
       item.type === "app" ? iconSizePx : DOCK_SEPARATOR_WIDTH_PX;
   });
-  // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
+  // Trailing divider + compact settings control in DockPanel.
   const settingsSlot =
-    metrics.dockGapPx + DOCK_DIVIDER_WIDTH_PX + metrics.dockGapPx + iconSizePx;
+    metrics.dockGapPx +
+    DOCK_DIVIDER_WIDTH_PX +
+    metrics.dockGapPx +
+    settingsControlWidthPx(iconSizePx);
   return metrics.dockPaddingXPx * 2 + rowLength + settingsSlot;
 }
 

@@ -111,6 +111,16 @@ const LED_HEIGHT_DIP: f64 = 3.0;
 // Mirrors the vertical divider between the app icons and the settings gear
 // in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line.
 const DOCK_DIVIDER_WIDTH_DIP: f64 = 9.0;
+/// Mirrors `SETTINGS_CONTROL_HIT_PX` in src/lib/constants.ts.
+const SETTINGS_CONTROL_HIT_DIP: f64 = 28.0;
+/// Mirrors `SETTINGS_CONTROL_MAX_PX` in src/lib/constants.ts.
+const SETTINGS_CONTROL_MAX_DIP: f64 = 36.0;
+
+fn settings_control_width_dip(icon_size_dip: f64) -> f64 {
+    (icon_size_dip * 0.38)
+        .round()
+        .clamp(SETTINGS_CONTROL_HIT_DIP, SETTINGS_CONTROL_MAX_DIP)
+}
 /// Horizontal slot for an in-row dock separator — mirrors
 /// `DOCK_SEPARATOR_WIDTH_PX` in src/lib/constants.ts (distinct from the
 /// apps↔settings divider above).
@@ -334,9 +344,11 @@ fn pill_length_dip(entries: &[DockItem], icon_size_dip: f64, position: DockPosit
             DockItem::Separator(_) => DOCK_SEPARATOR_WIDTH_DIP,
         };
     }
-    // Trailing divider + settings gear in DockPanel — gap, divider, gap, icon.
-    let settings_slot =
-        metrics.dock_gap_dip + DOCK_DIVIDER_WIDTH_DIP + metrics.dock_gap_dip + icon_size_dip;
+    // Trailing divider + compact settings control in DockPanel.
+    let settings_slot = metrics.dock_gap_dip
+        + DOCK_DIVIDER_WIDTH_DIP
+        + metrics.dock_gap_dip
+        + settings_control_width_dip(icon_size_dip);
     metrics.dock_padding_x_dip * 2.0 + row_length + settings_slot
 }
 

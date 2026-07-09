@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Reorder, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Settings } from "lucide-react";
+import { EllipsisVertical } from "lucide-react";
 import { DockIcon } from "./DockIcon";
 import { DockRowDivider } from "./DockRowDivider";
 import { DockSeparator } from "./DockSeparator";
@@ -14,7 +14,6 @@ import {
   MAX_SEPARATORS,
   TOOLTIP_GAP_PX,
   BG_ANIMATION_CLASSES,
-  computeMagnifyScale,
   getBackgroundPreset,
   backgroundPresetToDurationS,
   getBorderRingClasses,
@@ -22,10 +21,12 @@ import {
   getSizeMetrics,
   clampBorderWidthPx,
   PILL_CORNER_RADIUS_PX,
+  LED_HEIGHT_PX,
+  settingsControlWidthPx,
+  settingsControlIconPx,
   roundedRingMaskStyle,
 } from "../lib/constants";
 import {
-  magnifyOriginClassName,
   measureMagnifyCenter,
   type MagnifyAxis,
 } from "../lib/dockPlacement";
@@ -82,9 +83,6 @@ const SETTLE_DEBOUNCE_MS = 40;
 /** Fallback if `onLayoutAnimationComplete` never fires after a reorder drop. */
 const SETTLE_SAFETY_MS = 500;
 
-const MAGNIFY_SPRING = { mass: 0.15, stiffness: 300, damping: 25 };
-/** Critically damped, ~100 ms settle — interpolates between rapid slider
- * steps without the old soft spring's ~1.8 s lag or jump()'s 1 px stutter. */
 const ICON_SIZE_SPRING = { mass: 0.35, stiffness: 420, damping: 32 };
 
 interface DockCursorPayload {
@@ -382,28 +380,18 @@ function HydratedDockPanel({
     iconSizeAnimated,
     (px) => `${getSizeMetrics(px).dockGapPx}px`,
   );
-  /** Icon↔LED gap for the settings gear column — same scaled metric the
-   * pill-thickness formula uses (`iconLedGapPx`), not a fixed `gap-2`:
-   * a fixed 8px drifts against the formula at non-default icon sizes.
-   * String with units — see `pillGapPx`. */
-  const settingsLedGapPx = useTransform(
-    iconSizeAnimated,
-    (px) => `${getSizeMetrics(px).iconLedGapPx}px`,
+  const settingsControlSizePx = useTransform(iconSizeAnimated, (px) =>
+    settingsControlWidthPx(px),
   );
-  const settingsSlotSizePx = useTransform(iconSizeAnimated, (px) => px);
-  const settingsCornerRadiusPx = useTransform(
-    iconSizeAnimated,
-    (px) => getSizeMetrics(px).iconCornerRadiusPx,
+  const settingsControlIconSizePx = useTransform(iconSizeAnimated, (px) =>
+    settingsControlIconPx(px),
   );
-  const settingsMagnifyRadiusPx = useTransform(
+  /** Aligns the compact settings control with the icon row baseline on
+   * horizontal docks — same offset the row divider uses. */
+  const settingsEndOffsetPx = useTransform(
     iconSizeAnimated,
-    (px) => getSizeMetrics(px).magnifyInfluenceRadiusPx,
+    (px) => getSizeMetrics(px).iconLedGapPx + LED_HEIGHT_PX,
   );
-  const magnifyNeighborStrengthMV = useMotionValue(settings.magnifyNeighborStrength);
-  useEffect(() => {
-    magnifyNeighborStrengthMV.set(settings.magnifyNeighborStrength);
-  }, [settings.magnifyNeighborStrength, magnifyNeighborStrengthMV]);
-  const settingsIconSizePx = useTransform(iconSizeAnimated, (px) => px / 2);
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [isSettingsHovered, setIsSettingsHovered] = useState(false);
   const [hoverSessionId, setHoverSessionId] = useState(0);
@@ -452,7 +440,6 @@ function HydratedDockPanel({
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement | null>(null);
   const settingsSlotRef = useRef<HTMLDivElement>(null);
-  const settingsCenterMain = useMotionValue(0);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
@@ -913,43 +900,6 @@ function HydratedDockPanel({
     };
   }, []);
 
-  useLayoutEffect(() => {
-    const el = settingsSlotRef.current;
-    if (!el) return;
-
-    const measure = () => {
-      const rect = el.getBoundingClientRect();
-      settingsCenterMain.set(
-        measureMagnifyCenter(rect, orientation.magnifyAxis),
-      );
-    };
-
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [settingsCenterMain, items, hoverSessionId, reorderSettledId, orientation.magnifyAxis]);
-
-  const settingsScaleRaw = useTransform(
-    [
-      settingsMouseX,
-      settingsMouseY,
-      settingsCenterMain,
-      settingsMagnifyRadiusPx,
-      magnifyNeighborStrengthMV,
-    ],
-    ([mx, my, cm, radius, neighborStrength]: number[]) => {
-      const m = orientation.magnifyAxis === "x" ? mx : my;
-      if (!Number.isFinite(m)) return 1;
-      const distance = m - cm;
-      return computeMagnifyScale(Math.abs(distance), radius, neighborStrength);
-    },
-  );
-  const settingsScale = useSpring(settingsScaleRaw, MAGNIFY_SPRING);
-  const settingsOriginClass = magnifyOriginClassName(
-    orientation.magnifyTransformOrigin,
-  );
-
   const borderWidthPx = clampBorderWidthPx(settings.borderWidthPx);
   const activeBgPreset = getBackgroundPreset(settings.backgroundPreset);
 
@@ -1219,22 +1169,22 @@ function HydratedDockPanel({
           isVertical={orientation.isVertical}
           className="relative z-[2] mx-1"
         />
-        {/* Settings gear — horizontal docks reserve space for the LED bar.
-            `gap` always present with a 0 fallback (never undefined) — same
-            stale-motion-style-key trap as the pill's width/height above. */}
+        {/* Compact settings control (⋯) — aligned with the icon row on
+            horizontal docks via `settingsEndOffsetPx`. */}
         <motion.div
-          style={{
-            gap: orientation.ledAxis === "horizontal" ? settingsLedGapPx : 0,
-          }}
-          className={`relative z-[2] flex shrink-0 ${
-            orientation.ledAxis === "vertical"
-              ? "items-center"
-              : "flex-col items-center"
+          className={`relative z-[2] shrink-0 ${
+            orientation.isVertical ? "self-center" : "self-end"
           }`}
+          style={
+            orientation.isVertical ? undefined : { marginBottom: settingsEndOffsetPx }
+          }
         >
           <motion.div
             ref={settingsSlotRef}
-            style={{ height: settingsSlotSizePx, width: settingsSlotSizePx }}
+            style={{
+              height: settingsControlSizePx,
+              width: settingsControlSizePx,
+            }}
             className={`relative shrink-0 ${
               isSettingsHovered &&
               !isDragging &&
@@ -1258,39 +1208,25 @@ function HydratedDockPanel({
             >
               Настройки
             </DockOverlayAnchor>
-            <motion.div
-              style={{
-                scale: isDragging || isReorderSettling ? 1 : settingsScale,
+            <button
+              type="button"
+              aria-label="Настройки"
+              onClick={() => {
+                void invoke("open_settings");
               }}
-              className={`h-full w-full ${settingsOriginClass}`}
+              className="flex h-full w-full items-center justify-center rounded-md text-zinc-500/70 transition-colors duration-200 hover:bg-zinc-800/50 hover:text-zinc-200"
             >
-              <motion.button
-                type="button"
-                aria-label="Настройки"
-                onClick={() => {
-                  void invoke("open_settings");
-                }}
+              <motion.div
+                className="flex items-center justify-center"
                 style={{
-                  borderColor: `color-mix(in srgb, ${settings.staticGlowColor} 34%, transparent)`,
-                  boxShadow: `inset 0 1px 0 0 rgb(255 255 255 / 0.08), 0 0 12px -2px color-mix(in srgb, ${settings.staticGlowColor} 16%, transparent)`,
-                  borderRadius: settingsCornerRadiusPx,
-                  // Custom property for hover Tailwind arbitrary values below.
-                  ["--settings-accent" as string]: settings.staticGlowColor,
+                  width: settingsControlIconSizePx,
+                  height: settingsControlIconSizePx,
                 }}
-                className="flex h-full w-full items-center justify-center border bg-zinc-950/40 text-zinc-400 transition-[color,background-color,box-shadow,border-color] duration-200 hover:border-[color-mix(in_srgb,var(--settings-accent)_48%,transparent)] hover:bg-zinc-900/55 hover:text-zinc-100 hover:shadow-[inset_0_1px_0_0_rgb(255_255_255/0.12),0_0_16px_0_color-mix(in_srgb,var(--settings-accent)_26%,transparent)]"
               >
-                <motion.div
-                  className="flex items-center justify-center"
-                  style={{ width: settingsIconSizePx, height: settingsIconSizePx }}
-                >
-                  <Settings className="h-full w-full" strokeWidth={1.75} />
-                </motion.div>
-              </motion.button>
-            </motion.div>
+                <EllipsisVertical className="h-full w-full" strokeWidth={2} />
+              </motion.div>
+            </button>
           </motion.div>
-          {orientation.ledAxis === "horizontal" ? (
-            <span aria-hidden className="h-[3px] w-6 shrink-0" />
-          ) : null}
         </motion.div>
         {showPanelEffect && (
           // Painted above the icon row (see `.dock-panel-scanline`/

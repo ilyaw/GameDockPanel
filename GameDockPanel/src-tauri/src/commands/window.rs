@@ -104,7 +104,7 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     // picks the UI to render from `getCurrentWebviewWindow().label`.
     WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("GameDockPanel — Настройки")
-        .inner_size(480.0, 640.0)
+        .inner_size(520.0, 680.0)
         .resizable(true)
         .build()
         .map_err(|e| e.to_string())?;

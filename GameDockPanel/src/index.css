@@ -717,3 +717,201 @@ img {
     box-shadow: none;
   }
 }
+
+/*
+  Settings window (framed utility webview) — scoped under `.settings-window`
+  so dock transparency rules above are untouched. Custom range styling is
+  required on macOS WKWebView: native `accent-*` only tints the thumb while
+  the track stays near-black on our dark shell.
+*/
+.settings-window {
+  --settings-accent-a: #22d3ee;
+  --settings-accent-b: #a78bfa;
+  --settings-track: #52525b;
+  --settings-track-deep: #3f3f46;
+  --settings-surface: rgb(24 24 27 / 72%);
+  --settings-border: rgb(113 113 122 / 28%);
+  --settings-glow: rgb(34 211 238 / 22%);
+  background:
+    radial-gradient(ellipse 120% 80% at 50% -20%, rgb(167 139 250 / 10%), transparent 55%),
+    radial-gradient(ellipse 90% 60% at 100% 100%, rgb(34 211 238 / 8%), transparent 50%),
+    linear-gradient(180deg, #09090b 0%, #0b0a10 45%, #09090b 100%);
+  color: #f4f4f5;
+}
+
+.settings-window__header {
+  border-bottom: 1px solid var(--settings-border);
+  background: linear-gradient(
+    180deg,
+    rgb(24 24 27 / 55%) 0%,
+    rgb(9 9 11 / 20%) 100%
+  );
+}
+
+.settings-window__title {
+  background: linear-gradient(90deg, #e4e4e7 0%, #c4b5fd 45%, #67e8f9 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.settings-window__tabs {
+  border-bottom: 1px solid var(--settings-border);
+}
+
+.settings-window__tab {
+  color: #a1a1aa;
+  transition: color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings-window__tab:hover {
+  color: #e4e4e7;
+}
+
+.settings-window__tab--active {
+  color: #a5f3fc;
+  box-shadow: inset 0 -2px 0 0 var(--settings-accent-a);
+  text-shadow: 0 0 12px rgb(34 211 238 / 35%);
+}
+
+.settings-window__card {
+  border: 1px solid var(--settings-border);
+  background: var(--settings-surface);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 4%),
+    0 0 24px -6px var(--settings-glow);
+}
+
+.settings-window__card-header {
+  border-bottom: 1px solid var(--settings-border);
+  background: linear-gradient(90deg, rgb(34 211 238 / 6%) 0%, transparent 55%);
+}
+
+.settings-window__row-title {
+  color: #e4e4e7;
+}
+
+.settings-window__row-desc {
+  color: #a1a1aa;
+}
+
+.settings-window__value {
+  color: #a5f3fc;
+  text-shadow: 0 0 10px rgb(34 211 238 / 25%);
+}
+
+.settings-window__preset {
+  border: 1px solid rgb(82 82 91 / 80%);
+  background: rgb(39 39 42 / 72%);
+  color: #a1a1aa;
+  transition:
+    border-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.settings-window__preset:hover {
+  border-color: rgb(113 113 122);
+  color: #e4e4e7;
+}
+
+.settings-window__preset--active {
+  border-color: rgb(34 211 238 / 65%);
+  background: linear-gradient(
+    135deg,
+    rgb(34 211 238 / 14%) 0%,
+    rgb(167 139 250 / 14%) 100%
+  );
+  color: #e0f2fe;
+  box-shadow: 0 0 14px -2px rgb(34 211 238 / 35%);
+}
+
+.settings-window__toggle {
+  background: var(--settings-track-deep);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 6%);
+}
+
+.settings-window__toggle--on {
+  background: linear-gradient(90deg, var(--settings-accent-a), var(--settings-accent-b));
+  box-shadow: 0 0 14px -2px rgb(34 211 238 / 55%);
+}
+
+.settings-window__color-input {
+  border: 1px solid rgb(113 113 122 / 55%);
+  box-shadow: 0 0 10px -4px rgb(167 139 250 / 45%);
+}
+
+.settings-range {
+  --settings-range-progress: 50%;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 9999px;
+  cursor: pointer;
+  background: linear-gradient(
+    to right,
+    var(--settings-accent-a) 0%,
+    var(--settings-accent-b) var(--settings-range-progress),
+    var(--settings-track) var(--settings-range-progress),
+    var(--settings-track) 100%
+  );
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 35%);
+}
+
+.settings-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.settings-range:focus-visible {
+  outline: 2px solid rgb(34 211 238 / 55%);
+  outline-offset: 3px;
+}
+
+.settings-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: transparent;
+}
+
+.settings-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border-radius: 9999px;
+  border: 2px solid #f4f4f5;
+  background: linear-gradient(135deg, var(--settings-accent-a), var(--settings-accent-b));
+  box-shadow: 0 0 12px 0 rgb(34 211 238 / 55%);
+}
+
+.settings-range::-moz-range-track {
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--settings-track);
+}
+
+.settings-range::-moz-range-progress {
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, var(--settings-accent-a), var(--settings-accent-b));
+}
+
+.settings-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  border: 2px solid #f4f4f5;
+  background: linear-gradient(135deg, var(--settings-accent-a), var(--settings-accent-b));
+  box-shadow: 0 0 12px 0 rgb(34 211 238 / 55%);
+}
+
+.settings-range--fluid {
+  width: 100%;
+  min-width: 0;
+}
+
+.settings-range--compact {
+  width: 6rem;
+}
