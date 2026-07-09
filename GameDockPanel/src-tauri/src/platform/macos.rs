@@ -2379,7 +2379,16 @@ fn zoom_app_above_dock_on_main_thread(
         "no focused window to zoom".to_string()
     })?;
 
-    let current = ax_window_frame_tauri(window_el, primary_cocoa_h, scale)?;
+    let current = match ax_window_frame_tauri(window_el, primary_cocoa_h, scale) {
+        Ok(frame) => frame,
+        Err(err) => {
+            unsafe {
+                CFRelease(window_el as CfTypeRef);
+                CFRelease(app_el as CfTypeRef);
+            }
+            return Err(err);
+        }
+    };
     let storage_key = ax_window_storage_key(window_el, bundle_id);
 
     let result = if rects_approximately_equal(current, usable, ZOOM_FRAME_TOLERANCE_PX) {

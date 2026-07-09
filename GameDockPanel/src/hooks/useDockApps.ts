@@ -421,8 +421,9 @@ export function useDockApps() {
   const zoomApp = useCallback((bundleId: string) => {
     invoke("zoom_app_above_dock", { bundleId }).catch((error: unknown) => {
       console.error(`Failed to zoom app ${bundleId} above dock:`, error);
+      reportReject();
     });
-  }, []);
+  }, [reportReject]);
 
   return {
     items,
