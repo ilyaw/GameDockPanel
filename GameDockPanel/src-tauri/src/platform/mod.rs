@@ -14,8 +14,8 @@ mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    activate_or_launch_app, is_app_installed, is_bundle_running, quit_app,
-    refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon,
+    activate_or_launch_app, apply_dock_window_layer, is_app_installed, is_bundle_running,
+    quit_app, refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon,
     reveal_app_in_finder, resize_dock_window_for_pill, setup_dock_window,
     start_apps_monitoring, sync_vibrancy_pill_from_web,
     ensure_window_fits_menu_overlay, shrink_dock_window_to_stored_pill,
@@ -25,6 +25,14 @@ pub use macos::{
 /// Windows/Linux support isn't implemented yet — no-op for now rather than
 /// a placeholder `windows.rs` stub with nothing in it. Add that module (and
 /// wire it up here) when cross-platform work actually starts.
+#[cfg(not(target_os = "macos"))]
+pub fn apply_dock_window_layer(
+    _window: &tauri::WebviewWindow,
+    _layer: crate::commands::settings::DockWindowLayer,
+) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn setup_dock_window(app: &mut tauri::App) -> Result<(), String> {
     use tauri::Manager;

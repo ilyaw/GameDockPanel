@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   animate,
   motion,
@@ -28,6 +34,7 @@ import {
   type MagnifyTransformOrigin,
   type OverlaySide,
 } from "../lib/dockPlacement";
+import { DockContextMenuRow } from "./DockContextMenuRow";
 import { DockOverlayAnchor } from "./DockOverlayAnchor";
 
 interface WindowLogicalPoint {
@@ -192,6 +199,14 @@ export function DockIcon({
   const centerMain = useMotionValue(0);
   const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
   const magnifyOriginClass = magnifyOriginClassName(magnifyTransformOrigin);
+
+  const openOptionsSubmenu = useCallback(() => {
+    setOptionsSubmenuOpen(true);
+  }, []);
+
+  const closeOptionsSubmenu = useCallback(() => {
+    setOptionsSubmenuOpen(false);
+  }, []);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -580,79 +595,73 @@ export function DockIcon({
           gap={TOOLTIP_GAP_PX}
           className="pointer-events-auto z-30 overflow-visible whitespace-nowrap rounded-md border border-zinc-700/60 bg-zinc-900 text-xs text-zinc-200 shadow-lg shadow-black/40"
         >
-          <button
-            type="button"
+          <DockContextMenuRow
             onClick={() => {
               setMenuOpen(false);
               onShowInFinder?.(app.bundleId);
             }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+            onRowMouseEnter={closeOptionsSubmenu}
           >
             <FolderOpen className="h-3.5 w-3.5" />
             Показать в Finder
-          </button>
+          </DockContextMenuRow>
 
-          <div
-            ref={optionsRowRef}
-            className="relative"
-            onMouseEnter={() => setOptionsSubmenuOpen(true)}
-            onMouseLeave={() => setOptionsSubmenuOpen(false)}
-          >
-            <div className="flex w-full cursor-default items-center justify-between gap-6 px-3 py-1.5 hover:bg-zinc-800">
+          <div ref={optionsRowRef} className="relative">
+            <DockContextMenuRow
+              onClick={openOptionsSubmenu}
+              onRowMouseEnter={openOptionsSubmenu}
+              className="cursor-default justify-between gap-6"
+            >
               <span>Параметры</span>
               <ChevronRight className="h-3.5 w-3.5 shrink-0 opacity-70" />
-            </div>
+            </DockContextMenuRow>
 
             {optionsSubmenuOpen && (
               <div
                 ref={submenuRef}
                 className={`absolute top-0 z-40 overflow-hidden whitespace-nowrap rounded-md border border-zinc-700/60 bg-zinc-900 text-xs text-zinc-200 shadow-lg shadow-black/40 ${
-                  submenuOpensLeft ? "right-full mr-0.5" : "left-full ml-0.5"
-                }`}
+                  submenuOpensLeft
+                    ? "right-full -mr-px before:right-[-3px]"
+                    : "left-full -ml-px before:left-[-3px]"
+                } before:pointer-events-auto before:absolute before:top-0 before:h-full before:w-1 before:content-['']`}
               >
-                <button
-                  type="button"
+                <DockContextMenuRow
                   onClick={() => {
                     setMenuOpen(false);
                     onRemove?.(app.bundleId);
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                   Убрать из дока
-                </button>
+                </DockContextMenuRow>
 
                 <div className="h-px bg-zinc-700/70" />
 
-                <button
-                  type="button"
+                <DockContextMenuRow
                   disabled={separatorsFull}
                   onClick={() => {
                     setMenuOpen(false);
                     onInsertSeparatorBefore?.(app.bundleId);
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Minus className="h-3.5 w-3.5" />
                   {separatorBeforeLabel}
-                </button>
+                </DockContextMenuRow>
 
-                <button
-                  type="button"
+                <DockContextMenuRow
                   disabled={separatorsFull}
                   onClick={() => {
                     setMenuOpen(false);
                     onInsertSeparatorAfter?.(app.bundleId);
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Minus className="h-3.5 w-3.5" />
                   {separatorAfterLabel}
-                </button>
+                </DockContextMenuRow>
 
                 <div className="h-px bg-zinc-700/70" />
 
-                <div className="flex items-center justify-between gap-3 px-3 py-1.5">
+                <DockContextMenuRow as="div" className="justify-between gap-3">
                   <span className="text-zinc-300">Цвет индикатора</span>
                   <input
                     type="color"
@@ -670,17 +679,16 @@ export function DockIcon({
                     className="h-7 w-7 cursor-pointer rounded border border-zinc-600 bg-transparent p-0"
                     aria-label={`Цвет индикатора для ${app.name}`}
                   />
-                </div>
+                </DockContextMenuRow>
                 {app.indicatorColorOverride && (
-                  <button
-                    type="button"
+                  <DockContextMenuRow
+                    muted
                     onClick={() => {
                       onSetIndicatorColor?.(app.bundleId, null);
                     }}
-                    className="flex w-full items-center px-3 py-1.5 text-left text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
                   >
                     Сбросить к авто
-                  </button>
+                  </DockContextMenuRow>
                 )}
               </div>
             )}
@@ -690,17 +698,16 @@ export function DockIcon({
             <>
               <div className="h-px bg-zinc-700/70" />
 
-              <button
-                type="button"
+              <DockContextMenuRow
                 onClick={() => {
                   setMenuOpen(false);
                   onQuit?.(app.bundleId);
                 }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+                onRowMouseEnter={closeOptionsSubmenu}
               >
                 <Power className="h-3.5 w-3.5" />
                 Завершить
-              </button>
+              </DockContextMenuRow>
             </>
           )}
         </DockOverlayAnchor>
@@ -753,6 +760,7 @@ export function DockIcon({
     // stale-motion-style-key trap documented on the pill's width/height
     // in DockPanel, since `ledAxis` can flip on a live position change.
     <motion.div
+      data-dock-item
       role="button"
       tabIndex={0}
       ref={buttonRef}

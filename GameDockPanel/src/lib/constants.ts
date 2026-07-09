@@ -831,10 +831,29 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   ledColorMode: "auto",
   ledFixedColor: "#ff9d3b",
   dockPosition: "bottom",
+  dockWindowLayer: "above_windows",
 };
 
 export type LedColorMode = DockSettings["ledColorMode"];
 export type DockPositionOption = DockSettings["dockPosition"];
+export type DockWindowLayerOption = DockSettings["dockWindowLayer"];
+
+export const DOCK_WINDOW_LAYER_OPTIONS: {
+  id: DockWindowLayerOption;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "above_windows",
+    label: "Поверх окон",
+    description: "Панель всегда видна поверх обычных окон приложений",
+  },
+  {
+    id: "below_windows",
+    label: "Под окнами",
+    description: "Окна приложений перекрывают панель — как RocketDock",
+  },
+];
 
 export const DOCK_POSITION_OPTIONS: {
   id: DockPositionOption;

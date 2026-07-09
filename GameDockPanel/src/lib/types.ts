@@ -61,6 +61,9 @@ export interface AppIconUpdate {
  */
 export type DockPosition = "bottom" | "top" | "left" | "right";
 
+/** Z-order of the dock — mirrors `DockWindowLayer` in settings.rs. */
+export type DockWindowLayer = "above_windows" | "below_windows";
+
 /**
  * Live-tunable dock visuals — mirrors `DockSettings` in
  * `src-tauri/src/commands/settings.rs`. Read by the dock window to render,
@@ -129,4 +132,6 @@ export interface DockSettings {
   ledFixedColor: string;
   /** Which screen edge the dock is anchored to — see `DockPosition`. */
   dockPosition: DockPosition;
+  /** Whether the dock stays above app windows or sits below them. */
+  dockWindowLayer: DockWindowLayer;
 }

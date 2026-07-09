@@ -9,6 +9,7 @@ import {
   BORDER_WIDTH_MAX_PX,
   BORDER_WIDTH_MIN_PX,
   DOCK_POSITION_OPTIONS,
+  DOCK_WINDOW_LAYER_OPTIONS,
   ICON_SIZE_PRESETS,
   ICON_SIZE_MAX_PX,
   ICON_SIZE_MIN_PX,
@@ -827,6 +828,27 @@ export function SettingsWindow() {
       title="Система"
       description="Поведение приложения в macOS."
     >
+      <SettingsRow
+        title="Слой отображения"
+        descriptionClassName="max-w-sm"
+        description="Поверх окон — панель всегда видна; под окнами — окна приложений перекрывают панель, как в RocketDock."
+      >
+        <div className="flex max-w-[240px] flex-wrap justify-end gap-1.5">
+          {DOCK_WINDOW_LAYER_OPTIONS.map((option) => (
+            <StylePresetButton
+              key={option.id}
+              preset={{
+                id: option.id,
+                label: option.label,
+                description: option.description,
+              }}
+              selected={settings.dockWindowLayer === option.id}
+              onSelect={() => update({ dockWindowLayer: option.id })}
+            />
+          ))}
+        </div>
+      </SettingsRow>
+
       <SettingsRow
         title="Запуск при входе в систему"
         descriptionClassName="max-w-sm"

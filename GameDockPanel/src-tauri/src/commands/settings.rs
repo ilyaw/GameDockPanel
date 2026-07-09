@@ -44,6 +44,21 @@ impl DockPosition {
     }
 }
 
+/// Whether the dock window stays above normal app windows or sits at the
+/// default level so focused/maximized windows cover it (RocketDock-style).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockWindowLayer {
+    AboveWindows,
+    BelowWindows,
+}
+
+impl Default for DockWindowLayer {
+    fn default() -> Self {
+        DockWindowLayer::AboveWindows
+    }
+}
+
 /// Live-tunable visual settings for the dock, persisted to
 /// `dock-settings.json` and broadcast to every webview on change (see
 /// `update_dock_settings`). Field defaults below mirror the values that
@@ -137,6 +152,11 @@ pub struct DockSettings {
     /// `dock-settings.json` without it.
     #[serde(default)]
     pub dock_position: DockPosition,
+    /// Z-order of the dock relative to other app windows — always-on-top vs
+    /// normal level. `#[serde(default)]` for configs written before this
+    /// field existed.
+    #[serde(default)]
+    pub dock_window_layer: DockWindowLayer,
 }
 
 fn default_led_color_mode() -> String {
@@ -213,6 +233,7 @@ impl Default for DockSettings {
             icon_size_px: 56.0,
             magnify_neighbor_strength: default_magnify_neighbor_strength(),
             dock_position: DockPosition::default(),
+            dock_window_layer: DockWindowLayer::default(),
         }
     }
 }
@@ -331,8 +352,16 @@ fn apply_dock_settings(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.icon_size_px
     };
+    let previous_dock_window_layer = {
+        let guard = state
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.dock_window_layer
+    };
     let icon_size_changed =
         (previous_icon_size_px - settings.icon_size_px).abs() >= 0.5;
+    let dock_window_layer_changed = previous_dock_window_layer != settings.dock_window_layer;
 
     let path = config_file_path(app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;
@@ -370,6 +399,12 @@ fn apply_dock_settings(
     } else {
         let apps_state = app.state::<AppsState>();
         emit_apps_list_changed(app, &apps_state);
+    }
+
+    if dock_window_layer_changed {
+        if let Some(window) = app.get_webview_window("main") {
+            crate::platform::apply_dock_window_layer(&window, settings.dock_window_layer)?;
+        }
     }
 
     let _ = app.emit("dock-settings-changed", settings);

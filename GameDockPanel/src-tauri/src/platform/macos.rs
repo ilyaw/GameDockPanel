@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 use crate::commands::apps::{AppsState, DockItem, MenuOverlaySide, MenuOverlayState};
-use crate::commands::settings::{DockAxis, DockPosition, SettingsState};
+use crate::commands::settings::{DockAxis, DockPosition, DockWindowLayer, SettingsState};
 use crate::platform::IconResolveResult;
 
 /// Cursor position in webview logical (DIP) coords — emitted while the pointer
@@ -81,6 +81,27 @@ fn current_dock_position(window: &WebviewWindow) -> DockPosition {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.dock_position
+}
+
+/// Reads the current `DockWindowLayer` fresh from `SettingsState`.
+fn current_dock_window_layer(window: &WebviewWindow) -> DockWindowLayer {
+    let state = window.state::<SettingsState>();
+    let guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.dock_window_layer
+}
+
+/// Applies the dock's z-order — always-on-top vs normal window level.
+pub fn apply_dock_window_layer(
+    window: &WebviewWindow,
+    layer: DockWindowLayer,
+) -> Result<(), String> {
+    let on_top = matches!(layer, DockWindowLayer::AboveWindows);
+    window
+        .set_always_on_top(on_top)
+        .map_err(|e| e.to_string())
 }
 
 /// Maps the orientation-neutral `(length, thickness)` pair onto actual CSS
@@ -369,9 +390,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         axis_css_dims(position.axis(), window_length, metrics.window_thickness_dip);
 
     apply_dock_window_frame(&window, window_width, window_height, position)?;
-    window
-        .set_always_on_top(true)
-        .map_err(|e| e.to_string())?;
+    apply_dock_window_layer(&window, current_dock_window_layer(&window))?;
 
     // Pass clicks through everywhere except the pill hitbox (poller toggles).
     window
@@ -980,6 +999,160 @@ fn pill_cursor_at_screen(
     })
 }
 
+/// Like `pill_cursor_at_screen`, but in `BelowWindows` mode returns `None`
+/// when another app's window is visually on top of the dock at that point.
+#[cfg(target_os = "macos")]
+fn pill_cursor_at_screen_if_actionable(
+    window: &WebviewWindow,
+    screen_x: i32,
+    screen_y: i32,
+    dock_hovered: bool,
+) -> Option<DockCursorPayload> {
+    let payload = pill_cursor_at_screen(window, screen_x, screen_y, dock_hovered)?;
+    if matches!(current_dock_window_layer(window), DockWindowLayer::BelowWindows)
+        && !dock_is_topmost_at_screen_point(window, screen_x, screen_y)
+    {
+        return None;
+    }
+    Some(payload)
+}
+
+/// `NSWindow::windowNumber` for the dock webview — equals `kCGWindowNumber`.
+#[cfg(target_os = "macos")]
+fn dock_window_number(window: &WebviewWindow) -> Option<i32> {
+    use objc2_app_kit::NSWindow;
+
+    let ns_window_ptr = window.ns_window().ok()? as *mut NSWindow;
+    let ns_window = unsafe { &*ns_window_ptr };
+    Some(ns_window.windowNumber() as i32)
+}
+
+#[cfg(target_os = "macos")]
+fn cf_number_as_f64(value: &core_foundation::base::CFType) -> Option<f64> {
+    use core_foundation::number::CFNumber;
+
+    value.downcast::<CFNumber>()?.to_f64()
+}
+
+/// `kCGWindowBounds` uses screen points with a top-left origin on the primary
+/// display — convert Tauri physical pixels via `scale` before comparing.
+#[cfg(target_os = "macos")]
+fn cg_window_bounds_contains_screen_point(
+    bounds: &core_foundation::dictionary::CFDictionary<
+        core_foundation::string::CFString,
+        core_foundation::base::CFType,
+    >,
+    screen_x: i32,
+    screen_y: i32,
+    scale: f64,
+) -> bool {
+    use core_foundation::string::CFString;
+
+    let x_key = CFString::new("X");
+    let y_key = CFString::new("Y");
+    let width_key = CFString::new("Width");
+    let height_key = CFString::new("Height");
+
+    let Some(x) = bounds.find(&x_key).as_deref().and_then(cf_number_as_f64) else {
+        return false;
+    };
+    let Some(y) = bounds.find(&y_key).as_deref().and_then(cf_number_as_f64) else {
+        return false;
+    };
+    let Some(width) = bounds
+        .find(&width_key)
+        .as_deref()
+        .and_then(cf_number_as_f64)
+    else {
+        return false;
+    };
+    let Some(height) = bounds
+        .find(&height_key)
+        .as_deref()
+        .and_then(cf_number_as_f64)
+    else {
+        return false;
+    };
+
+    let point_x = screen_x as f64 / scale;
+    let point_y = screen_y as f64 / scale;
+
+    point_x >= x
+        && point_x <= x + width
+        && point_y >= y
+        && point_y <= y + height
+}
+
+/// Whether the dock is the frontmost on-screen layer-0 window at a screen
+/// point. Used only in `BelowWindows` mode so clicks on covering apps are not
+/// also delivered to dock icons via the HID-level event tap.
+#[cfg(target_os = "macos")]
+fn dock_is_topmost_at_screen_point(
+    window: &WebviewWindow,
+    screen_x: i32,
+    screen_y: i32,
+) -> bool {
+    use core_foundation::base::{CFType, FromVoid, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowNumber,
+    };
+
+    let dock_number = match dock_window_number(window) {
+        Some(number) => number,
+        None => return true,
+    };
+    let scale = window.scale_factor().unwrap_or(2.0);
+
+    let option = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let Some(windows) = copy_window_info(option, kCGNullWindowID) else {
+        return true;
+    };
+
+    let number_key = unsafe { CFString::wrap_under_get_rule(kCGWindowNumber) };
+    let layer_key = unsafe { CFString::wrap_under_get_rule(kCGWindowLayer) };
+    let bounds_key = unsafe { CFString::wrap_under_get_rule(kCGWindowBounds) };
+
+    for ptr in windows.get_all_values() {
+        let dict = unsafe { CFDictionary::<CFString, CFType>::from_void(ptr) };
+
+        let Some(layer_ref) = dict.find(&layer_key) else {
+            continue;
+        };
+        let Some(layer) = layer_ref.downcast::<CFNumber>() else {
+            continue;
+        };
+        if layer.to_i32() != Some(0) {
+            continue;
+        }
+
+        let Some(bounds_ref) = dict.find(&bounds_key) else {
+            continue;
+        };
+        let bounds_dict = unsafe {
+            CFDictionary::<CFString, CFType>::from_void(
+                bounds_ref.as_concrete_TypeRef() as *const _,
+            )
+        };
+        if !cg_window_bounds_contains_screen_point(&bounds_dict, screen_x, screen_y, scale) {
+            continue;
+        }
+
+        let Some(number_ref) = dict.find(&number_key) else {
+            return false;
+        };
+        let Some(number) = number_ref.downcast::<CFNumber>() else {
+            return false;
+        };
+        return number.to_i32() == Some(dock_number);
+    }
+
+    true
+}
+
 /// Reads the pill's current *rest* thickness from `AppsState` (mutated by
 /// `setup_dock_window`/`resize_dock_window_for_pill`/
 /// `sync_vibrancy_pill_from_web`) — same "state, not compile-time constant"
@@ -1117,7 +1290,7 @@ fn start_dock_click_tap(window: WebviewWindow) {
                             if let Ok(cursor) = window.cursor_position() {
                                 let cursor_x = cursor.x.round() as i32;
                                 let cursor_y = cursor.y.round() as i32;
-                                if let Some(payload) = pill_cursor_at_screen(
+                                if let Some(payload) = pill_cursor_at_screen_if_actionable(
                                     &window,
                                     cursor_x,
                                     cursor_y,
@@ -1227,7 +1400,8 @@ fn start_click_through_poller(window: WebviewWindow) {
             let cursor_x = cursor.x.round() as i32;
             let cursor_y = cursor.y.round() as i32;
 
-            let pill_cursor = pill_cursor_at_screen(&window, cursor_x, cursor_y, dock_hovered);
+            let pill_cursor =
+                pill_cursor_at_screen_if_actionable(&window, cursor_x, cursor_y, dock_hovered);
             let in_pill = pill_cursor.is_some();
 
             if in_pill != dock_hovered {

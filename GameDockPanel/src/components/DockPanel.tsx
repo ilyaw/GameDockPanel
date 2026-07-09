@@ -2,8 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Reorder, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Settings } from "lucide-react";
 import { DockIcon } from "./DockIcon";
 import { DockSeparator } from "./DockSeparator";
+import { DockContextMenuRow } from "./DockContextMenuRow";
+import { DockPillContextMenu } from "./DockPillContextMenu";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockOrientation } from "../hooks/useDockOrientation";
 import { useDockSettings } from "../hooks/useDockSettings";
@@ -402,6 +405,10 @@ function HydratedDockPanel({
   const [insertMarker, setInsertMarker] = useState<InsertMarkerMetrics | null>(
     null,
   );
+  const [pillMenuOpen, setPillMenuOpen] = useState(false);
+  const [pillMenuAnchor, setPillMenuAnchor] = useState<{ x: number; y: number } | null>(
+    null,
+  );
 
   const mouseX = useMotionValue(Infinity);
   const mouseY = useMotionValue(Infinity);
@@ -413,6 +420,7 @@ function HydratedDockPanel({
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement | null>(null);
+  const pillMenuAnchorRef = useRef<HTMLDivElement | null>(null);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
@@ -472,6 +480,36 @@ function HydratedDockPanel({
   const handleContextMenuBoundsChange = useCallback((rect: DOMRect | null) => {
     contextMenuHitRectRef.current = rect;
   }, []);
+
+  const closePillMenu = useCallback(() => {
+    setPillMenuOpen(false);
+    setPillMenuAnchor(null);
+  }, []);
+
+  const handlePillContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if ((event.target as Element).closest("[data-dock-item]")) return;
+
+      event.preventDefault();
+      const pillEl = pillRef.current;
+      if (!pillEl) return;
+
+      const pillRect = pillEl.getBoundingClientRect();
+      setPillMenuAnchor({
+        x: event.clientX - pillRect.left,
+        y: event.clientY - pillRect.top,
+      });
+      setPillMenuOpen(true);
+    },
+    [],
+  );
+
+  const openSettings = useCallback(() => {
+    closePillMenu();
+    invoke("open_settings").catch((error: unknown) => {
+      console.error("Failed to open settings window:", error);
+    });
+  }, [closePillMenu]);
 
   const shouldSuppressDockClickAt = useCallback((x: number, y: number) => {
     if (suppressDockClickRef.current) {
@@ -929,6 +967,8 @@ function HydratedDockPanel({
     >
       <motion.div
         ref={pillRef}
+        data-dock-pill
+        onContextMenu={handlePillContextMenu}
         onMouseEnter={enterDock}
         onMouseMove={(event) => {
           if (contextMenuOpenCountRef.current > 0) return;
@@ -1097,6 +1137,27 @@ function HydratedDockPanel({
           </Reorder.Item>
         ))}
         </Reorder.Group>
+        {pillMenuOpen && pillMenuAnchor && (
+          <div
+            className="pointer-events-none absolute z-[30]"
+            style={{ left: pillMenuAnchor.x, top: pillMenuAnchor.y }}
+          >
+            <DockPillContextMenu
+              open={pillMenuOpen}
+              anchorRef={pillMenuAnchorRef}
+              overlayPreferredSide={orientation.overlayPreferredSide}
+              onClose={closePillMenu}
+              onContextMenuOpenChange={handleContextMenuOpenChange}
+              onContextMenuBoundsChange={handleContextMenuBoundsChange}
+            >
+              <DockContextMenuRow onClick={openSettings}>
+                <Settings className="h-3.5 w-3.5" />
+                Настройки
+              </DockContextMenuRow>
+            </DockPillContextMenu>
+            <div ref={pillMenuAnchorRef} className="h-px w-px" aria-hidden />
+          </div>
+        )}
         {showPanelEffect && (
           // Painted above the icon row (see `.dock-panel-scanline`/
           // `.dock-panel-hologram`'s `mix-blend-mode: screen` in

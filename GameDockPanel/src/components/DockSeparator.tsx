@@ -3,6 +3,7 @@ import { type MotionValue } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Trash2 } from "lucide-react";
+import { DockContextMenuRow } from "./DockContextMenuRow";
 import { DockRowDivider } from "./DockRowDivider";
 import { DockOverlayAnchor } from "./DockOverlayAnchor";
 import {
@@ -149,6 +150,7 @@ export function DockSeparator({
 
   return (
     <div
+      data-dock-item
       role="separator"
       aria-orientation={isVertical ? "horizontal" : "vertical"}
       style={
@@ -185,17 +187,15 @@ export function DockSeparator({
             gap={TOOLTIP_GAP_PX}
             className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md border border-zinc-700/60 bg-zinc-900 text-xs text-zinc-200 shadow-lg shadow-black/40"
           >
-            <button
-              type="button"
+            <DockContextMenuRow
               onClick={() => {
                 setMenuOpen(false);
                 onRemove?.(id);
               }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
             >
               <Trash2 className="h-3.5 w-3.5" />
               Удалить разделитель
-            </button>
+            </DockContextMenuRow>
           </DockOverlayAnchor>
         )}
 
