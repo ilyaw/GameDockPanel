@@ -119,6 +119,9 @@ export interface DockSettings {
   /** Icon edge length in logical px (44–72) — single input every dock layout
    * number derives from via `getSizeMetrics`. */
   iconSizePx: number;
+  /** 0..1 — how much hover-magnify spreads to neighboring icons. At 0 only
+   * the icon under the cursor grows; at 1 the current full neighbor curve. */
+  magnifyNeighborStrength: number;
   /** How running-app LED colors are chosen: auto from icon, one fixed color,
    * or manual overrides only. */
   ledColorMode: "auto" | "fixed" | "override_only";

@@ -15,8 +15,8 @@ import {
   ICON_CORNER_RADIUS_RATIO,
   LED_EDGE_DOT_PX,
   LED_EDGE_INSET_FROM_PILL_PX,
-  MAGNIFY_MAX_SCALE,
   TOOLTIP_GAP_PX,
+  computeMagnifyScale,
   getSizeMetrics,
 } from "../lib/constants";
 import type { LedAxis } from "../hooks/useDockOrientation";
@@ -72,6 +72,8 @@ interface DockIconProps {
    * `useTransform` so the dock can resize smoothly without React re-renders
    * on every animation frame. */
   iconSizePx: MotionValue<number>;
+  /** 0..1 — how much magnify spreads to neighboring icons (from settings). */
+  magnifyNeighborStrength: number;
   /** Scaled visual node — hit-test uses its transformed bounding box at click time. */
   registerRef?: (id: string, el: HTMLElement | null) => void;
   mouseX: MotionValue<number>;
@@ -136,6 +138,7 @@ interface DockIconProps {
 export function DockIcon({
   app,
   iconSizePx,
+  magnifyNeighborStrength,
   registerRef,
   mouseX,
   mouseY,
@@ -333,15 +336,23 @@ export function DockIcon({
   const magnifyInfluenceRadiusPx = useTransform(iconSizePx, (px) =>
     getSizeMetrics(px).magnifyInfluenceRadiusPx,
   );
+  const magnifyNeighborStrengthMV = useMotionValue(magnifyNeighborStrength);
+  useLayoutEffect(() => {
+    magnifyNeighborStrengthMV.set(magnifyNeighborStrength);
+  }, [magnifyNeighborStrength, magnifyNeighborStrengthMV]);
   const scaleRaw = useTransform(
-    [mouseX, mouseY, centerMain, magnifyInfluenceRadiusPx],
-    ([mx, my, cm, radius]: number[]) => {
+    [
+      mouseX,
+      mouseY,
+      centerMain,
+      magnifyInfluenceRadiusPx,
+      magnifyNeighborStrengthMV,
+    ],
+    ([mx, my, cm, radius, neighborStrength]: number[]) => {
       const m = magnifyAxis === "x" ? mx : my;
       if (!Number.isFinite(m)) return 1;
       const distance = m - cm;
-      const t = Math.abs(distance) / radius;
-      if (t >= 1) return 1;
-      return 1 + (MAGNIFY_MAX_SCALE - 1) * (1 - t);
+      return computeMagnifyScale(Math.abs(distance), radius, neighborStrength);
     },
   );
   const scale = useSpring(scaleRaw, MAGNIFY_SPRING);

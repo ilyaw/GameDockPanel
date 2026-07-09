@@ -11,10 +11,10 @@ import { useDockApps } from "../hooks/useDockApps";
 import { useDockOrientation } from "../hooks/useDockOrientation";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
-  MAGNIFY_MAX_SCALE,
   MAX_SEPARATORS,
   TOOLTIP_GAP_PX,
   BG_ANIMATION_CLASSES,
+  computeMagnifyScale,
   getBackgroundPreset,
   backgroundPresetToDurationS,
   getBorderRingClasses,
@@ -395,6 +395,10 @@ function HydratedDockPanel({
     iconSizeAnimated,
     (px) => getSizeMetrics(px).magnifyInfluenceRadiusPx,
   );
+  const magnifyNeighborStrengthMV = useMotionValue(settings.magnifyNeighborStrength);
+  useEffect(() => {
+    magnifyNeighborStrengthMV.set(settings.magnifyNeighborStrength);
+  }, [settings.magnifyNeighborStrength, magnifyNeighborStrengthMV]);
   const settingsIconSizePx = useTransform(iconSizeAnimated, (px) => px / 2);
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
   const [isSettingsHovered, setIsSettingsHovered] = useState(false);
@@ -907,14 +911,13 @@ function HydratedDockPanel({
       settingsMouseY,
       settingsCenterMain,
       settingsMagnifyRadiusPx,
+      magnifyNeighborStrengthMV,
     ],
-    ([mx, my, cm, radius]: number[]) => {
+    ([mx, my, cm, radius, neighborStrength]: number[]) => {
       const m = orientation.magnifyAxis === "x" ? mx : my;
       if (!Number.isFinite(m)) return 1;
       const distance = m - cm;
-      const t = Math.abs(distance) / radius;
-      if (t >= 1) return 1;
-      return 1 + (MAGNIFY_MAX_SCALE - 1) * (1 - t);
+      return computeMagnifyScale(Math.abs(distance), radius, neighborStrength);
     },
   );
   const settingsScale = useSpring(settingsScaleRaw, MAGNIFY_SPRING);
@@ -1139,6 +1142,7 @@ function HydratedDockPanel({
               <DockIcon
                 app={item}
                 iconSizePx={iconSizeAnimated}
+                magnifyNeighborStrength={settings.magnifyNeighborStrength}
                 registerRef={registerIconRef}
                 mouseX={mouseX}
                 mouseY={mouseY}

@@ -126,6 +126,10 @@ pub struct DockSettings {
     /// that id when `iconSizePx` is absent in the JSON.
     #[serde(default = "default_icon_size_px")]
     pub icon_size_px: f64,
+    /// 0.0..=1.0 — how much hover-magnify spreads to neighboring icons. At 0
+    /// only the icon under the cursor grows; at 1 the full neighbor curve.
+    #[serde(default = "default_magnify_neighbor_strength")]
+    pub magnify_neighbor_strength: f64,
     /// Which screen edge the dock is anchored to. `#[serde(default)]` (via
     /// `DockPosition`'s own `Default`) — same missing-field-safety pattern
     /// as `icon_size_preset`/`icon_size_px`, since this field is new in a
@@ -149,6 +153,10 @@ fn default_icon_size_preset() -> String {
 
 fn default_icon_size_px() -> f64 {
     56.0
+}
+
+fn default_magnify_neighbor_strength() -> f64 {
+    1.0
 }
 
 fn default_border_width_px() -> f64 {
@@ -203,6 +211,7 @@ impl Default for DockSettings {
             led_fixed_color: default_led_fixed_color(),
             icon_size_preset: "medium".to_string(),
             icon_size_px: 56.0,
+            magnify_neighbor_strength: default_magnify_neighbor_strength(),
             dock_position: DockPosition::default(),
         }
     }
@@ -299,6 +308,7 @@ fn apply_dock_settings(
     settings.background_intensity = settings.background_intensity.clamp(0.0, 1.0);
     settings.background_visibility = settings.background_visibility.clamp(0.0, 1.0);
     settings.background_speed = settings.background_speed.clamp(0.0, 1.0);
+    settings.magnify_neighbor_strength = settings.magnify_neighbor_strength.clamp(0.0, 1.0);
     settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
     settings.border_width_px = clamp_border_width_px(settings.border_width_px);
     if !matches!(

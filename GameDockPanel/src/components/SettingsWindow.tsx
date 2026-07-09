@@ -373,6 +373,24 @@ export function SettingsWindow() {
         </SettingsRow>
 
         <SettingsRow
+          title="Увеличение соседних иконок"
+          descriptionClassName="max-w-sm"
+          description="Насколько сильно при наведении растут иконки рядом с той, под которой курсор. На минимуме увеличивается только активная иконка."
+        >
+          <div className="flex w-full max-w-[280px] flex-col items-end gap-1.5">
+            <div className="mb-0.5 flex w-full justify-between text-[10px] text-zinc-500">
+              <span>Только активная</span>
+              <span>Максимум</span>
+            </div>
+            <PercentSlider
+              value={settings.magnifyNeighborStrength}
+              onChange={(value) => update({ magnifyNeighborStrength: value })}
+              ariaLabel="Увеличение соседних иконок"
+            />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
           title="Анимации рамки"
           description="Переливающаяся RGB-рамка и пульсация LED — увеличение иконок при наведении и перетаскивание не затрагиваются."
         >

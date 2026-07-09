@@ -93,6 +93,34 @@ const BASE_ICON_LED_GAP_PX = 8;
  */
 export const MAGNIFY_MAX_SCALE = 1.4;
 
+/** Falloff exponent at `magnifyNeighborStrength === 1` (linear, current curve). */
+export const MAGNIFY_FALLOFF_EXP_MIN = 1;
+/** Falloff exponent at `magnifyNeighborStrength === 0` (neighbors stay at rest). */
+export const MAGNIFY_FALLOFF_EXP_MAX = 10;
+export const DEFAULT_MAGNIFY_NEIGHBOR_STRENGTH = 1;
+
+/** Maps slider 0..1 to the `(1 - t)^exp` exponent used by magnify. */
+export function magnifyFalloffExponent(neighborStrength: number): number {
+  const strength = Math.min(1, Math.max(0, neighborStrength));
+  return (
+    MAGNIFY_FALLOFF_EXP_MAX +
+    (MAGNIFY_FALLOFF_EXP_MIN - MAGNIFY_FALLOFF_EXP_MAX) * strength
+  );
+}
+
+/** Hover-magnify scale from cursor-to-icon-center distance on the main axis. */
+export function computeMagnifyScale(
+  absDistancePx: number,
+  radiusPx: number,
+  neighborStrength: number,
+): number {
+  if (radiusPx <= 0) return 1;
+  const t = absDistancePx / radiusPx;
+  if (t >= 1) return 1;
+  const exp = magnifyFalloffExponent(neighborStrength);
+  return 1 + (MAGNIFY_MAX_SCALE - 1) * (1 - t) ** exp;
+}
+
 /**
  * Peak launch-bounce `translateY` as a fraction of `magnifyHeightOverflowPx`
  * — deliberately tied to the *same* number `pillFarReservePx` already
@@ -803,6 +831,7 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   backgroundSpeed: 0.4,
   iconSizePreset: "medium",
   iconSizePx: DEFAULT_ICON_SIZE_PX,
+  magnifyNeighborStrength: DEFAULT_MAGNIFY_NEIGHBOR_STRENGTH,
   ledColorMode: "auto",
   ledFixedColor: "#ff9d3b",
   dockPosition: "bottom",
