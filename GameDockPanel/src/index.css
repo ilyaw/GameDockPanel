@@ -6,18 +6,22 @@
 @custom-variant group-hover (&:is(:where(.group):hover *));
 
 /*
-  The window is fully transparent (see src-tauri/tauri.conf.json +
-  platform/macos.rs) — without this, Tailwind's preflight leaves an opaque
-  webview background and the "glass" dock renders on a solid rectangle.
+  Dock webview only — the settings window uses an opaque shell under
+  `.settings-window`. Scoped here so WebView2 does not composite an empty
+  `#root` as a white rectangle behind the framed settings window.
 */
 html,
 body,
 #root {
   height: 100%;
   overflow: hidden;
-  background: transparent !important;
   -webkit-user-select: none;
   user-select: none;
+}
+
+.dock-root {
+  height: 100%;
+  background: transparent !important;
 }
 
 img {

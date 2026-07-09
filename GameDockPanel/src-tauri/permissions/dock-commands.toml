@@ -1,0 +1,23 @@
+[[permission]]
+identifier = "allow-dock-commands"
+description = "Custom invoke commands for the main dock window"
+commands.allow = [
+  "get_apps_snapshot",
+  "launch_or_activate_app",
+  "zoom_app_above_dock",
+  "add_app_from_path",
+  "remove_app",
+  "reorder_apps",
+  "insert_separator",
+  "remove_separator",
+  "reveal_app_in_finder",
+  "quit_app",
+  "set_app_indicator_color",
+  "refresh_indicator_colors",
+  "resize_dock_window",
+  "sync_vibrancy_pill",
+  "set_menu_overlay",
+  "open_settings",
+  "get_dock_settings",
+  "update_dock_settings",
+]

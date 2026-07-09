@@ -28,6 +28,18 @@
         "focusable": true,
         "dragDropEnabled": true,
         "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "GameDockPanel — Настройки",
+        "width": 520,
+        "height": 680,
+        "visible": false,
+        "resizable": true,
+        "transparent": false,
+        "decorations": true,
+        "shadow": true,
+        "skipTaskbar": false
       }
     ],
     "security": {

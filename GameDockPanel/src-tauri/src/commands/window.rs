@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::apps::{AppsState, MenuOverlaySide, MenuOverlayState};
 use crate::platform;
@@ -91,24 +91,16 @@ pub fn set_menu_overlay(
 }
 
 /// Opens the settings window — shared by the tray icon and tray menu.
-/// Lazily creates the window on first call.
+/// The `settings` webview is pre-declared in `tauri.conf.json` (hidden at
+/// startup) so we never call `WebviewWindowBuilder` from a sync handler —
+/// on Windows that deadlocks WebView2 and leaves a blank white window.
 pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("settings") {
-        window.show().map_err(|e| e.to_string())?;
-        window.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-
-    // Ordinary framed utility window — not the dock's transparent/overlay
-    // styling. Points at the same `index.html` bundle as the dock; `App.tsx`
-    // picks the UI to render from `getCurrentWebviewWindow().label`.
-    WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
-        .title("GameDockPanel — Настройки")
-        .inner_size(520.0, 680.0)
-        .resizable(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-
+    let window = app
+        .get_webview_window("settings")
+        .ok_or_else(|| "settings window not found".to_string())?;
+    window.center().map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
 }
 

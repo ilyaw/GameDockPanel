@@ -35,10 +35,14 @@ export function useDockSettings() {
     const unlisteners: Array<() => void> = [];
 
     void (async () => {
-      const snapshot = await invoke<DockSettings>("get_dock_settings");
-      if (cancelled) return;
-      setSettings(snapshot);
-      setHydrated(true);
+      try {
+        const snapshot = await invoke<DockSettings>("get_dock_settings");
+        if (!cancelled) setSettings(snapshot);
+      } catch (error: unknown) {
+        console.error("get_dock_settings failed, using defaults:", error);
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
 
       unlisteners.push(
         await listen<DockSettings>("dock-settings-changed", (event) => {

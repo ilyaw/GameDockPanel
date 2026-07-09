@@ -13,7 +13,13 @@ import { SettingsWindow } from "./components/SettingsWindow";
  */
 function App() {
   const label = getCurrentWebviewWindow().label;
-  return label === "settings" ? <SettingsWindow /> : <DockPanel />;
+  return label === "settings" ? (
+    <SettingsWindow />
+  ) : (
+    <div className="dock-root h-full">
+      <DockPanel />
+    </div>
+  );
 }
 
 export default App;

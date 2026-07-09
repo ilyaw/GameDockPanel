@@ -12,6 +12,9 @@ pub struct IconResolveResult {
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(target_os = "windows")]
+mod windows;
+
 #[cfg(target_os = "macos")]
 pub use macos::{
     activate_or_launch_app, apply_dock_window_layer, is_app_installed, is_bundle_running,
@@ -22,9 +25,10 @@ pub use macos::{
     zoom_app_above_dock,
 };
 
-/// Windows/Linux support isn't implemented yet — no-op for now rather than
-/// a placeholder `windows.rs` stub with nothing in it. Add that module (and
-/// wire it up here) when cross-platform work actually starts.
+#[cfg(target_os = "windows")]
+pub use windows::setup_dock_window;
+
+/// Non-macOS stubs — Windows uses `windows.rs` for `setup_dock_window` only.
 #[cfg(not(target_os = "macos"))]
 pub fn apply_dock_window_layer(
     _window: &tauri::WebviewWindow,
@@ -33,7 +37,7 @@ pub fn apply_dock_window_layer(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn setup_dock_window(app: &mut tauri::App) -> Result<(), String> {
     use tauri::Manager;
 
