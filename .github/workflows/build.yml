@@ -8,8 +8,23 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-macos:
-    runs-on: macos-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            artifact_name: gamedockpanel-macos
+            artifact_path: |
+              GameDockPanel/src-tauri/target/release/bundle/dmg/*.dmg
+              GameDockPanel/src-tauri/target/release/bundle/macos/*.app
+          - platform: windows-latest
+            artifact_name: gamedockpanel-windows
+            artifact_path: |
+              GameDockPanel/src-tauri/target/release/bundle/nsis/*.exe
+              GameDockPanel/src-tauri/target/release/bundle/msi/*.msi
+
+    runs-on: ${{ matrix.platform }}
 
     defaults:
       run:
@@ -32,10 +47,8 @@ jobs:
       - name: Build Tauri app
         run: npm run tauri build
 
-      - name: Upload macOS bundle
+      - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: gamedockpanel-macos
-          path: |
-            GameDockPanel/src-tauri/target/release/bundle/dmg/*.dmg
-            GameDockPanel/src-tauri/target/release/bundle/macos/*.app
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
