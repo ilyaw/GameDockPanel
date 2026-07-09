@@ -4,3 +4,6 @@
 /review-bundle-single*.txt
 /review-bundle-single.zip
 /review-bundle.zip
+
+# Local Cursor agent rule — optional QA workflow, not shared project config
+.cursor/rules/qa-agent.mdc
