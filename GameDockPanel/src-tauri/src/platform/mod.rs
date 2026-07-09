@@ -12,6 +12,9 @@ pub struct IconResolveResult {
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod geometry;
+
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -26,10 +29,13 @@ pub use macos::{
 };
 
 #[cfg(target_os = "windows")]
-pub use windows::setup_dock_window;
+pub use windows::{apply_dock_window_layer, setup_dock_window, shrink_dock_window_to_stored_pill};
 
-/// Non-macOS stubs — Windows uses `windows.rs` for `setup_dock_window` only.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub use geometry::resize_dock_window_for_pill;
+
+/// Non-macOS / non-Windows stubs.
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn apply_dock_window_layer(
     _window: &tauri::WebviewWindow,
     _layer: crate::commands::settings::DockWindowLayer,
@@ -84,7 +90,7 @@ pub fn resolve_app_icon(
 #[cfg(not(target_os = "macos"))]
 pub fn refresh_dock_icons(_app: &tauri::AppHandle, _state: &crate::commands::apps::AppsState) {}
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn resize_dock_window_for_pill(
     _window: &tauri::WebviewWindow,
     _pill_width: f64,
@@ -110,7 +116,7 @@ pub fn ensure_window_fits_menu_overlay(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn shrink_dock_window_to_stored_pill(_window: &tauri::WebviewWindow) -> Result<bool, String> {
     Ok(false)
 }
