@@ -635,12 +635,16 @@ pub fn add_app_from_path(
         entries.insert(idx, DockItem::App(entry));
     }
 
+    let started_running = platform::is_bundle_running(&bundle_id);
     {
         let mut running = state
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        running.insert(bundle_id.clone(), platform::is_bundle_running(&bundle_id));
+        running.insert(bundle_id.clone(), started_running);
+    }
+    if started_running {
+        let _ = app.emit("apps-running-changed", state.running_snapshot());
     }
     {
         let (icon_size_dip, scale_factor) = icon_metrics_for_app(&app);

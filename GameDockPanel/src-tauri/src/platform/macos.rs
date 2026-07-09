@@ -133,6 +133,10 @@ const CONTEXT_MENU_HEIGHT_DIP: f64 = 214.0;
 const CLICK_POLL_MS: u64 = 50;
 /// Rare backup for apps that never post `didTerminate` (e.g. Voice Memos).
 const RUNNING_RECONCILE_POLL_MS: u64 = 4000;
+/// Post-`open_path` retries when `didLaunch` is late or missing — each tick
+/// re-queries `NSRunningApplication` on the main thread until the bundle is
+/// live or the schedule is exhausted.
+const LAUNCH_WATCH_DELAYS_MS: &[u64] = &[0, 150, 300, 600, 1200, 2400];
 /// Matches `NSEvent.doubleClickInterval` (~500 ms on macOS).
 const DOUBLE_CLICK_INTERVAL_MS: u64 = 500;
 /// Visual gap between a zoomed window edge and the dock pill — mirrors the
@@ -1325,7 +1329,6 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let running_apps = workspace.runningApplications();
         let mut running = state
             .running
             .lock()
@@ -1334,13 +1337,10 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
             let DockItem::App(entry) = item else {
                 continue;
             };
-            let is_running = running_apps.iter().any(|running_app| {
-                running_app
-                    .bundleIdentifier()
-                    .map(|bundle_id| bundle_id.to_string() == entry.bundle_id)
-                    .unwrap_or(false)
-            });
-            running.insert(entry.bundle_id.clone(), is_running);
+            running.insert(
+                entry.bundle_id.clone(),
+                live_bundle_running(&entry.bundle_id),
+            );
         }
     }
 
@@ -1493,9 +1493,78 @@ fn emit_apps_running_changed(app: &AppHandle) {
     let _ = app.emit("apps-running-changed", payload);
 }
 
-/// Backup for apps that post `didLaunch` but never `didTerminate` — polls
-/// only bundle IDs currently marked running, on a slow interval separate
-/// from the 50 ms click-through poller.
+/// Whether `bundle_id` currently has a live (non-terminated) process.
+#[cfg(target_os = "macos")]
+fn live_bundle_running(bundle_id: &str) -> bool {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let ns_bundle_id = NSString::from_str(bundle_id);
+    NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id)
+        .iter()
+        .any(|instance| !instance.isTerminated())
+}
+
+/// Re-reads the live process list for one bundle ID, updates `AppsState.running`
+/// when it diverges, and emits `apps-running-changed`. Returns the live value.
+#[cfg(target_os = "macos")]
+fn sync_bundle_running_state(app: &AppHandle, bundle_id: &str) -> bool {
+    let live = live_bundle_running(bundle_id);
+    let state = app.state::<AppsState>();
+    let changed = {
+        let mut running = state
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stored = running.get(bundle_id).copied().unwrap_or(false);
+        if stored != live {
+            running.insert(bundle_id.to_string(), live);
+            true
+        } else {
+            false
+        }
+    };
+    if changed {
+        emit_apps_running_changed(app);
+    }
+    live
+}
+
+/// After a cold `open_path`, `didLaunch` can be late or missing — poll the
+/// live process list on the main thread until the bundle is running or the
+/// retry schedule is exhausted.
+#[cfg(target_os = "macos")]
+fn start_launch_running_watch(app: AppHandle, bundle_id: String) {
+    std::thread::spawn(move || {
+        for &delay_ms in LAUNCH_WATCH_DELAYS_MS {
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let app_for_main = app.clone();
+            let bundle_id_for_main = bundle_id.clone();
+            if app
+                .run_on_main_thread(move || {
+                    let running =
+                        sync_bundle_running_state(&app_for_main, &bundle_id_for_main);
+                    let _ = tx.send(running);
+                })
+                .is_err()
+            {
+                break;
+            }
+
+            if rx.recv().unwrap_or(false) {
+                break;
+            }
+        }
+    });
+}
+
+/// Backup for missed `didLaunch` / `didTerminate` — reconciles every tracked
+/// bundle ID against the live process list on a slow interval separate from
+/// the 50 ms click-through poller.
 #[cfg(target_os = "macos")]
 fn start_running_reconcile_poller(app_handle: AppHandle) {
     std::thread::spawn(move || {
@@ -1504,15 +1573,17 @@ fn start_running_reconcile_poller(app_handle: AppHandle) {
                 RUNNING_RECONCILE_POLL_MS,
             ));
 
-            let has_running = {
+            let has_tracked_apps = {
                 let state = app_handle.state::<AppsState>();
-                let running = state
-                    .running
+                let entries = state
+                    .entries
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                running.values().any(|&is_running| is_running)
+                entries
+                    .iter()
+                    .any(|item| matches!(item, DockItem::App(_)))
             };
-            if !has_running {
+            if !has_tracked_apps {
                 continue;
             }
 
@@ -1527,20 +1598,21 @@ fn start_running_reconcile_poller(app_handle: AppHandle) {
 
 #[cfg(target_os = "macos")]
 fn reconcile_running_apps_on_main_thread(app: &AppHandle) {
-    use objc2_app_kit::NSRunningApplication;
-    use objc2_foundation::NSString;
-
     let state = app.state::<AppsState>();
 
     let candidates: Vec<String> = {
-        let running = state
-            .running
+        let entries = state
+            .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        running
+        entries
             .iter()
-            .filter(|(_, &is_running)| is_running)
-            .map(|(bundle_id, _)| bundle_id.clone())
+            .filter_map(|item| {
+                let DockItem::App(entry) = item else {
+                    return None;
+                };
+                Some(entry.bundle_id.clone())
+            })
             .collect()
     };
 
@@ -1550,23 +1622,14 @@ fn reconcile_running_apps_on_main_thread(app: &AppHandle) {
 
     let mut changed = false;
     for bundle_id in candidates {
-        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
-            &NSString::from_str(&bundle_id),
-        );
-        let still_running = apps
-            .iter()
-            .any(|instance| !instance.isTerminated());
-
-        if still_running {
-            continue;
-        }
-
+        let live = live_bundle_running(&bundle_id);
         let mut running = state
             .running
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if running.get(&bundle_id) == Some(&true) {
-            running.insert(bundle_id, false);
+        let stored = running.get(&bundle_id).copied().unwrap_or(false);
+        if stored != live {
+            running.insert(bundle_id, live);
             changed = true;
         }
     }
@@ -1922,14 +1985,7 @@ pub fn is_app_installed(bundle_id: &str) -> bool {
 /// initial LED state without waiting for the next `NSWorkspace` event.
 #[cfg(target_os = "macos")]
 pub fn is_bundle_running(bundle_id: &str) -> bool {
-    use objc2_app_kit::NSRunningApplication;
-    use objc2_foundation::NSString;
-
-    let ns_bundle_id = NSString::from_str(bundle_id);
-    NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id)
-        .iter()
-        .next()
-        .is_some()
+    live_bundle_running(bundle_id)
 }
 
 /// Resolves the `CFBundleIdentifier` of a `.app` bundle at `path` — the
@@ -2554,8 +2610,12 @@ pub fn zoom_app_above_dock(app: AppHandle, bundle_id: String) -> Result<(), Stri
 #[cfg(target_os = "macos")]
 pub fn activate_or_launch_app(app: AppHandle, bundle_id: String) -> Result<(), String> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let app_for_main = app.clone();
     app.run_on_main_thread(move || {
-        let _ = tx.send(activate_or_launch_app_on_main_thread(&bundle_id));
+        let _ = tx.send(activate_or_launch_app_on_main_thread(
+            &app_for_main,
+            &bundle_id,
+        ));
     })
     .map_err(|e| e.to_string())?;
 
@@ -2679,15 +2739,22 @@ fn activate_running_application(
 }
 
 #[cfg(target_os = "macos")]
-fn activate_or_launch_app_on_main_thread(bundle_id: &str) -> Result<(), String> {
+fn activate_or_launch_app_on_main_thread(
+    app: &AppHandle,
+    bundle_id: &str,
+) -> Result<(), String> {
     use objc2_app_kit::{NSRunningApplication, NSWorkspace};
     use objc2_foundation::NSString;
 
     let ns_bundle_id = NSString::from_str(bundle_id);
     let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&ns_bundle_id);
 
-    if let Some(instance) = running.iter().next() {
-        return activate_running_application(&instance);
+    if let Some(instance) = running.iter().find(|instance| !instance.isTerminated()) {
+        let result = activate_running_application(&instance);
+        if result.is_ok() {
+            sync_bundle_running_state(app, bundle_id);
+        }
+        return result;
     }
 
     let workspace = NSWorkspace::sharedWorkspace();
@@ -2696,7 +2763,13 @@ fn activate_or_launch_app_on_main_thread(bundle_id: &str) -> Result<(), String> 
         .ok_or_else(|| format!("{bundle_id} is not installed"))?;
     let path = app_url.path().ok_or_else(|| "app URL has no path".to_string())?;
 
-    tauri_plugin_opener::open_path(path.to_string(), None::<&str>).map_err(|e| e.to_string())
+    let result =
+        tauri_plugin_opener::open_path(path.to_string(), None::<&str>).map_err(|e| e.to_string());
+    if result.is_ok() {
+        sync_bundle_running_state(app, bundle_id);
+        start_launch_running_watch(app.clone(), bundle_id.to_string());
+    }
+    result
 }
 
 /// Reveals the installed `.app` for `bundle_id` in Finder, with the icon
