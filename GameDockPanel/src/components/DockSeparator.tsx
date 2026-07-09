@@ -5,7 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { Trash2 } from "lucide-react";
 import { DockRowDivider } from "./DockRowDivider";
 import { DockOverlayAnchor } from "./DockOverlayAnchor";
-import { DOCK_SEPARATOR_WIDTH_PX, TOOLTIP_GAP_PX } from "../lib/constants";
+import {
+  DOCK_SEPARATOR_HIT_PX,
+  DOCK_SEPARATOR_WIDTH_PX,
+  TOOLTIP_GAP_PX,
+} from "../lib/constants";
 import {
   resolveOverlaySide,
   type OverlaySide,
@@ -141,42 +145,72 @@ export function DockSeparator({
 
   return (
     <div
-      ref={anchorRef}
       role="separator"
       aria-orientation={isVertical ? "horizontal" : "vertical"}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        setMenuOpen(true);
-      }}
-      style={isVertical ? { height: DOCK_SEPARATOR_WIDTH_PX } : { width: DOCK_SEPARATOR_WIDTH_PX }}
-      className={`relative flex shrink-0 outline-none ${
+      style={
         isVertical
-          ? "items-center justify-center self-center"
-          : "items-end justify-center self-end"
-      } ${isDragging ? "cursor-grabbing" : "cursor-grab"} ${menuOpen ? "z-10" : "z-0"}`}
+          ? { height: DOCK_SEPARATOR_WIDTH_PX }
+          : { width: DOCK_SEPARATOR_WIDTH_PX }
+      }
+      className={`relative shrink-0 ${
+        isVertical ? "self-center" : "self-end"
+      }`}
     >
-      {menuOpen && (
-        <DockOverlayAnchor
-          innerRef={menuRef}
-          side={menuSide}
-          gap={TOOLTIP_GAP_PX}
-          className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
-        >
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              onRemove?.(id);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+      <div
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenuOpen(true);
+        }}
+        style={
+          isVertical
+            ? { height: DOCK_SEPARATOR_HIT_PX, width: "100%" }
+            : { width: DOCK_SEPARATOR_HIT_PX, height: "100%" }
+        }
+        className={`absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 outline-none ${
+          isVertical
+            ? "items-center justify-center"
+            : "items-end justify-center"
+        } ${isDragging ? "cursor-grabbing" : "cursor-grab"} ${
+          menuOpen ? "z-[30]" : "z-[11]"
+        }`}
+      >
+        {menuOpen && (
+          <DockOverlayAnchor
+            innerRef={menuRef}
+            side={menuSide}
+            gap={TOOLTIP_GAP_PX}
+            className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
           >
-            <Trash2 className="h-3.5 w-3.5" />
-            Удалить разделитель
-          </button>
-        </DockOverlayAnchor>
-      )}
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                onRemove?.(id);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Удалить разделитель
+            </button>
+          </DockOverlayAnchor>
+        )}
 
-      <DockRowDivider iconSizePx={iconSizePx} isVertical={isVertical} />
+        <div
+          ref={anchorRef}
+          className={`flex shrink-0 ${
+            isVertical
+              ? "items-center justify-center"
+              : "items-end justify-center"
+          }`}
+          style={
+            isVertical
+              ? { height: DOCK_SEPARATOR_WIDTH_PX, width: "100%" }
+              : { width: DOCK_SEPARATOR_WIDTH_PX, height: "100%" }
+          }
+        >
+          <DockRowDivider iconSizePx={iconSizePx} isVertical={isVertical} />
+        </div>
+      </div>
     </div>
   );
 }

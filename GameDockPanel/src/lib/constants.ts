@@ -161,6 +161,9 @@ export const DOCK_DIVIDER_WIDTH_PX = 9;
  * and from the apps↔settings divider above. Mirrors
  * `DOCK_SEPARATOR_WIDTH_DIP` in src-tauri/src/platform/macos.rs. */
 export const DOCK_SEPARATOR_WIDTH_PX = 7;
+/** Invisible hit-target width/height along the row axis — wider than the
+ * visible 7px slot so magnified neighbors don't steal contextmenu. */
+export const DOCK_SEPARATOR_HIT_PX = 18;
 /** Vertical row divider height as a fraction of `iconSizePx` — shared by the
  * settings gear divider and in-row dock separators (`DockRowDivider`). */
 export const DOCK_ROW_DIVIDER_HEIGHT_RATIO = 0.6;

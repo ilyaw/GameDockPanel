@@ -1,0 +1,6 @@
+# Ephemeral code-review export bundles (not part of the app)
+/review-bundle/
+/review-bundle */
+/review-bundle-single*.txt
+/review-bundle-single.zip
+/review-bundle.zip

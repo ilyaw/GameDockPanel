@@ -135,6 +135,8 @@ const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
 /// Finder/Remove/color/reset/quit + dividers).
 const CONTEXT_MENU_HEIGHT_DIP: f64 = 214.0;
 const CLICK_POLL_MS: u64 = 50;
+/// Rare backup for apps that never post `didTerminate` (e.g. Voice Memos).
+const RUNNING_RECONCILE_POLL_MS: u64 = 4000;
 /// Matches `NSEvent.doubleClickInterval` (~500 ms on macOS).
 const DOUBLE_CLICK_INTERVAL_MS: u64 = 500;
 /// Visual gap between a zoomed window edge and the dock pill — mirrors the
@@ -1397,6 +1399,8 @@ pub fn start_apps_monitoring(app: &App) -> Result<(), String> {
     };
     std::mem::forget(terminate_token);
 
+    start_running_reconcile_poller(app_handle.clone());
+
     emit_apps_icons_updated(&app_handle, app.state::<AppsState>().icons_snapshot());
     emit_apps_running_changed(&app_handle);
     crate::commands::apps::emit_apps_list_changed(&app_handle, &app.state::<AppsState>());
@@ -1494,6 +1498,89 @@ fn emit_apps_running_changed(app: &AppHandle) {
     let state = app.state::<AppsState>();
     let payload = state.running_snapshot();
     let _ = app.emit("apps-running-changed", payload);
+}
+
+/// Backup for apps that post `didLaunch` but never `didTerminate` — polls
+/// only bundle IDs currently marked running, on a slow interval separate
+/// from the 50 ms click-through poller.
+#[cfg(target_os = "macos")]
+fn start_running_reconcile_poller(app_handle: AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(
+                RUNNING_RECONCILE_POLL_MS,
+            ));
+
+            let has_running = {
+                let state = app_handle.state::<AppsState>();
+                let running = state
+                    .running
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                running.values().any(|&is_running| is_running)
+            };
+            if !has_running {
+                continue;
+            }
+
+            let app = app_handle.clone();
+            let app_for_main = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                reconcile_running_apps_on_main_thread(&app_for_main);
+            });
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn reconcile_running_apps_on_main_thread(app: &AppHandle) {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+
+    let state = app.state::<AppsState>();
+
+    let candidates: Vec<String> = {
+        let running = state
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        running
+            .iter()
+            .filter(|(_, &is_running)| is_running)
+            .map(|(bundle_id, _)| bundle_id.clone())
+            .collect()
+    };
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut changed = false;
+    for bundle_id in candidates {
+        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+            &NSString::from_str(&bundle_id),
+        );
+        let still_running = apps
+            .iter()
+            .any(|instance| !instance.isTerminated());
+
+        if still_running {
+            continue;
+        }
+
+        let mut running = state
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if running.get(&bundle_id) == Some(&true) {
+            running.insert(bundle_id, false);
+            changed = true;
+        }
+    }
+
+    if changed {
+        emit_apps_running_changed(app);
+    }
 }
 
 #[cfg(target_os = "macos")]
