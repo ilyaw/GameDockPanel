@@ -2,17 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Reorder, motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { EllipsisVertical } from "lucide-react";
 import { DockIcon } from "./DockIcon";
-import { DockRowDivider } from "./DockRowDivider";
 import { DockSeparator } from "./DockSeparator";
-import { DockOverlayAnchor } from "./DockOverlayAnchor";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockOrientation } from "../hooks/useDockOrientation";
 import { useDockSettings } from "../hooks/useDockSettings";
 import {
   MAX_SEPARATORS,
-  TOOLTIP_GAP_PX,
   BG_ANIMATION_CLASSES,
   getBackgroundPreset,
   backgroundPresetToDurationS,
@@ -21,9 +17,6 @@ import {
   getSizeMetrics,
   clampBorderWidthPx,
   PILL_CORNER_RADIUS_PX,
-  LED_HEIGHT_PX,
-  settingsControlWidthPx,
-  settingsControlIconPx,
   roundedRingMaskStyle,
 } from "../lib/constants";
 import {
@@ -130,7 +123,7 @@ function hitTestIcon(
 /** macOS Dock-style slot: insert before the first app icon whose center
  * lies past the cursor on the dock's *length* axis — X for `bottom`/`top`,
  * Y for `left`/`right` (`orientation.magnifyAxis`, which names the same
- * axis) — otherwise append before settings. Comparing X unconditionally
+ * axis) — otherwise append at end. Comparing X unconditionally
  * broke vertical docks: every icon in a column shares one centerX, so a
  * Finder drop always resolved to index 0. */
 function resolveInsertIndex(
@@ -380,20 +373,7 @@ function HydratedDockPanel({
     iconSizeAnimated,
     (px) => `${getSizeMetrics(px).dockGapPx}px`,
   );
-  const settingsControlSizePx = useTransform(iconSizeAnimated, (px) =>
-    settingsControlWidthPx(px),
-  );
-  const settingsControlIconSizePx = useTransform(iconSizeAnimated, (px) =>
-    settingsControlIconPx(px),
-  );
-  /** Aligns the compact settings control with the icon row baseline on
-   * horizontal docks — same offset the row divider uses. */
-  const settingsEndOffsetPx = useTransform(
-    iconSizeAnimated,
-    (px) => getSizeMetrics(px).iconLedGapPx + LED_HEIGHT_PX,
-  );
   const [hoveredIconId, setHoveredIconId] = useState<string | null>(null);
-  const [isSettingsHovered, setIsSettingsHovered] = useState(false);
   const [hoverSessionId, setHoverSessionId] = useState(0);
   /**
    * Bumped once per `Reorder.Item` whose layout box actually finished
@@ -425,21 +405,14 @@ function HydratedDockPanel({
 
   const mouseX = useMotionValue(Infinity);
   const mouseY = useMotionValue(Infinity);
-  /** Separate cursor channel for the settings slot — when the pointer is over
-   * settings, the app-icon magnify axis is forced to `Infinity` so icons
-   * don't pick up a distant magnify curve from the far edge cursor position. */
-  const settingsMouseX = useMotionValue(Infinity);
-  const settingsMouseY = useMotionValue(Infinity);
   const lastNativeMoveAt = useRef(0);
   const dockHoveredRef = useRef(false);
   const contextMenuOpenCountRef = useRef(0);
-  const [contextMenuActive, setContextMenuActive] = useState(false);
   const contextMenuHitRectRef = useRef<DOMRect | null>(null);
   const suppressDockClickRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement | null>(null);
-  const settingsSlotRef = useRef<HTMLDivElement>(null);
   const registerIconRef = (id: string, el: HTMLElement | null) => {
     if (el) iconRefs.current.set(id, el);
     else iconRefs.current.delete(id);
@@ -494,7 +467,6 @@ function HydratedDockPanel({
       ? contextMenuOpenCountRef.current + 1
       : Math.max(0, contextMenuOpenCountRef.current - 1);
     contextMenuOpenCountRef.current = next;
-    setContextMenuActive(next > 0);
   }, []);
 
   const handleContextMenuBoundsChange = useCallback((rect: DOMRect | null) => {
@@ -514,44 +486,19 @@ function HydratedDockPanel({
     (x: number, y: number) => {
       if (contextMenuOpenCountRef.current > 0) return;
       if (isDraggingRef.current || isReorderSettlingRef.current) return;
-      const settingsEl = settingsSlotRef.current;
-      if (settingsEl && pointInRect(x, y, settingsEl)) {
-        if (orientation.magnifyAxis === "x") {
-          mouseX.set(Infinity);
-          settingsMouseX.set(x);
-        } else {
-          mouseY.set(Infinity);
-          settingsMouseY.set(y);
-        }
-        setHoveredIconId(null);
-        setIsSettingsHovered(true);
-        return;
-      }
-      settingsMouseX.set(Infinity);
-      settingsMouseY.set(Infinity);
-      setIsSettingsHovered(false);
       mouseX.set(x);
       mouseY.set(y);
       setHoveredIconId(hitTestIcon(iconRefs.current, x, y));
     },
-    [
-      mouseX,
-      mouseY,
-      settingsMouseX,
-      settingsMouseY,
-      orientation.magnifyAxis,
-    ],
+    [mouseX, mouseY],
   );
 
   const leaveDock = useCallback(() => {
     dockHoveredRef.current = false;
     mouseX.set(Infinity);
     mouseY.set(Infinity);
-    settingsMouseX.set(Infinity);
-    settingsMouseY.set(Infinity);
     setHoveredIconId(null);
-    setIsSettingsHovered(false);
-  }, [mouseX, mouseY, settingsMouseX, settingsMouseY]);
+  }, [mouseX, mouseY]);
 
   const enterDock = useCallback(() => {
     dockHoveredRef.current = true;
@@ -580,11 +527,8 @@ function HydratedDockPanel({
 
     mouseX.set(Infinity);
     mouseY.set(Infinity);
-    settingsMouseX.set(Infinity);
-    settingsMouseY.set(Infinity);
     setHoveredIconId(null);
-    setIsSettingsHovered(false);
-  }, [mouseX, mouseY, settingsMouseX, settingsMouseY]);
+  }, [mouseX, mouseY]);
 
   const scheduleFinishSettle = useCallback(() => {
     clearTimeout(settleDebounceRef.current);
@@ -598,11 +542,8 @@ function HydratedDockPanel({
     setIsDragging(true);
     mouseX.set(Infinity);
     mouseY.set(Infinity);
-    settingsMouseX.set(Infinity);
-    settingsMouseY.set(Infinity);
     setHoveredIconId(null);
-    setIsSettingsHovered(false);
-  }, [items, mouseX, mouseY, settingsMouseX, settingsMouseY]);
+  }, [items, mouseX, mouseY]);
 
   /** The one discrete "drop" event — persists the final order exactly once
    * per drag gesture, mirroring the `sync_dock_geometry` pattern elsewhere. */
@@ -653,10 +594,7 @@ function HydratedDockPanel({
             dockHoveredRef.current = false;
             mouseX.set(Infinity);
             mouseY.set(Infinity);
-            settingsMouseX.set(Infinity);
-            settingsMouseY.set(Infinity);
             setHoveredIconId(null);
-            setIsSettingsHovered(false);
           }
         }),
       );
@@ -709,11 +647,6 @@ function HydratedDockPanel({
           if (isDraggingRef.current || isReorderSettlingRef.current) return;
           const { x, y } = event.payload;
           if (shouldSuppressDockClickAt(x, y)) return;
-          const settingsEl = settingsSlotRef.current;
-          if (settingsEl && pointInRect(x, y, settingsEl)) {
-            void invoke("open_settings");
-            return;
-          }
           const id = hitTestIcon(iconRefs.current, x, y);
           if (id) activateApp(id);
         }),
@@ -1164,70 +1097,6 @@ function HydratedDockPanel({
           </Reorder.Item>
         ))}
         </Reorder.Group>
-        <DockRowDivider
-          iconSizePx={iconSizeAnimated}
-          isVertical={orientation.isVertical}
-          className="relative z-[2] mx-1"
-        />
-        {/* Compact settings control (⋯) — aligned with the icon row on
-            horizontal docks via `settingsEndOffsetPx`. */}
-        <motion.div
-          className={`relative z-[2] shrink-0 ${
-            orientation.isVertical ? "self-center" : "self-end"
-          }`}
-          style={
-            orientation.isVertical ? undefined : { marginBottom: settingsEndOffsetPx }
-          }
-        >
-          <motion.div
-            ref={settingsSlotRef}
-            style={{
-              height: settingsControlSizePx,
-              width: settingsControlSizePx,
-            }}
-            className={`relative shrink-0 ${
-              isSettingsHovered &&
-              !isDragging &&
-              !isReorderSettling &&
-              !contextMenuActive
-                ? "z-10"
-                : ""
-            }`}
-          >
-            <DockOverlayAnchor
-              side={orientation.overlayPreferredSide}
-              gap={TOOLTIP_GAP_PX}
-              className={`pointer-events-none whitespace-nowrap rounded-md bg-zinc-900/90 px-2 py-1 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 ease-out ${
-                isSettingsHovered &&
-                !isDragging &&
-                !isReorderSettling &&
-                !contextMenuActive
-                  ? "scale-100 opacity-100"
-                  : "scale-90 opacity-0"
-              }`}
-            >
-              Настройки
-            </DockOverlayAnchor>
-            <button
-              type="button"
-              aria-label="Настройки"
-              onClick={() => {
-                void invoke("open_settings");
-              }}
-              className="flex h-full w-full items-center justify-center rounded-md text-zinc-500/70 transition-colors duration-200 hover:bg-zinc-800/50 hover:text-zinc-200"
-            >
-              <motion.div
-                className="flex items-center justify-center"
-                style={{
-                  width: settingsControlIconSizePx,
-                  height: settingsControlIconSizePx,
-                }}
-              >
-                <EllipsisVertical className="h-full w-full" strokeWidth={2} />
-              </motion.div>
-            </button>
-          </motion.div>
-        </motion.div>
         {showPanelEffect && (
           // Painted above the icon row (see `.dock-panel-scanline`/
           // `.dock-panel-hologram`'s `mix-blend-mode: screen` in

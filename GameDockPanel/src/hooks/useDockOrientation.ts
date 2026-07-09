@@ -44,7 +44,7 @@ export interface DockOrientation {
   wrapperClassName: string;
   /**
    * Classes for the pill's own three direct children (icon list, divider,
-   * settings slot): main-axis direction + cross-axis alignment. `items-end`
+   * icon row): main-axis direction + cross-axis alignment. `items-end`
    * bottom-aligns each child's row (icon sits above its LED dot) — still
    * correct for `top` (the row itself stays horizontal, only the whole
    * dock's screen position flips) so only `left`/`right` need `items-center`.

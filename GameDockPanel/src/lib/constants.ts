@@ -154,38 +154,14 @@ export const LED_EDGE_DOT_PX = 6;
 /** Min inset of the dot center from the pill's inner near-edge (max toward
  * the screen edge without leaving the dock panel). */
 export const LED_EDGE_INSET_FROM_PILL_PX = 3;
-/** Mirrors the vertical divider between the app icons and the settings
- * gear in DockPanel.tsx (`mx-1 w-px`) — 4px margin each side + 1px line. */
-export const DOCK_DIVIDER_WIDTH_PX = 9;
-/** Minimum hit target for the compact settings (⋯) control in DockPanel. */
-export const SETTINGS_CONTROL_HIT_PX = 28;
-/** Upper bound on the settings control slot along the dock length axis. */
-export const SETTINGS_CONTROL_MAX_PX = 36;
-
-/** Compact settings-button slot width/height — mirrors
- * `settings_control_width_dip` in src-tauri/src/platform/macos.rs. */
-export function settingsControlWidthPx(iconSizePx: number): number {
-  return Math.round(
-    Math.min(
-      SETTINGS_CONTROL_MAX_PX,
-      Math.max(SETTINGS_CONTROL_HIT_PX, iconSizePx * 0.38),
-    ),
-  );
-}
-
-/** Ellipsis icon size inside the settings control. */
-export function settingsControlIconPx(iconSizePx: number): number {
-  return Math.round(Math.min(16, Math.max(14, iconSizePx * 0.26)));
-}
-/** Horizontal slot for an in-row dock separator — distinct from icon width
- * and from the apps↔settings divider above. Mirrors
- * `DOCK_SEPARATOR_WIDTH_DIP` in src-tauri/src/platform/macos.rs. */
+/** Horizontal slot for an in-row dock separator — distinct from icon width.
+ * Mirrors `DOCK_SEPARATOR_WIDTH_DIP` in src-tauri/src/platform/macos.rs. */
 export const DOCK_SEPARATOR_WIDTH_PX = 7;
 /** Invisible hit-target width/height along the row axis — wider than the
  * visible 7px slot so magnified neighbors don't steal contextmenu. */
 export const DOCK_SEPARATOR_HIT_PX = 18;
-/** Vertical row divider height as a fraction of `iconSizePx` — shared by the
- * settings gear divider and in-row dock separators (`DockRowDivider`). */
+/** Vertical row divider height as a fraction of `iconSizePx` — used by
+ * in-row dock separators (`DockRowDivider`). */
 export const DOCK_ROW_DIVIDER_HEIGHT_RATIO = 0.6;
 /** Must match Tailwind's `rounded-[28px]` on the dock pill (DockPanel.tsx). */
 export const PILL_CORNER_RADIUS_PX = 28;
@@ -287,7 +263,7 @@ export const MAX_SEPARATORS = 5;
  */
 export interface SizeMetrics {
   iconSizePx: number;
-  /** Proportional squircle radius for app icons and the settings gear slot. */
+  /** Proportional squircle radius for app icons. */
   iconCornerRadiusPx: number;
   dockGapPx: number;
   dockPaddingXPx: number;
@@ -403,13 +379,7 @@ export function pillLengthPx(items: DockItem[], iconSizePx: number): number {
     rowLength +=
       item.type === "app" ? iconSizePx : DOCK_SEPARATOR_WIDTH_PX;
   });
-  // Trailing divider + compact settings control in DockPanel.
-  const settingsSlot =
-    metrics.dockGapPx +
-    DOCK_DIVIDER_WIDTH_PX +
-    metrics.dockGapPx +
-    settingsControlWidthPx(iconSizePx);
-  return metrics.dockPaddingXPx * 2 + rowLength + settingsSlot;
+  return metrics.dockPaddingXPx * 2 + rowLength;
 }
 
 /** See `pillLengthPx` — same "documented formula, not called at runtime" note. */

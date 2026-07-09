@@ -90,8 +90,8 @@ pub fn set_menu_overlay(
     Ok(())
 }
 
-/// Opens the settings window — shared by the tray icon and the dock's
-/// settings button. Lazily creates the window on first call.
+/// Opens the settings window — shared by the tray icon and tray menu.
+/// Lazily creates the window on first call.
 pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("settings") {
         window.show().map_err(|e| e.to_string())?;

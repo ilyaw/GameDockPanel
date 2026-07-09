@@ -16,13 +16,16 @@ use crate::commands::window::open_settings_window;
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 /// Builds the tray icon: left-click opens/focuses the settings window,
-/// right-click shows a short `Quit` menu (`show_menu_on_left_click(false)`
-/// keeps left-click free for the primary action instead of popping the
-/// menu, which is Tauri's default).
+/// right-click shows a short menu (`Настройки`, `Выход`;
+/// `show_menu_on_left_click(false)` keeps left-click free for the primary
+/// action instead of popping the menu, which is Tauri's default).
 pub fn setup(app: &App) -> Result<(), String> {
+    let settings_item =
+        MenuItem::with_id(app, "settings", "Настройки", true, None::<&str>)
+            .map_err(|e| e.to_string())?;
     let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let menu = Menu::with_items(app, &[&quit_item]).map_err(|e| e.to_string())?;
+    let menu = Menu::with_items(app, &[&settings_item, &quit_item]).map_err(|e| e.to_string())?;
 
     let icon = tauri::image::Image::from_bytes(TRAY_ICON_BYTES).map_err(|e| e.to_string())?;
 
@@ -46,7 +49,11 @@ pub fn setup(app: &App) -> Result<(), String> {
             }
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "quit" {
+            if event.id().as_ref() == "settings" {
+                if let Err(err) = open_settings_window(app) {
+                    eprintln!("GameDockPanel: failed to open settings window: {err}");
+                }
+            } else if event.id().as_ref() == "quit" {
                 app.exit(0);
             }
         })
