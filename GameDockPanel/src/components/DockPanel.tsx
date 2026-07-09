@@ -98,6 +98,10 @@ function pointInRect(
   el: HTMLElement,
 ): boolean {
   const rect = el.getBoundingClientRect();
+  return pointInDOMRect(x, y, rect);
+}
+
+function pointInDOMRect(x: number, y: number, rect: DOMRect): boolean {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
@@ -442,6 +446,8 @@ function HydratedDockPanel({
   const dockHoveredRef = useRef(false);
   const contextMenuOpenCountRef = useRef(0);
   const [contextMenuActive, setContextMenuActive] = useState(false);
+  const contextMenuHitRectRef = useRef<DOMRect | null>(null);
+  const suppressDockClickRef = useRef(false);
 
   const iconRefs = useRef<Map<string, HTMLElement>>(new Map());
   const pillRef = useRef<HTMLDivElement | null>(null);
@@ -502,6 +508,19 @@ function HydratedDockPanel({
       : Math.max(0, contextMenuOpenCountRef.current - 1);
     contextMenuOpenCountRef.current = next;
     setContextMenuActive(next > 0);
+  }, []);
+
+  const handleContextMenuBoundsChange = useCallback((rect: DOMRect | null) => {
+    contextMenuHitRectRef.current = rect;
+  }, []);
+
+  const shouldSuppressDockClickAt = useCallback((x: number, y: number) => {
+    if (suppressDockClickRef.current) {
+      suppressDockClickRef.current = false;
+      return true;
+    }
+    const menuRect = contextMenuHitRectRef.current;
+    return menuRect !== null && pointInDOMRect(x, y, menuRect);
   }, []);
 
   const applyCursor = useCallback(
@@ -680,9 +699,29 @@ function HydratedDockPanel({
       }
 
       unlisteners.push(
+        await listen<DockCursorPayload>("dock-global-mousedown", (event) => {
+          if (contextMenuOpenCountRef.current === 0) return;
+          const rect = contextMenuHitRectRef.current;
+          if (!rect) return;
+          const { x, y } = event.payload;
+          if (pointInDOMRect(x, y, rect)) {
+            suppressDockClickRef.current = true;
+          }
+        }),
+      );
+
+      if (cancelled) {
+        for (const unlisten of unlisteners) {
+          unlisten();
+        }
+        return;
+      }
+
+      unlisteners.push(
         await listen<DockCursorPayload>("dock-click", (event) => {
           if (isDraggingRef.current || isReorderSettlingRef.current) return;
           const { x, y } = event.payload;
+          if (shouldSuppressDockClickAt(x, y)) return;
           const settingsEl = settingsSlotRef.current;
           if (settingsEl && pointInRect(x, y, settingsEl)) {
             void invoke("open_settings");
@@ -697,6 +736,7 @@ function HydratedDockPanel({
         await listen<DockCursorPayload>("dock-double-click", (event) => {
           if (isDraggingRef.current || isReorderSettlingRef.current) return;
           const { x, y } = event.payload;
+          if (shouldSuppressDockClickAt(x, y)) return;
           const id = hitTestIcon(iconRefs.current, x, y);
           if (!id) return;
           const app = itemsRef.current.find(
@@ -720,7 +760,7 @@ function HydratedDockPanel({
         unlisten();
       }
     };
-  }, [activateApp, zoomApp, itemsRef, mouseX, mouseY, applyCursor, enterDock]);
+  }, [activateApp, zoomApp, itemsRef, mouseX, mouseY, applyCursor, enterDock, shouldSuppressDockClickAt]);
 
   useEffect(() => {
     if (rejectPulseKey === 0) return;
@@ -1146,6 +1186,7 @@ function HydratedDockPanel({
                 animationsEnabled={settings.animationsEnabled}
                 isBouncing={bouncingIds.has(item.id)}
                 onContextMenuOpenChange={handleContextMenuOpenChange}
+                onContextMenuBoundsChange={handleContextMenuBoundsChange}
                 onRemove={removeApp}
                 onShowInFinder={showInFinder}
                 onQuit={quitApp}
@@ -1167,6 +1208,7 @@ function HydratedDockPanel({
                 onRemove={removeSeparator}
                 isDragging={isDragging}
                 onContextMenuOpenChange={handleContextMenuOpenChange}
+                onContextMenuBoundsChange={handleContextMenuBoundsChange}
               />
             )}
           </Reorder.Item>

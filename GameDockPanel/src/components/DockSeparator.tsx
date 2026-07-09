@@ -28,6 +28,7 @@ interface DockSeparatorProps {
   onRemove?: (separatorId: string) => void;
   isDragging?: boolean;
   onContextMenuOpenChange?: (open: boolean) => void;
+  onContextMenuBoundsChange?: (rect: DOMRect | null) => void;
 }
 
 export function DockSeparator({
@@ -38,6 +39,7 @@ export function DockSeparator({
   onRemove,
   isDragging = false,
   onContextMenuOpenChange,
+  onContextMenuBoundsChange,
 }: DockSeparatorProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
@@ -111,6 +113,7 @@ export function DockSeparator({
 
     if (!menuOpen) {
       reportMenuOverlay(false, overlayPreferredSide, 0, 0);
+      onContextMenuBoundsChange?.(null);
       return;
     }
 
@@ -121,6 +124,7 @@ export function DockSeparator({
 
       const anchorRect = anchorEl.getBoundingClientRect();
       const menuRect = menuEl.getBoundingClientRect();
+      onContextMenuBoundsChange?.(menuRect);
       const resolvedSide = resolveOverlaySide(
         anchorRect,
         { width: menuRect.width, height: menuRect.height },
@@ -139,8 +143,9 @@ export function DockSeparator({
     return () => {
       observer.disconnect();
       reportMenuOverlay(false, overlayPreferredSide, 0, 0);
+      onContextMenuBoundsChange?.(null);
     };
-  }, [menuOpen, overlayPreferredSide]);
+  }, [menuOpen, overlayPreferredSide, onContextMenuBoundsChange]);
 
   return (
     <div
@@ -178,7 +183,7 @@ export function DockSeparator({
             innerRef={menuRef}
             side={menuSide}
             gap={TOOLTIP_GAP_PX}
-            className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
+            className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md border border-zinc-700/60 bg-zinc-900 text-xs text-zinc-200 shadow-lg shadow-black/40"
           >
             <button
               type="button"

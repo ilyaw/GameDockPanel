@@ -9,7 +9,7 @@ import {
 } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { FolderOpen, Minus, Power, Trash2 } from "lucide-react";
+import { ChevronRight, FolderOpen, Minus, Power, Trash2 } from "lucide-react";
 import type { DockApp } from "../lib/types";
 import {
   ICON_CORNER_RADIUS_RATIO,
@@ -65,6 +65,22 @@ const LAUNCH_BOUNCE_REPEAT_DELAY_S = 0.35;
  * (running-state arrived, or the timeout fired) — a short tween instead of
  * a hard `jump(0)` so the icon doesn't visibly snap mid-arc. */
 const LAUNCH_BOUNCE_STOP_TWEEN_S = 0.15;
+
+/** Union of the main menu column and an open side submenu — absolutely
+ * positioned children don't expand the parent's `getBoundingClientRect()`. */
+function getMenuHitBounds(
+  menuEl: HTMLElement,
+  submenuEl: HTMLElement | null,
+): DOMRect {
+  const menuRect = menuEl.getBoundingClientRect();
+  if (!submenuEl) return menuRect;
+  const submenuRect = submenuEl.getBoundingClientRect();
+  const left = Math.min(menuRect.left, submenuRect.left);
+  const top = Math.min(menuRect.top, submenuRect.top);
+  const right = Math.max(menuRect.right, submenuRect.right);
+  const bottom = Math.max(menuRect.bottom, submenuRect.bottom);
+  return new DOMRect(left, top, right - left, bottom - top);
+}
 
 interface DockIconProps {
   app: DockApp;
@@ -123,6 +139,8 @@ interface DockIconProps {
   isReorderSettling?: boolean;
   /** Notifies `DockPanel` when this icon's context menu opens or closes. */
   onContextMenuOpenChange?: (open: boolean) => void;
+  /** Reports the menu's window-logical hit bounds (main + open submenu). */
+  onContextMenuBoundsChange?: (rect: DOMRect | null) => void;
   /** Mirrors `DockSettings.animationsEnabled` — gates only the LED's
    * "breathing" pulse keyframe, not its on/off (active/inactive) state,
    * which is a functional signal, not decoration. */
@@ -158,17 +176,29 @@ export function DockIcon({
   isDragging = false,
   isReorderSettling = false,
   onContextMenuOpenChange,
+  onContextMenuBoundsChange,
   animationsEnabled = true,
   isBouncing = false,
 }: DockIconProps) {
   const [broken, setBroken] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [optionsSubmenuOpen, setOptionsSubmenuOpen] = useState(false);
+  const [submenuOpensLeft, setSubmenuOpensLeft] = useState(false);
   const buttonRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const submenuRef = useRef<HTMLDivElement | null>(null);
+  const optionsRowRef = useRef<HTMLDivElement | null>(null);
   const colorPickActiveRef = useRef(false);
   const centerMain = useMotionValue(0);
   const [menuSide, setMenuSide] = useState<OverlaySide>(overlayPreferredSide);
   const magnifyOriginClass = magnifyOriginClassName(magnifyTransformOrigin);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      setOptionsSubmenuOpen(false);
+      setSubmenuOpensLeft(false);
+    }
+  }, [menuOpen]);
 
   useEffect(() => {
     onContextMenuOpenChange?.(menuOpen);
@@ -229,8 +259,12 @@ export function DockIcon({
 
     void listen<WindowLogicalPoint>("dock-global-mousedown", (event) => {
       if (colorPickActiveRef.current) return;
-      const rect = menuRef.current?.getBoundingClientRect();
-      if (!rect) return;
+      const menuEl = menuRef.current;
+      if (!menuEl) return;
+      const rect = getMenuHitBounds(
+        menuEl,
+        optionsSubmenuOpen ? submenuRef.current : null,
+      );
       const { x, y } = event.payload;
       const insideMenu =
         x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
@@ -244,7 +278,7 @@ export function DockIcon({
       cancelled = true;
       unlisten?.();
     };
-  }, [menuOpen]);
+  }, [menuOpen, optionsSubmenuOpen]);
 
   // Reports the open menu's real footprint to the Rust side so the native
   // click-through hit-test can grow to cover it — see
@@ -274,6 +308,7 @@ export function DockIcon({
     if (!menuOpen) {
       colorPickActiveRef.current = false;
       reportMenuOverlay(false, overlayPreferredSide, 0, 0);
+      onContextMenuBoundsChange?.(null);
       return;
     }
 
@@ -282,8 +317,21 @@ export function DockIcon({
       const menuEl = menuRef.current;
       if (!anchorEl || !menuEl) return;
 
+      const submenuEl =
+        optionsSubmenuOpen && submenuRef.current ? submenuRef.current : null;
+      if (submenuEl && optionsRowRef.current) {
+        const rowRect = optionsRowRef.current.getBoundingClientRect();
+        const submenuWidth = submenuEl.offsetWidth;
+        const gap = 2;
+        const overflowRight =
+          rowRect.right + gap + submenuWidth > window.innerWidth;
+        const overflowLeft = rowRect.left - gap - submenuWidth < 0;
+        setSubmenuOpensLeft(overflowRight && !overflowLeft);
+      }
+
       const anchorRect = anchorEl.getBoundingClientRect();
-      const menuRect = menuEl.getBoundingClientRect();
+      const menuRect = getMenuHitBounds(menuEl, submenuEl);
+      onContextMenuBoundsChange?.(menuRect);
       const resolvedSide = resolveOverlaySide(
         anchorRect,
         { width: menuRect.width, height: menuRect.height },
@@ -299,12 +347,22 @@ export function DockIcon({
     if (!menuEl) return;
     const observer = new ResizeObserver(measure);
     observer.observe(menuEl);
+    const submenuEl = submenuRef.current;
+    if (submenuEl) observer.observe(submenuEl);
     return () => {
       observer.disconnect();
       colorPickActiveRef.current = false;
       reportMenuOverlay(false, overlayPreferredSide, 0, 0);
+      onContextMenuBoundsChange?.(null);
     };
-  }, [menuOpen, app.isActive, app.indicatorColorOverride, overlayPreferredSide]);
+  }, [
+    menuOpen,
+    optionsSubmenuOpen,
+    app.isActive,
+    app.indicatorColorOverride,
+    overlayPreferredSide,
+    onContextMenuBoundsChange,
+  ]);
 
   // Rest-layout center on the magnify main axis — re-measured on layout shifts
   // (DPI, icon count), not on every mousemove frame.
@@ -520,7 +578,7 @@ export function DockIcon({
           innerRef={menuRef}
           side={menuSide}
           gap={TOOLTIP_GAP_PX}
-          className="pointer-events-auto z-30 overflow-hidden whitespace-nowrap rounded-md bg-zinc-900/95 text-xs text-zinc-200 shadow-lg shadow-black/40"
+          className="pointer-events-auto z-30 overflow-visible whitespace-nowrap rounded-md border border-zinc-700/60 bg-zinc-900 text-xs text-zinc-200 shadow-lg shadow-black/40"
         >
           <button
             type="button"
@@ -531,81 +589,102 @@ export function DockIcon({
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
           >
             <FolderOpen className="h-3.5 w-3.5" />
-            Show in Finder
+            Показать в Finder
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setMenuOpen(false);
-              onRemove?.(app.bundleId);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+          <div
+            ref={optionsRowRef}
+            className="relative"
+            onMouseEnter={() => setOptionsSubmenuOpen(true)}
+            onMouseLeave={() => setOptionsSubmenuOpen(false)}
           >
-            <Trash2 className="h-3.5 w-3.5" />
-            Remove from Dock
-          </button>
+            <div className="flex w-full cursor-default items-center justify-between gap-6 px-3 py-1.5 hover:bg-zinc-800">
+              <span>Параметры</span>
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            </div>
 
-          <div className="h-px bg-zinc-700/70" />
+            {optionsSubmenuOpen && (
+              <div
+                ref={submenuRef}
+                className={`absolute top-0 z-40 overflow-hidden whitespace-nowrap rounded-md border border-zinc-700/60 bg-zinc-900 text-xs text-zinc-200 shadow-lg shadow-black/40 ${
+                  submenuOpensLeft ? "right-full mr-0.5" : "left-full ml-0.5"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onRemove?.(app.bundleId);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Убрать из дока
+                </button>
 
-          <button
-            type="button"
-            disabled={separatorsFull}
-            onClick={() => {
-              setMenuOpen(false);
-              onInsertSeparatorBefore?.(app.bundleId);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Minus className="h-3.5 w-3.5" />
-            {separatorBeforeLabel}
-          </button>
+                <div className="h-px bg-zinc-700/70" />
 
-          <button
-            type="button"
-            disabled={separatorsFull}
-            onClick={() => {
-              setMenuOpen(false);
-              onInsertSeparatorAfter?.(app.bundleId);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Minus className="h-3.5 w-3.5" />
-            {separatorAfterLabel}
-          </button>
+                <button
+                  type="button"
+                  disabled={separatorsFull}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onInsertSeparatorBefore?.(app.bundleId);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                  {separatorBeforeLabel}
+                </button>
 
-          <div className="h-px bg-zinc-700/70" />
+                <button
+                  type="button"
+                  disabled={separatorsFull}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onInsertSeparatorAfter?.(app.bundleId);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                  {separatorAfterLabel}
+                </button>
 
-          <div className="flex items-center justify-between gap-3 px-3 py-1.5">
-            <span className="text-zinc-300">Цвет индикатора</span>
-            <input
-              type="color"
-              value={app.indicatorColorOverride ?? app.indicatorColorAuto}
-              onPointerDown={() => {
-                colorPickActiveRef.current = true;
-              }}
-              onBlur={() => {
-                colorPickActiveRef.current = false;
-              }}
-              onChange={(event) => {
-                colorPickActiveRef.current = false;
-                onSetIndicatorColor?.(app.bundleId, event.target.value);
-              }}
-              className="h-7 w-7 cursor-pointer rounded border border-zinc-600 bg-transparent p-0"
-              aria-label={`Цвет индикатора для ${app.name}`}
-            />
+                <div className="h-px bg-zinc-700/70" />
+
+                <div className="flex items-center justify-between gap-3 px-3 py-1.5">
+                  <span className="text-zinc-300">Цвет индикатора</span>
+                  <input
+                    type="color"
+                    value={app.indicatorColorOverride ?? app.indicatorColorAuto}
+                    onPointerDown={() => {
+                      colorPickActiveRef.current = true;
+                    }}
+                    onBlur={() => {
+                      colorPickActiveRef.current = false;
+                    }}
+                    onChange={(event) => {
+                      colorPickActiveRef.current = false;
+                      onSetIndicatorColor?.(app.bundleId, event.target.value);
+                    }}
+                    className="h-7 w-7 cursor-pointer rounded border border-zinc-600 bg-transparent p-0"
+                    aria-label={`Цвет индикатора для ${app.name}`}
+                  />
+                </div>
+                {app.indicatorColorOverride && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSetIndicatorColor?.(app.bundleId, null);
+                    }}
+                    className="flex w-full items-center px-3 py-1.5 text-left text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  >
+                    Сбросить к авто
+                  </button>
+                )}
+              </div>
+            )}
           </div>
-          {app.indicatorColorOverride && (
-            <button
-              type="button"
-              onClick={() => {
-                onSetIndicatorColor?.(app.bundleId, null);
-              }}
-              className="flex w-full items-center px-3 py-1.5 text-left text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-            >
-              Сбросить к авто
-            </button>
-          )}
 
           {app.isActive && (
             <>
@@ -620,7 +699,7 @@ export function DockIcon({
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-800"
               >
                 <Power className="h-3.5 w-3.5" />
-                Quit
+                Завершить
               </button>
             </>
           )}
@@ -678,7 +757,7 @@ export function DockIcon({
       tabIndex={0}
       ref={buttonRef}
       aria-pressed={app.isActive}
-      aria-label={`${app.name}${app.isActive ? " (running)" : ""}`}
+      aria-label={`${app.name}${app.isActive ? " (запущено)" : ""}`}
       onContextMenu={(event) => {
         event.preventDefault();
         setMenuOpen(true);

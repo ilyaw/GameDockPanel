@@ -228,14 +228,14 @@ export const TOOLTIP_HEIGHT_PX = 28;
  * with no visible error (see `CONTEXT_MENU_HEIGHT_PX`).
  */
 export const CONTEXT_MENU_ROW_HEIGHT_PX = 30;
-/** Thin `h-px` divider above Quit (only rendered while the app is running). */
+/** Thin `h-px` divider between menu sections. */
 export const CONTEXT_MENU_DIVIDER_HEIGHT_PX = 1;
 /**
- * Tallest the icon context menu ever gets: Show in Finder + Remove from Dock
- * + divider + indicator color + optional Reset + optional Quit divider/row.
- * Must be accounted for in `pillFarReservePx` — the menu renders
- * `bottom-full` off the same anchor, and the window has no scroll, so
- * anything past its height is simply not drawn.
+ * Tallest the icon context menu ever gets along the axis it opens on.
+ * Main column is short (Finder + Параметры + optional Завершить), but the
+ * «Параметры» submenu can be taller (~6 rows + dividers). Keep this reserve
+ * at or above that submenu height — runtime `set_menu_overlay` measures the
+ * real union bbox (main + open submenu).
  */
 export const CONTEXT_MENU_MAX_ROWS = 7;
 export const CONTEXT_MENU_MAX_DIVIDERS = 4;

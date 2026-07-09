@@ -3,6 +3,7 @@ import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { SlidersHorizontal } from "lucide-react";
 import { useDockSettings } from "../hooks/useDockSettings";
+import { useLaunchAtLogin } from "../hooks/useLaunchAtLogin";
 import {
   BACKGROUND_PRESETS,
   BORDER_STYLE_PRESETS,
@@ -29,17 +30,20 @@ import type { DockSettings } from "../lib/types";
 function ToggleSwitch({
   checked,
   onChange,
+  disabled,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
         checked ? "bg-indigo-500" : "bg-zinc-700"
       }`}
     >
@@ -215,6 +219,12 @@ const colorInputClass =
 
 export function SettingsWindow() {
   const { settings, commit } = useDockSettings();
+  const {
+    enabled: launchAtLoginEnabled,
+    busy: launchAtLoginBusy,
+    error: launchAtLoginError,
+    toggle: toggleLaunchAtLogin,
+  } = useLaunchAtLogin();
   const [sliderIconSizePx, setSliderIconSizePx] = useState(settings.iconSizePx);
   const previewPendingPxRef = useRef<number | null>(null);
   const previewRafRef = useRef(0);
@@ -387,6 +397,27 @@ export function SettingsWindow() {
               onChange={(value) => update({ magnifyNeighborStrength: value })}
               ariaLabel="Увеличение соседних иконок"
             />
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          title="Запуск при входе в систему"
+          descriptionClassName="max-w-sm"
+          description="Добавляет приложение в Login Items — док запустится автоматически при входе в macOS."
+        >
+          <div className="flex flex-col items-end gap-1.5">
+            <ToggleSwitch
+              checked={launchAtLoginEnabled ?? false}
+              disabled={launchAtLoginBusy || launchAtLoginEnabled === null}
+              onChange={(value) => {
+                void toggleLaunchAtLogin(value);
+              }}
+            />
+            {launchAtLoginError && (
+              <p className="max-w-xs text-right text-xs text-red-400">
+                {launchAtLoginError}
+              </p>
+            )}
           </div>
         </SettingsRow>
 

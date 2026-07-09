@@ -15,8 +15,8 @@ alwaysApply: true
 |---|---|
 | Backend | Rust 2021, Tauri v2, `macos-private-api` |
 | Сериализация | serde / serde_json |
-| Плагины (подключены) | `tauri-plugin-opener` |
-| Плагины (разрешены, не подключать заранее) | `dialog`, `global-shortcut`, `autostart` |
+| Плагины (подключены) | `tauri-plugin-opener`, `tauri-plugin-autostart` |
+| Плагины (разрешены, не подключать заранее) | `dialog`, `global-shortcut` |
 | Frontend | React 19, TypeScript ~5.8, Vite 7 (порт 1420) |
 | Стили | Tailwind v4 через `@tailwindcss/vite`, тема только в `src/index.css` |
 | Анимации | Framer Motion |
@@ -54,7 +54,7 @@ GameDockPanel/
 
 - Команды по домену в `commands/`. Без `unwrap()`/`expect()` в handlers — `Result<T, String>` или `thiserror`.
 - Platform-specific код — только в `platform/`, не в `main.rs`.
-- `dialog` / `global-shortcut` / `autostart` — только когда нужна конкретная фича.
+- `dialog` / `global-shortcut` — только когда нужна конкретная фича.
 
 ## Окно и прозрачность
 

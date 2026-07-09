@@ -7,6 +7,7 @@ mod tray;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(commands::apps::AppsState::default())
         .manage(commands::apps::ZoomState::default())
         .manage(commands::settings::SettingsState::default())

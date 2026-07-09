@@ -131,8 +131,8 @@ const PILL_CORNER_RADIUS_DIP: f64 = 28.0;
 const TOOLTIP_GAP_DIP: f64 = 16.0;
 /// Mirrors `TOOLTIP_HEIGHT_PX` in src/lib/constants.ts.
 const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
-/// Mirrors `CONTEXT_MENU_HEIGHT_PX` in src/lib/constants.ts (max rows for
-/// Finder/Remove/color/reset/quit + dividers).
+/// Mirrors `CONTEXT_MENU_HEIGHT_PX` in src/lib/constants.ts — reserve for the
+/// tallest footprint (main column or open «Параметры» submenu + dividers).
 const CONTEXT_MENU_HEIGHT_DIP: f64 = 214.0;
 const CLICK_POLL_MS: u64 = 50;
 /// Rare backup for apps that never post `didTerminate` (e.g. Voice Memos).

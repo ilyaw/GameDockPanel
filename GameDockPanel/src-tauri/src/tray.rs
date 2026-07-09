@@ -20,7 +20,7 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray-icon.png");
 /// keeps left-click free for the primary action instead of popping the
 /// menu, which is Tauri's default).
 pub fn setup(app: &App) -> Result<(), String> {
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
+    let quit_item = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let menu = Menu::with_items(app, &[&quit_item]).map_err(|e| e.to_string())?;
 
