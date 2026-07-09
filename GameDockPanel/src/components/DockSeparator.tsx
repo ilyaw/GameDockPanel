@@ -27,7 +27,6 @@ interface DockSeparatorProps {
   overlayPreferredSide: OverlaySide;
   onRemove?: (separatorId: string) => void;
   isDragging?: boolean;
-  contextMenuActive?: boolean;
   onContextMenuOpenChange?: (open: boolean) => void;
 }
 

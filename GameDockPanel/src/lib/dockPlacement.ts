@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { DOCK_EDGE_INSET_PX } from "./constants";
 
 /** Which viewport axis magnify distance is measured on. */
 export type MagnifyAxis = "x" | "y";
@@ -52,6 +53,44 @@ export function resolveOverlaySide(
   return space[preferred] >= space[opposite] ? preferred : opposite;
 }
 
+/**
+ * Horizontal shift for top/bottom overlays (vertical for left/right) so a
+ * center-anchored tooltip/menu stays inside the webview when the anchor sits
+ * near a screen edge. Pure geometry — no readback from the overlay DOM.
+ */
+export function resolveOverlayCrossAxisOffset(
+  anchorRect: DOMRect,
+  overlaySize: { width: number; height: number },
+  side: OverlaySide,
+  viewport: { width: number; height: number } = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  },
+  padding = DOCK_EDGE_INSET_PX,
+): number {
+  if (overlaySideIsVertical(side)) {
+    const centerX = anchorRect.left + anchorRect.width / 2;
+    const halfW = overlaySize.width / 2;
+    const left = centerX - halfW;
+    const right = centerX + halfW;
+    if (left < padding) return padding - left;
+    if (right > viewport.width - padding) {
+      return viewport.width - padding - right;
+    }
+    return 0;
+  }
+
+  const centerY = anchorRect.top + anchorRect.height / 2;
+  const halfH = overlaySize.height / 2;
+  const top = centerY - halfH;
+  const bottom = centerY + halfH;
+  if (top < padding) return padding - top;
+  if (bottom > viewport.height - padding) {
+    return viewport.height - padding - bottom;
+  }
+  return 0;
+}
+
 export function overlayAnchorClassName(side: OverlaySide, zIndex = "z-20"): string {
   const base = `absolute ${zIndex}`;
   switch (side) {
@@ -69,16 +108,17 @@ export function overlayAnchorClassName(side: OverlaySide, zIndex = "z-20"): stri
 export function overlayAnchorMarginStyle(
   side: OverlaySide,
   gap: number,
+  crossAxisOffset = 0,
 ): CSSProperties {
   switch (side) {
     case "top":
-      return { marginBottom: gap };
+      return { marginBottom: gap, marginLeft: crossAxisOffset };
     case "bottom":
-      return { marginTop: gap };
+      return { marginTop: gap, marginLeft: crossAxisOffset };
     case "left":
-      return { marginRight: gap };
+      return { marginRight: gap, marginTop: crossAxisOffset };
     case "right":
-      return { marginLeft: gap };
+      return { marginLeft: gap, marginTop: crossAxisOffset };
   }
 }
 

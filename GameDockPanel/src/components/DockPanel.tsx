@@ -496,28 +496,13 @@ function HydratedDockPanel({
     };
   }, []);
 
-  const resetMagnifyCursor = useCallback(() => {
-    mouseX.set(Infinity);
-    mouseY.set(Infinity);
-    settingsMouseX.set(Infinity);
-    settingsMouseY.set(Infinity);
-    setHoveredIconId(null);
-    setIsSettingsHovered(false);
-  }, [mouseX, mouseY, settingsMouseX, settingsMouseY]);
-
-  const handleContextMenuOpenChange = useCallback(
-    (open: boolean) => {
-      const next = open
-        ? contextMenuOpenCountRef.current + 1
-        : Math.max(0, contextMenuOpenCountRef.current - 1);
-      contextMenuOpenCountRef.current = next;
-      setContextMenuActive(next > 0);
-      if (open) {
-        resetMagnifyCursor();
-      }
-    },
-    [resetMagnifyCursor],
-  );
+  const handleContextMenuOpenChange = useCallback((open: boolean) => {
+    const next = open
+      ? contextMenuOpenCountRef.current + 1
+      : Math.max(0, contextMenuOpenCountRef.current - 1);
+    contextMenuOpenCountRef.current = next;
+    setContextMenuActive(next > 0);
+  }, []);
 
   const applyCursor = useCallback(
     (x: number, y: number) => {
@@ -1160,7 +1145,6 @@ function HydratedDockPanel({
                 isReorderSettling={isReorderSettling}
                 animationsEnabled={settings.animationsEnabled}
                 isBouncing={bouncingIds.has(item.id)}
-                contextMenuActive={contextMenuActive}
                 onContextMenuOpenChange={handleContextMenuOpenChange}
                 onRemove={removeApp}
                 onShowInFinder={showInFinder}
@@ -1182,7 +1166,6 @@ function HydratedDockPanel({
                 overlayPreferredSide={orientation.overlayPreferredSide}
                 onRemove={removeSeparator}
                 isDragging={isDragging}
-                contextMenuActive={contextMenuActive}
                 onContextMenuOpenChange={handleContextMenuOpenChange}
               />
             )}
@@ -1235,10 +1218,7 @@ function HydratedDockPanel({
             </DockOverlayAnchor>
             <motion.div
               style={{
-                scale:
-                  isDragging || isReorderSettling || contextMenuActive
-                    ? 1
-                    : settingsScale,
+                scale: isDragging || isReorderSettling ? 1 : settingsScale,
               }}
               className={`h-full w-full ${settingsOriginClass}`}
             >

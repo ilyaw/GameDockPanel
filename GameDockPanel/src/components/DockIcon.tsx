@@ -121,8 +121,6 @@ interface DockIconProps {
   isDragging?: boolean;
   /** Brief post-drop window while layout position animation settles. */
   isReorderSettling?: boolean;
-  /** True while any dock context menu is open — magnify is suppressed. */
-  contextMenuActive?: boolean;
   /** Notifies `DockPanel` when this icon's context menu opens or closes. */
   onContextMenuOpenChange?: (open: boolean) => void;
   /** Mirrors `DockSettings.animationsEnabled` — gates only the LED's
@@ -159,7 +157,6 @@ export function DockIcon({
   separatorsFull = false,
   isDragging = false,
   isReorderSettling = false,
-  contextMenuActive = false,
   onContextMenuOpenChange,
   animationsEnabled = true,
   isBouncing = false,
@@ -356,8 +353,7 @@ export function DockIcon({
     },
   );
   const scale = useSpring(scaleRaw, MAGNIFY_SPRING);
-  const magnifySuppressed =
-    isDragging || isReorderSettling || contextMenuActive;
+  const magnifySuppressed = isDragging || isReorderSettling;
 
   useLayoutEffect(() => {
     if (magnifySuppressed) {
