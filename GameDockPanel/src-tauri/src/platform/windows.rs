@@ -18,7 +18,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
             .settings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.window_layer == DockWindowLayer::AboveWindows
+        guard.dock_window_layer == DockWindowLayer::AboveWindows
     };
 
     window
