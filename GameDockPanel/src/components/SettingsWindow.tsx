@@ -347,6 +347,8 @@ export function SettingsWindow() {
   const [indicatorColorsRefreshNote, setIndicatorColorsRefreshNote] = useState<string | null>(
     null,
   );
+  const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const previewPendingPxRef = useRef<number | null>(null);
   const previewRafRef = useRef(0);
   const persistSizeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -415,6 +417,29 @@ export function SettingsWindow() {
       setIndicatorColorsRefreshing(false);
     }
   }, [indicatorColorsRefreshing, settings.ledColorMode]);
+
+  const copyDiagnostics = useCallback(async () => {
+    setDiagnosticsError(null);
+    try {
+      const payload = await invoke<Record<string, unknown>>("get_diagnostics");
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      setDiagnosticsCopied(true);
+      setTimeout(() => setDiagnosticsCopied(false), 2000);
+    } catch (error: unknown) {
+      console.error("Failed to copy diagnostics:", error);
+      setDiagnosticsError("Не удалось собрать диагностику.");
+    }
+  }, []);
+
+  const openLogDir = useCallback(async () => {
+    setDiagnosticsError(null);
+    try {
+      await invoke("open_log_dir");
+    } catch (error: unknown) {
+      console.error("Failed to open log dir:", error);
+      setDiagnosticsError("Не удалось открыть папку логов.");
+    }
+  }, []);
 
   const handleIconSizeSliderChange = useCallback(
     (px: number) => {
@@ -826,7 +851,7 @@ export function SettingsWindow() {
   const systemTab = (
     <SettingsSectionCard
       title="Система"
-      description="Поведение приложения в macOS."
+      description="Поведение приложения и диагностика."
     >
       <SettingsRow
         title="Слой отображения"
@@ -866,6 +891,38 @@ export function SettingsWindow() {
             <p className="max-w-xs text-right text-xs text-red-400">
               {launchAtLoginError}
             </p>
+          )}
+        </div>
+      </SettingsRow>
+
+      <SettingsRow
+        title="Диагностика"
+        descriptionClassName="max-w-sm"
+        description="Скопируйте JSON для отладки или откройте папку с лог-файлами (на Windows — %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs)."
+      >
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              className="settings-window__btn rounded-md px-3 py-1.5 text-xs"
+              onClick={() => {
+                void copyDiagnostics();
+              }}
+            >
+              {diagnosticsCopied ? "Скопировано" : "Скопировать диагностику"}
+            </button>
+            <button
+              type="button"
+              className="settings-window__btn rounded-md px-3 py-1.5 text-xs"
+              onClick={() => {
+                void openLogDir();
+              }}
+            >
+              Открыть папку логов
+            </button>
+          </div>
+          {diagnosticsError && (
+            <p className="max-w-xs text-right text-xs text-red-400">{diagnosticsError}</p>
           )}
         </div>
       </SettingsRow>

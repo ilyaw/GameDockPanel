@@ -5,4 +5,6 @@ commands.allow = [
   "get_dock_settings",
   "update_dock_settings",
   "refresh_indicator_colors",
+  "get_diagnostics",
+  "open_log_dir",
 ]

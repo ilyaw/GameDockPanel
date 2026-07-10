@@ -9,6 +9,8 @@ pub struct IconResolveResult {
     pub accent_color: Option<String>,
 }
 
+mod icon_accent;
+
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -22,14 +24,20 @@ mod windows;
 pub use macos::{
     activate_or_launch_app, apply_dock_window_layer, is_app_installed, is_bundle_running,
     quit_app, refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon,
-    reveal_app_in_finder, resize_dock_window_for_pill, setup_dock_window,
-    start_apps_monitoring, sync_vibrancy_pill_from_web,
+    reveal_app_in_finder, resize_dock_window_for_pill, resize_dock_window_for_app_count,
+    setup_dock_window, start_apps_monitoring, sync_vibrancy_pill_from_web,
     ensure_window_fits_menu_overlay, shrink_dock_window_to_stored_pill,
     zoom_app_above_dock,
 };
 
 #[cfg(target_os = "windows")]
-pub use windows::{apply_dock_window_layer, setup_dock_window, shrink_dock_window_to_stored_pill};
+pub use windows::{
+    activate_or_launch_app, apply_dock_window_layer, ensure_window_fits_menu_overlay,
+    is_app_installed, is_bundle_running, quit_app, refresh_dock_icons,
+    resolve_bundle_id_from_path, resolve_app_icon, reveal_app_in_finder, setup_dock_window,
+    shrink_dock_window_to_stored_pill, start_apps_monitoring, sync_vibrancy_pill_from_web,
+    zoom_app_above_dock,
+};
 
 #[cfg(target_os = "windows")]
 pub use geometry::resize_dock_window_for_pill;
@@ -53,32 +61,32 @@ pub fn setup_dock_window(app: &mut tauri::App) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn start_apps_monitoring(_app: &tauri::App) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn activate_or_launch_app(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
     Err("process monitoring is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn is_app_installed(_bundle_id: &str) -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn is_bundle_running(_bundle_id: &str) -> bool {
     false
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn resolve_bundle_id_from_path(_path: &str) -> Result<String, String> {
     Err("adding apps is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn resolve_app_icon(
     _bundle_id: &str,
     _icon_size_dip: f64,
@@ -87,7 +95,7 @@ pub fn resolve_app_icon(
     IconResolveResult::default()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn refresh_dock_icons(_app: &tauri::AppHandle, _state: &crate::commands::apps::AppsState) {}
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -100,7 +108,7 @@ pub fn resize_dock_window_for_pill(
     Ok(false)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn resize_dock_window_for_app_count(
     _window: &tauri::WebviewWindow,
     _entries: &[crate::commands::apps::DockItem],
@@ -108,7 +116,7 @@ pub fn resize_dock_window_for_app_count(
     Ok(false)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn ensure_window_fits_menu_overlay(
     _window: &tauri::WebviewWindow,
     _overlay: crate::commands::apps::MenuOverlayState,
@@ -121,7 +129,7 @@ pub fn shrink_dock_window_to_stored_pill(_window: &tauri::WebviewWindow) -> Resu
     Ok(false)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn sync_vibrancy_pill_from_web(
     _window: &tauri::WebviewWindow,
     _x: f64,
@@ -132,17 +140,17 @@ pub fn sync_vibrancy_pill_from_web(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn quit_app(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
     Err("process monitoring is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn reveal_app_in_finder(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
     Err("process monitoring is not implemented on this platform yet".to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn zoom_app_above_dock(_app: tauri::AppHandle, _bundle_id: String) -> Result<(), String> {
     Err("dock zoom is not implemented on this platform yet".to_string())
 }

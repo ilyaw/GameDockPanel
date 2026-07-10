@@ -296,6 +296,13 @@ function HydratedDockPanel({
     setIndicatorColor,
   } = dockApps;
   const separatorsFull = countDockSeparators(items) >= MAX_SEPARATORS;
+
+  useEffect(() => {
+    console.info(
+      `[dock] hydrated: apps=${items.filter(isDockAppItem).length} separators=${countDockSeparators(items)} position=${settings.dockPosition} iconSize=${settings.iconSizePx} panelEffect=${settings.panelEffect}`,
+    );
+  }, []);
+
   const orientation = useDockOrientation(settings.dockPosition);
   const iconSizeTarget = useMotionValue(settings.iconSizePx);
   const iconSizeAnimated = useSpring(iconSizeTarget, ICON_SIZE_SPRING);

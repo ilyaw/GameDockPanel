@@ -499,20 +499,48 @@ fn save_entries(app: &AppHandle, entries: &[DockItem]) -> Result<(), String> {
 }
 
 fn seed_entries() -> Vec<DockItem> {
-    SEED_POOL
-        .iter()
-        .filter(|candidate| platform::is_app_installed(candidate.bundle_id))
-        .take(DEFAULT_SEED_LIMIT)
-        .map(|candidate| {
-            DockItem::App(AppEntry {
-                id: candidate.bundle_id.to_string(),
-                name: candidate.name.to_string(),
-                bundle_id: candidate.bundle_id.to_string(),
-                color_override: None,
-                color: None,
+    #[cfg(target_os = "windows")]
+    {
+        return crate::platform::windows::seed::seed_app_candidates()
+            .into_iter()
+            .take(DEFAULT_SEED_LIMIT)
+            .map(|(name, app_id)| {
+                DockItem::App(AppEntry {
+                    id: app_id.clone(),
+                    name,
+                    bundle_id: app_id,
+                    color_override: None,
+                    color: None,
+                })
             })
-        })
-        .collect()
+            .collect();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let installed: Vec<_> = SEED_POOL
+            .iter()
+            .filter(|candidate| platform::is_app_installed(candidate.bundle_id))
+            .collect();
+        log::info!(
+            "seed_entries: {}/{} macOS candidates installed",
+            installed.len(),
+            SEED_POOL.len()
+        );
+        installed
+            .into_iter()
+            .take(DEFAULT_SEED_LIMIT)
+            .map(|candidate| {
+                DockItem::App(AppEntry {
+                    id: candidate.bundle_id.to_string(),
+                    name: candidate.name.to_string(),
+                    bundle_id: candidate.bundle_id.to_string(),
+                    color_override: None,
+                    color: None,
+                })
+            })
+            .collect()
+    }
 }
 
 fn parse_dock_items_json(contents: &str) -> Result<Vec<DockItem>, String> {
@@ -535,20 +563,45 @@ fn parse_dock_items_json(contents: &str) -> Result<Vec<DockItem>, String> {
 
 fn load_or_seed_entries(app: &AppHandle) -> Result<Vec<DockItem>, String> {
     let path = config_file_path(app)?;
+    log::info!("load_or_seed_entries: path={}", path.display());
 
     if let Ok(contents) = std::fs::read_to_string(&path) {
         match parse_dock_items_json(&contents) {
-            Ok(entries) => return Ok(entries),
+            Ok(entries) => {
+                let app_count = entries
+                    .iter()
+                    .filter(|item| matches!(item, DockItem::App(_)))
+                    .count();
+                if app_count == 0 {
+                    #[cfg(target_os = "windows")]
+                    {
+                        let seeded = seed_entries();
+                        if !seeded.is_empty() {
+                            log::info!(
+                                "dock-apps.json was empty — reseeded {} Windows apps",
+                                seeded.len()
+                            );
+                            save_entries(app, &seeded)?;
+                            return Ok(seeded);
+                        }
+                    }
+                }
+                log::info!("loaded {app_count} apps from {}", path.display());
+                return Ok(entries);
+            }
             Err(err) => {
-                eprintln!(
-                    "GameDockPanel: {} is corrupt ({err}), reseeding from candidates",
+                log::warn!(
+                    "{} is corrupt ({err}), reseeding from candidates",
                     path.display()
                 );
             }
         }
+    } else {
+        log::info!("no existing dock-apps.json, seeding first-run candidates");
     }
 
     let seeded = seed_entries();
+    log::info!("seeded {} dock entries", seeded.len());
     save_entries(app, &seeded)?;
     Ok(seeded)
 }

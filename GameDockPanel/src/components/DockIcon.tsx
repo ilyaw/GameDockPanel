@@ -603,7 +603,9 @@ export function DockIcon({
             onRowMouseEnter={closeOptionsSubmenu}
           >
             <FolderOpen className="h-3.5 w-3.5" />
-            Показать в Finder
+            {navigator.platform.toLowerCase().includes("win")
+              ? "Показать в проводнике"
+              : "Показать в Finder"}
           </DockContextMenuRow>
 
           <div ref={optionsRowRef} className="relative">

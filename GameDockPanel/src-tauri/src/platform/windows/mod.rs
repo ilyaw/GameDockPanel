@@ -1,0 +1,19 @@
+//! Windows platform implementation for GameDockPanel.
+
+mod apps;
+mod icons;
+mod input;
+pub mod seed;
+mod window;
+
+pub use seed::is_app_installed;
+pub use apps::{
+    activate_or_launch_app, is_bundle_running, quit_app, refresh_dock_icons,
+    reveal_app_in_finder, resolve_bundle_id_from_path, seed_app_candidates, start_apps_monitoring,
+    zoom_app_above_dock,
+};
+pub use icons::resolve_app_icon;
+pub use window::{
+    apply_dock_window_layer, ensure_window_fits_menu_overlay, setup_dock_window,
+    shrink_dock_window_to_stored_pill, sync_vibrancy_pill_from_web,
+};

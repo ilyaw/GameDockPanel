@@ -32,7 +32,13 @@ function mergeIconUpdates(
 }
 
 function isAppBundlePath(path: string): boolean {
-  return path.endsWith(".app") || path.includes(".app/");
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".app") ||
+    lower.includes(".app/") ||
+    lower.endsWith(".exe") ||
+    lower.endsWith(".lnk")
+  );
 }
 
 export type InsertIndexResolver = (x: number, y: number) => number;

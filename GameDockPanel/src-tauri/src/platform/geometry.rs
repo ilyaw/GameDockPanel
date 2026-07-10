@@ -3,7 +3,7 @@
 
 use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-use crate::commands::apps::{AppsState, DockItem};
+use crate::commands::apps::{AppsState, DockItem, MenuOverlaySide, MenuOverlayState};
 use crate::commands::settings::{DockAxis, DockPosition, SettingsState};
 
 const BASE_ICON_SIZE_DIP: f64 = 56.0;
@@ -13,12 +13,16 @@ const BASE_DOCK_PADDING_Y_DIP: f64 = 12.0;
 const BASE_ICON_LED_GAP_DIP: f64 = 8.0;
 const LED_HEIGHT_DIP: f64 = 3.0;
 const DOCK_SEPARATOR_WIDTH_DIP: f64 = 7.0;
-const MAGNIFY_MAX_SCALE: f64 = 1.4;
+pub const MAGNIFY_MAX_SCALE: f64 = 1.4;
 const WINDOW_GLOW_BLEED_DIP: f64 = 32.0;
-const DOCK_EDGE_INSET_DIP: f64 = 8.0;
+pub const DOCK_EDGE_INSET_DIP: f64 = 8.0;
+pub const PILL_CORNER_RADIUS_DIP: f64 = 28.0;
 const TOOLTIP_GAP_DIP: f64 = 16.0;
 const TOOLTIP_HEIGHT_DIP: f64 = 28.0;
 const CONTEXT_MENU_HEIGHT_DIP: f64 = 214.0;
+pub const MENU_OVERLAY_GAP_DIP: f64 = 16.0;
+pub const BASE_DOCK_PADDING_Y_DIP_PUB: f64 = BASE_DOCK_PADDING_Y_DIP;
+pub const BASE_ICON_SIZE_DIP_PUB: f64 = BASE_ICON_SIZE_DIP;
 
 struct SizeMetrics {
     dock_gap_dip: f64,
@@ -234,4 +238,114 @@ pub fn formula_window_frame(
     let (window_width, window_height) =
         axis_css_dims(position.axis(), window_length, metrics.window_thickness_dip);
     (pill_width, pill_height, window_width, window_height)
+}
+
+pub fn menu_overlay_axis_extents(
+    position: DockPosition,
+    side: MenuOverlaySide,
+    width_dip: f64,
+    height_dip: f64,
+) -> (f64, f64) {
+    if !side.is_active() {
+        return (0.0, 0.0);
+    }
+    match position.axis() {
+        DockAxis::Horizontal => match side {
+            MenuOverlaySide::Top | MenuOverlaySide::Bottom => {
+                (MENU_OVERLAY_GAP_DIP + height_dip, 0.0)
+            }
+            MenuOverlaySide::Left | MenuOverlaySide::Right => (0.0, MENU_OVERLAY_GAP_DIP + width_dip),
+            MenuOverlaySide::None => (0.0, 0.0),
+        },
+        DockAxis::Vertical => match side {
+            MenuOverlaySide::Left | MenuOverlaySide::Right => {
+                (MENU_OVERLAY_GAP_DIP + width_dip, 0.0)
+            }
+            MenuOverlaySide::Top | MenuOverlaySide::Bottom => {
+                (0.0, MENU_OVERLAY_GAP_DIP + height_dip)
+            }
+            MenuOverlaySide::None => (0.0, 0.0),
+        },
+    }
+}
+
+pub fn pill_thickness_hover_dip(pill_thickness_rest_dip: f64, icon_size_dip: f64) -> f64 {
+    let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
+    let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
+    let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
+    pill_thickness_rest_dip + magnify_height_overflow_dip - dock_padding_y_dip
+}
+
+/// Grows the dock window when an open context menu exceeds the current far reserve.
+pub fn ensure_window_fits_menu_overlay(
+    window: &WebviewWindow,
+    overlay: MenuOverlayState,
+) -> Result<(), String> {
+    if !overlay.is_active() {
+        return Ok(());
+    }
+
+    let icon_size_dip = current_icon_size_dip(window);
+    let position = current_dock_position(window);
+    let (pill_length_dip, pill_thickness_dip) = {
+        let state = window.state::<AppsState>();
+        let stored_width = *state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stored_height = *state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (length, thickness) = axis_css_dims(position.axis(), stored_width, stored_height);
+        if thickness > 0.0 {
+            (length, thickness)
+        } else {
+            let metrics = size_metrics(icon_size_dip, position);
+            (length, metrics.pill_thickness_dip)
+        }
+    };
+
+    let (menu_thickness_ext, menu_length_ext) = menu_overlay_axis_extents(
+        position,
+        overlay.side,
+        overlay.width_dip,
+        overlay.height_dip,
+    );
+
+    let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
+    let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
+    let magnify_height_overflow_dip = (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil();
+    let menu_stack_on_thickness = if menu_thickness_ext > 0.0 {
+        menu_thickness_ext
+    } else {
+        MENU_OVERLAY_GAP_DIP + overlay.height_dip
+    };
+    let far_reserve_dip = magnify_height_overflow_dip
+        .max(TOOLTIP_GAP_DIP + TOOLTIP_HEIGHT_DIP)
+        .max(menu_stack_on_thickness)
+        - dock_padding_y_dip;
+    let target_thickness_dip = DOCK_EDGE_INSET_DIP + pill_thickness_dip + far_reserve_dip;
+    let target_length_dip = window_length_dip(pill_length_dip, icon_size_dip) + menu_length_ext;
+
+    let scale_factor = window.scale_factor().map_err(|e| e.to_string())?;
+    let inner = window.inner_size().map_err(|e| e.to_string())?;
+    let current_width_dip = inner.width as f64 / scale_factor;
+    let current_height_dip = inner.height as f64 / scale_factor;
+    let (current_length_dip, current_thickness_dip) =
+        axis_css_dims(position.axis(), current_width_dip, current_height_dip);
+
+    let final_length_dip = current_length_dip.max(target_length_dip);
+    let final_thickness_dip = current_thickness_dip.max(target_thickness_dip);
+
+    if final_length_dip <= current_length_dip + 0.5
+        && final_thickness_dip <= current_thickness_dip + 0.5
+    {
+        return Ok(());
+    }
+
+    let (target_width_dip, target_height_dip) =
+        axis_css_dims(position.axis(), final_length_dip, final_thickness_dip);
+    apply_dock_window_frame(window, target_width_dip, target_height_dip, position)?;
+    Ok(())
 }

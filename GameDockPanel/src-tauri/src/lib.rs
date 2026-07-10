@@ -3,9 +3,30 @@ mod persistence;
 mod platform;
 mod tray;
 
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin({
+            let mut builder = tauri_plugin_log::Builder::new();
+            #[cfg(debug_assertions)]
+            {
+                builder = builder.target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ));
+            }
+            builder
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("gamedockpanel".into()),
+                    },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .build()
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(commands::apps::AppsState::default())
@@ -30,13 +51,24 @@ pub fn run() {
             commands::window::open_settings,
             commands::settings::get_dock_settings,
             commands::settings::update_dock_settings,
+            commands::diagnostics::get_diagnostics,
+            commands::diagnostics::open_log_dir,
             #[cfg(debug_assertions)]
             commands::settings::qa_set_border,
         ])
         .setup(|app| {
-            // Populate AppsState.entries (persisted list, or first-run seed)
-            // before sizing the window — setup_dock_window reads the entry
-            // count to compute its initial width.
+            log::info!(
+                "GameDockPanel starting: os={} version={}",
+                std::env::consts::OS,
+                app.package_info().version
+            );
+            if let Ok(dir) = app.path().app_data_dir() {
+                log::info!("app_data_dir={}", dir.display());
+            }
+            if let Ok(dir) = app.path().app_log_dir() {
+                log::info!("log_dir={}", dir.display());
+            }
+
             commands::apps::init_entries(app.handle())?;
             commands::settings::init_settings(app.handle())?;
             #[cfg(debug_assertions)]
@@ -44,6 +76,7 @@ pub fn run() {
             platform::setup_dock_window(app)?;
             platform::start_apps_monitoring(app)?;
             tray::setup(app)?;
+            log::info!("GameDockPanel setup complete");
             Ok(())
         })
         .run(tauri::generate_context!())

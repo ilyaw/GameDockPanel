@@ -6,7 +6,7 @@
 export interface DockApp {
   id: string;
   name: string;
-  /** macOS bundle identifier — sent back to `launch_or_activate_app` on click. */
+  /** macOS bundle ID or Windows canonical `.exe` path — sent to `launch_or_activate_app`. */
   bundleId: string;
   /**
    * Native icon rendered by Rust as a `data:image/png;base64,...` URL, or
