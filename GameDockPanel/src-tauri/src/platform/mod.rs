@@ -31,6 +31,9 @@ pub use macos::{
 };
 
 #[cfg(target_os = "windows")]
+pub(crate) use windows::seed::seed_app_candidates;
+
+#[cfg(target_os = "windows")]
 pub use windows::{
     activate_or_launch_app, apply_dock_window_layer, ensure_window_fits_menu_overlay,
     is_app_installed, is_bundle_running, quit_app, refresh_dock_icons,

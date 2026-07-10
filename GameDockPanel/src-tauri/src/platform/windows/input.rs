@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, WebviewWindow};
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, SetWindowsHookExW, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
 };
@@ -116,7 +116,12 @@ fn start_dock_click_hook(window: WebviewWindow) {
         };
 
         let hook = unsafe {
-            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), module, 0)
+            SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(mouse_hook_proc),
+                Some(HINSTANCE(module.0)),
+                0,
+            )
         };
 
         match hook {

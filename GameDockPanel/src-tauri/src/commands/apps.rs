@@ -501,7 +501,7 @@ fn save_entries(app: &AppHandle, entries: &[DockItem]) -> Result<(), String> {
 fn seed_entries() -> Vec<DockItem> {
     #[cfg(target_os = "windows")]
     {
-        return crate::platform::windows::seed::seed_app_candidates()
+        return crate::platform::seed_app_candidates()
             .into_iter()
             .take(DEFAULT_SEED_LIMIT)
             .map(|(name, app_id)| {

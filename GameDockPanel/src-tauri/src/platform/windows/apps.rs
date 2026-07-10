@@ -3,12 +3,11 @@
 use std::path::Path;
 
 use tauri::{App, AppHandle, Emitter, Manager};
-use windows::core::PCWSTR;
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::Threading::OpenProcess;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, ShowWindow,
@@ -16,15 +15,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::icons::resolve_app_icon;
-use super::seed::{canonicalize_app_path, is_app_installed};
+use super::seed::canonicalize_app_path;
 use crate::commands::apps::{apply_icon_resolve, emit_apps_list_changed, AppsState, DockItem};
 use crate::commands::settings::SettingsState;
 use crate::platform::geometry::current_icon_size_dip;
 
 const RUNNING_RECONCILE_POLL_MS: u64 = 2000;
 const LAUNCH_WATCH_DELAYS_MS: &[u64] = &[0, 150, 300, 600, 1200, 2400];
-
-pub use super::seed::seed_app_candidates;
 
 pub fn is_bundle_running(app_id: &str) -> bool {
     live_app_running(app_id)
@@ -47,8 +44,11 @@ pub fn resolve_bundle_id_from_path(path: &str) -> Result<String, String> {
 fn resolve_lnk_target(lnk: &Path) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::Interface;
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
-    use windows::Win32::UI::Shell::{IPersistFile, IShellLinkW, ShellLink};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+        STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -62,7 +62,7 @@ fn resolve_lnk_target(lnk: &Path) -> Result<String, String> {
     let wide: Vec<u16> = lnk.as_os_str().encode_wide().chain([0]).collect();
     unsafe {
         persist
-            .Load(PCWSTR(wide.as_ptr()), windows::Win32::System::Com::STGM_READ)
+            .Load(PCWSTR(wide.as_ptr()), STGM_READ)
             .map_err(|e| e.to_string())?;
     }
 
@@ -311,10 +311,10 @@ fn find_main_window_for_app(app_id: &str) -> Option<HWND> {
 unsafe extern "system" fn enum_window_callback(
     hwnd: HWND,
     lparam: LPARAM,
-) -> windows::Win32::Foundation::BOOL {
+) -> BOOL {
     let ctx = &mut *(lparam.0 as *mut FindWindowCtx);
     if ctx.found.is_some() {
-        return windows::Win32::Foundation::BOOL(0);
+        return BOOL(0);
     }
     let mut pid = 0u32;
     unsafe {
@@ -322,9 +322,9 @@ unsafe extern "system" fn enum_window_callback(
     }
     if ctx.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd).as_bool() } {
         ctx.found = Some(hwnd);
-        return windows::Win32::Foundation::BOOL(0);
+        return BOOL(0);
     }
-    windows::Win32::Foundation::BOOL(1)
+    BOOL(1)
 }
 
 fn post_close_to_process_windows(pid: u32) {
@@ -340,7 +340,7 @@ fn post_close_to_process_windows(pid: u32) {
 unsafe extern "system" fn close_windows_callback(
     hwnd: HWND,
     lparam: LPARAM,
-) -> windows::Win32::Foundation::BOOL {
+) -> BOOL {
     let ctx = &*(lparam.0 as *const CloseWindowsCtx);
     let mut pid = 0u32;
     unsafe {
@@ -351,7 +351,7 @@ unsafe extern "system" fn close_windows_callback(
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
-    windows::Win32::Foundation::BOOL(1)
+    BOOL(1)
 }
 
 fn sync_bundle_running_state(app: &AppHandle, app_id: &str) -> bool {

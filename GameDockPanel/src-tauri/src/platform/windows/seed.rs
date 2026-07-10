@@ -137,7 +137,8 @@ fn read_registry_string(
 
     let mut hkey = HKEY::default();
     unsafe {
-        RegOpenKeyExW(root, PCWSTR(subkey_wide.as_ptr()), 0, KEY_READ, &mut hkey)
+        RegOpenKeyExW(root, PCWSTR(subkey_wide.as_ptr()), Some(0), KEY_READ, &mut hkey)
+            .ok()
             .map_err(|_| ())?;
     }
 
@@ -153,6 +154,7 @@ fn read_registry_string(
                 None,
                 Some(&mut buf_len),
             )
+            .ok()
             .map_err(|_| ())?;
         }
         if buf_len < 2 {
@@ -168,6 +170,7 @@ fn read_registry_string(
                 Some(buf.as_mut_ptr() as *mut u8),
                 Some(&mut buf_len),
             )
+            .ok()
             .map_err(|_| ())?;
         }
         let os = OsString::from_wide(&buf[..buf.len().saturating_sub(1)]);

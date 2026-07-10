@@ -10,7 +10,8 @@ use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::UI::Shell::{SHGetFileInfoW, SHGFI_ICON, SHGFI_LARGEICON, SHFILEINFOW};
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, DrawIconEx, GetIconInfo, DI_NORMAL, ICONINFO};
 
 use crate::platform::icon_accent::{accent_color_from_rgba, icon_export_px};
 use crate::platform::IconResolveResult;
@@ -46,7 +47,7 @@ fn icon_to_png_and_accent(path: &Path, export_px: u32) -> Result<IconResolveResu
     unsafe {
         SHGetFileInfoW(
             PCWSTR(path_wide.as_ptr()),
-            Default::default(),
+            FILE_FLAGS_AND_ATTRIBUTES(0),
             Some(&mut shfi),
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_ICON | SHGFI_LARGEICON,
@@ -77,7 +78,7 @@ fn rasterize_icon(hicon: windows::Win32::UI::WindowsAndMessaging::HICON, size: u
     }
 
     let result = (|| {
-        let hdc_mem = unsafe { CreateCompatibleDC(hdc_screen) };
+        let hdc_mem = unsafe { CreateCompatibleDC(Some(hdc_screen)) };
         if hdc_mem.is_invalid() {
             return Err("CreateCompatibleDC failed".to_string());
         }
@@ -98,7 +99,7 @@ fn rasterize_icon(hicon: windows::Win32::UI::WindowsAndMessaging::HICON, size: u
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         let hbmp = unsafe {
             windows::Win32::Graphics::Gdi::CreateDIBSection(
-                hdc_mem,
+                Some(hdc_mem),
                 &bmi,
                 DIB_RGB_COLORS,
                 &mut bits,
@@ -110,7 +111,7 @@ fn rasterize_icon(hicon: windows::Win32::UI::WindowsAndMessaging::HICON, size: u
 
         let old = unsafe { SelectObject(hdc_mem, HGDIOBJ(hbmp.0)) };
         unsafe {
-            windows::Win32::Graphics::Gdi::DrawIconEx(
+            DrawIconEx(
                 hdc_mem,
                 0,
                 0,
@@ -119,7 +120,7 @@ fn rasterize_icon(hicon: windows::Win32::UI::WindowsAndMessaging::HICON, size: u
                 size as i32,
                 0,
                 None,
-                windows::Win32::UI::WindowsAndMessaging::DI_NORMAL,
+                DI_NORMAL,
             )
             .map_err(|e| e.to_string())?;
         }
