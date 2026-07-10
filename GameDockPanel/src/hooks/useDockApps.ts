@@ -65,6 +65,11 @@ const LAUNCH_BOUNCE_TIMEOUT_MS = 9000;
  */
 export function useDockApps() {
   const [items, setItems] = useState<DockItem[]>([]);
+  /** True after the first `get_apps_snapshot` pull — keeps the dock from
+   * measuring/resizing against an empty roster while settings have already
+   * hydrated (Windows cold start would otherwise shrink the native window to
+   * a tiny pill and keep it there until a settings nudge). */
+  const [appsHydrated, setAppsHydrated] = useState(false);
   const [fileDragOver, setFileDragOver] = useState(false);
   const [fileDragInsertIndex, setFileDragInsertIndex] = useState<number | null>(
     null,
@@ -177,9 +182,14 @@ export function useDockApps() {
     const unlisteners: Array<() => void> = [];
 
     void (async () => {
-      const snapshot = await invoke<DockItem[]>("get_apps_snapshot");
-      if (cancelled) return;
-      setItems(snapshot);
+      try {
+        const snapshot = await invoke<DockItem[]>("get_apps_snapshot");
+        if (!cancelled) setItems(snapshot);
+      } catch (error: unknown) {
+        console.error("get_apps_snapshot failed:", error);
+      } finally {
+        if (!cancelled) setAppsHydrated(true);
+      }
 
       unlisteners.push(
         await listen<AppRunningUpdate[]>("apps-running-changed", (event) => {
@@ -433,6 +443,7 @@ export function useDockApps() {
 
   return {
     items,
+    appsHydrated,
     itemsRef,
     activateApp,
     zoomApp,

@@ -264,8 +264,8 @@ export function DockPanel() {
   // Apps stay in the outer, never-unmounted component so their snapshot
   // pull runs in parallel with the settings pull instead of behind it.
   const dockApps = useDockApps();
-  const { settings, hydrated } = useDockSettings();
-  if (!hydrated) return null;
+  const { settings, hydrated: settingsHydrated } = useDockSettings();
+  if (!settingsHydrated || !dockApps.appsHydrated) return null;
   return <HydratedDockPanel settings={settings} dockApps={dockApps} />;
 }
 
@@ -855,7 +855,21 @@ function HydratedDockPanel({
       }
       observer.disconnect();
     };
-  }, [items, iconSizeAnimated]);
+  }, [items, iconSizeAnimated, orientation.position]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    void listen<DockSettings>("dock-settings-changed", () => {
+      scheduleGeometrySyncRef.current?.();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

@@ -98,6 +98,9 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("settings")
         .ok_or_else(|| "settings window not found".to_string())?;
+    // The dock window is always-on-top by default — without this the settings
+    // webview can open behind it (looks like a broken tray click / "cached" UI).
+    window.set_always_on_top(true).map_err(|e| e.to_string())?;
     window.center().map_err(|e| e.to_string())?;
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;

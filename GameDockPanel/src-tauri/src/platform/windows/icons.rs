@@ -36,22 +36,35 @@ pub fn resolve_app_icon(
     }
 }
 
+fn shell_path_wide(path: &Path) -> Vec<u16> {
+    let lossy = path.to_string_lossy();
+    let normalized = lossy
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .unwrap_or_else(|| {
+            lossy
+                .strip_prefix(r"\\?\")
+                .map(|rest| rest.to_string())
+                .unwrap_or_else(|| lossy.into_owned())
+        });
+    normalized.encode_utf16().chain([0]).collect()
+}
+
 fn icon_to_png_and_accent(path: &Path, export_px: u32) -> Result<IconResolveResult, String> {
-    let path_wide: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain([0])
-        .collect();
+    let path_wide = shell_path_wide(path);
 
     let mut shfi = SHFILEINFOW::default();
-    unsafe {
+    let result = unsafe {
         SHGetFileInfoW(
             PCWSTR(path_wide.as_ptr()),
             FILE_FLAGS_AND_ATTRIBUTES(0),
             Some(&mut shfi),
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_ICON | SHGFI_LARGEICON,
-        );
+        )
+    };
+    if result == 0 {
+        return Err("SHGetFileInfoW returned no icon".to_string());
     }
 
     let hicon = shfi.hIcon;

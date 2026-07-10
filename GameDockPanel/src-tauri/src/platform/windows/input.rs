@@ -69,6 +69,16 @@ fn start_click_through_poller(window: WebviewWindow) {
             let pill_cursor =
                 pill_cursor_at_screen(&window, cursor_x, cursor_y, dock_hovered);
             let in_pill = pill_cursor.is_some();
+            let in_window = cursor_in_window_bounds(&window, cursor_x, cursor_y);
+            // Explorer drag-drop needs the WebView to receive OLE events — while
+            // `set_ignore_cursor_events(true)` is on, drops never reach
+            // `onDragDropEvent`. Briefly accept hits over the whole window while
+            // the left button is held (typical external file drag).
+            let lbutton_down = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
+            };
+            let drag_over_window = lbutton_down && in_window;
 
             if in_pill != dock_hovered {
                 dock_hovered = in_pill;
@@ -85,7 +95,7 @@ fn start_click_through_poller(window: WebviewWindow) {
                 }
             }
 
-            let should_ignore = !in_pill;
+            let should_ignore = !in_pill && !drag_over_window;
             if should_ignore != ignoring {
                 if window.set_ignore_cursor_events(should_ignore).is_ok() {
                     ignoring = should_ignore;
@@ -238,6 +248,20 @@ fn cursor_to_window_logical(
         x: (screen_x - outer_pos.x) as f64 / scale,
         y: (screen_y - outer_pos.y) as f64 / scale,
     })
+}
+
+fn cursor_in_window_bounds(window: &WebviewWindow, screen_x: i32, screen_y: i32) -> bool {
+    let Ok(outer_pos) = window.outer_position() else {
+        return false;
+    };
+    let Ok(outer_size) = window.outer_size() else {
+        return false;
+    };
+    let left = outer_pos.x;
+    let top = outer_pos.y;
+    let right = left + outer_size.width as i32;
+    let bottom = top + outer_size.height as i32;
+    screen_x >= left && screen_x <= right && screen_y >= top && screen_y <= bottom
 }
 
 fn pill_cursor_at_screen(
