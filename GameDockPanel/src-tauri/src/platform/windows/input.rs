@@ -1,14 +1,26 @@
-//! Windows dock input — click-through poller and low-level mouse hook.
+//! Windows dock input — click-through poller only.
+//!
+//! ## Why there is no `WH_MOUSE_LL` hook
+//!
+//! An earlier skeleton installed a global low-level mouse hook to mirror
+//! macOS `CGEventTap` (`dock-click` / `dock-global-mousedown`). That pattern
+//! does not apply on Windows: WebView2 does not swallow `mouseDown` the way
+//! `NSVisualEffectView` can, and the hook thread had no Win32 message loop
+//! (`GetMessage`), so the callback was unreliable anyway.
+//!
+//! Pill clicks are handled by the WebView when the click-through poller sets
+//! `set_ignore_cursor_events(false)` over the rounded pill hit-test; see
+//! `DockPanel.tsx` native pointer handlers on Windows. Global outside-window
+//! menu dismiss (macOS tap) is not replicated here — in-window dismiss still
+//! works via DOM listeners on `DockIcon`.
+//!
+//! Deliberately no global hook: `WH_MOUSE_LL` is flagged by game anti-cheats
+//! (Vanguard/EAC/BattlEye), which matters for this product's audience.
 
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, WebviewWindow};
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetCursorPos, SetWindowsHookExW, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP,
-};
 
 use crate::commands::apps::AppsState;
 use crate::commands::settings::DockPosition;
@@ -18,10 +30,6 @@ use crate::platform::geometry::{
 };
 
 const CLICK_POLL_MS: u64 = 50;
-const CLICK_MOVE_TOLERANCE_SQ: i32 = 12 * 12;
-const DOUBLE_CLICK_INTERVAL_MS: u64 = 400;
-
-static HOOK_STATE: OnceLock<Arc<HookState>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 struct DockCursorPayload {
@@ -29,26 +37,8 @@ struct DockCursorPayload {
     y: f64,
 }
 
-struct PendingDown {
-    x: i32,
-    y: i32,
-}
-
-struct LastTap {
-    at: Instant,
-    screen_x: i32,
-    screen_y: i32,
-}
-
-struct HookState {
-    window: WebviewWindow,
-    pending_down: std::sync::Mutex<Option<PendingDown>>,
-    last_tap: std::sync::Mutex<Option<LastTap>>,
-}
-
 pub fn start_dock_input(window: WebviewWindow) {
-    start_click_through_poller(window.clone());
-    start_dock_click_hook(window);
+    start_click_through_poller(window);
 }
 
 fn start_click_through_poller(window: WebviewWindow) {
@@ -103,151 +93,6 @@ fn start_click_through_poller(window: WebviewWindow) {
             }
         }
     });
-}
-
-fn start_dock_click_hook(window: WebviewWindow) {
-    let state = Arc::new(HookState {
-        window,
-        pending_down: std::sync::Mutex::new(None),
-        last_tap: std::sync::Mutex::new(None),
-    });
-    let _ = HOOK_STATE.set(Arc::clone(&state));
-
-    std::thread::spawn(move || {
-        let module = unsafe {
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-        };
-        let module = match module {
-            Ok(m) => m,
-            Err(err) => {
-                log::error!("GetModuleHandleW failed for mouse hook: {err}");
-                return;
-            }
-        };
-
-        let hook = unsafe {
-            SetWindowsHookExW(
-                WH_MOUSE_LL,
-                Some(mouse_hook_proc),
-                Some(HINSTANCE(module.0)),
-                0,
-            )
-        };
-
-        match hook {
-            Ok(h) if !h.is_invalid() => {
-                log::info!("dock-click WH_MOUSE_LL hook installed");
-                loop {
-                    std::thread::sleep(Duration::from_secs(3600));
-                }
-            }
-            _ => {
-                log::error!("failed to install WH_MOUSE_LL hook for dock-click");
-            }
-        }
-    });
-}
-
-unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code < 0 {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    let Some(state) = HOOK_STATE.get() else {
-        return CallNextHookEx(None, code, wparam, lparam);
-    };
-
-    let msg = wparam.0 as u32;
-
-    match msg {
-        WM_LBUTTONDOWN => {
-            if let Ok((x, y)) = screen_cursor() {
-                if let Ok(mut guard) = state.pending_down.lock() {
-                    *guard = Some(PendingDown { x, y });
-                }
-                if let Some(payload) = cursor_to_window_logical(&state.window, x, y) {
-                    let _ = state.window.emit("dock-global-mousedown", payload);
-                }
-            }
-        }
-        WM_LBUTTONUP => {
-            let is_tap = match (screen_cursor(), state.pending_down.lock()) {
-                (Ok((up_x, up_y)), Ok(mut guard)) => {
-                    let Some(down) = guard.take() else {
-                        return CallNextHookEx(None, code, wparam, lparam);
-                    };
-                    let dx = up_x - down.x;
-                    let dy = up_y - down.y;
-                    dx * dx + dy * dy <= CLICK_MOVE_TOLERANCE_SQ
-                }
-                _ => false,
-            };
-
-            if is_tap {
-                if let Ok((cursor_x, cursor_y)) = screen_cursor() {
-                    if let Some(payload) =
-                        pill_cursor_at_screen(&state.window, cursor_x, cursor_y, true)
-                    {
-                        let scale = state.window.scale_factor().unwrap_or(1.0);
-                        let icon_tol = (current_icon_size_dip(&state.window) * scale * 1.5)
-                            .round()
-                            .max(24.0) as i32;
-                        let is_double = match state.last_tap.lock() {
-                            Ok(mut guard) => {
-                                let now = Instant::now();
-                                let double = guard.as_ref().is_some_and(|prev| {
-                                    now.duration_since(prev.at)
-                                        < Duration::from_millis(DOUBLE_CLICK_INTERVAL_MS)
-                                        && (prev.screen_x - cursor_x).abs() <= icon_tol
-                                        && (prev.screen_y - cursor_y).abs() <= icon_tol
-                                });
-                                if double {
-                                    *guard = None;
-                                } else {
-                                    *guard = Some(LastTap {
-                                        at: now,
-                                        screen_x: cursor_x,
-                                        screen_y: cursor_y,
-                                    });
-                                }
-                                double
-                            }
-                            Err(_) => false,
-                        };
-                        let _ = state.window.emit("dock-click", payload);
-                        if is_double {
-                            let _ = state.window.emit("dock-double-click", payload);
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    CallNextHookEx(None, code, wparam, lparam)
-}
-
-fn screen_cursor() -> Result<(i32, i32), ()> {
-    use windows::Win32::Foundation::POINT;
-    let mut pt = POINT::default();
-    unsafe {
-        GetCursorPos(&mut pt).map_err(|_| ())?;
-    }
-    Ok((pt.x, pt.y))
-}
-
-fn cursor_to_window_logical(
-    window: &WebviewWindow,
-    screen_x: i32,
-    screen_y: i32,
-) -> Option<DockCursorPayload> {
-    let scale = window.scale_factor().ok()?;
-    let outer_pos = window.outer_position().ok()?;
-    Some(DockCursorPayload {
-        x: (screen_x - outer_pos.x) as f64 / scale,
-        y: (screen_y - outer_pos.y) as f64 / scale,
-    })
 }
 
 fn cursor_in_window_bounds(window: &WebviewWindow, screen_x: i32, screen_y: i32) -> bool {

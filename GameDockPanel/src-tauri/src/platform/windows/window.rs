@@ -1,17 +1,51 @@
-//! Windows dock window setup, geometry, and menu-overlay sizing.
+//! Windows dock window setup, geometry, DWM corners, and Mica backdrop.
+
+use std::mem::size_of;
 
 use tauri::{App, Manager, WebviewWindow};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWM_WINDOW_CORNER_PREFERENCE,
+};
 
-use crate::commands::apps::AppsState;
+use crate::commands::apps::{AppsState, MenuOverlayState};
 use crate::commands::settings::DockWindowLayer;
 use crate::platform::geometry::{
-    apply_dock_window_frame, current_dock_position, current_icon_size_dip, formula_window_frame,
-    resize_dock_window_for_pill, store_pill_dims,
+    apply_dock_window_frame, current_dock_position, current_icon_size_dip,
+    formula_window_frame_rest, resize_dock_window_for_pill, store_pill_dims,
 };
 
 use super::input::start_dock_input;
 
-pub use crate::platform::geometry::ensure_window_fits_menu_overlay;
+/// Re-applies DWM rounding + Mica after any native resize (menu overlay
+/// grow/shrink, settings-driven geometry sync). Mica covers the full HWND —
+/// resting frame is pill-centric; magnify margin may show glass during hover.
+pub fn refresh_windows_backdrop(window: &WebviewWindow) -> Result<(), String> {
+    apply_dwm_rounded_corners(window)?;
+    apply_dock_mica(window)
+}
+
+fn apply_dwm_rounded_corners(window: &WebviewWindow) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let preference = DWMWCP_ROUND;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const DWM_WINDOW_CORNER_PREFERENCE as *const _,
+            size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn apply_dock_mica(window: &WebviewWindow) -> Result<(), String> {
+    use window_vibrancy::apply_mica;
+
+    // Always-dark, like macOS HudWindow — not system semantic Mica.
+    apply_mica(window, Some(true)).map_err(|e| e.to_string())
+}
 
 pub fn apply_dock_window_layer(
     window: &WebviewWindow,
@@ -38,7 +72,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         .count();
 
     let (pill_width, pill_height, window_width, window_height) =
-        formula_window_frame(&entries, icon_size_dip, position);
+        formula_window_frame_rest(&entries, icon_size_dip, position);
 
     log::info!(
         "windows setup_dock_window: position={position:?} icon_size={icon_size_dip} \
@@ -57,6 +91,8 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     };
     apply_dock_window_layer(&window, layer)?;
 
+    refresh_windows_backdrop(&window)?;
+
     window
         .set_ignore_cursor_events(true)
         .map_err(|e| e.to_string())?;
@@ -68,6 +104,14 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     window.show().map_err(|e| e.to_string())?;
     log::info!("windows setup_dock_window: window shown");
     Ok(())
+}
+
+pub fn ensure_window_fits_menu_overlay(
+    window: &WebviewWindow,
+    overlay: MenuOverlayState,
+) -> Result<(), String> {
+    crate::platform::geometry::ensure_window_fits_menu_overlay(window, overlay)?;
+    refresh_windows_backdrop(window)
 }
 
 pub fn shrink_dock_window_to_stored_pill(window: &WebviewWindow) -> Result<bool, String> {
@@ -84,7 +128,11 @@ pub fn shrink_dock_window_to_stored_pill(window: &WebviewWindow) -> Result<bool,
         return Ok(false);
     }
     let icon_size_dip = current_icon_size_dip(window);
-    resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)
+    let changed = resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)?;
+    if changed {
+        refresh_windows_backdrop(window)?;
+    }
+    Ok(changed)
 }
 
 pub fn sync_vibrancy_pill_from_web(
@@ -94,9 +142,19 @@ pub fn sync_vibrancy_pill_from_web(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
+    let _ = (x, y);
     store_pill_dims(window, width, height);
+
+    let icon_size_dip = current_icon_size_dip(window);
+    let changed = resize_dock_window_for_pill(window, width, height, icon_size_dip)?;
+    if changed {
+        refresh_windows_backdrop(window)?;
+    } else {
+        apply_dock_mica(window)?;
+    }
+
     log::debug!(
-        "sync_vibrancy_pill (windows no-op blur): x={x:.0} y={y:.0} w={width:.0} h={height:.0}"
+        "sync_vibrancy_pill (windows mica): w={width:.0} h={height:.0} resized={changed}"
     );
     Ok(())
 }

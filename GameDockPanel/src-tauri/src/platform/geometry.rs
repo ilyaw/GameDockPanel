@@ -53,6 +53,20 @@ fn window_thickness_dip(pill_thickness_dip: f64, icon_size_dip: f64) -> f64 {
     DOCK_EDGE_INSET_DIP + pill_thickness_dip + pill_far_reserve_dip(icon_size_dip)
 }
 
+fn magnify_height_overflow_dip(icon_size_dip: f64) -> f64 {
+    (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil()
+}
+
+/// Windows resting window thickness: pill + magnify overflow only — no
+/// tooltip/menu stack baked in (those grow via `ensure_window_fits_menu_overlay`).
+/// Avoids the asymmetric `pill_far_reserve_dip` halo that would skew Mica.
+pub fn window_thickness_rest_dip(pill_thickness_dip: f64, icon_size_dip: f64) -> f64 {
+    let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
+    let dock_padding_y_dip = (BASE_DOCK_PADDING_Y_DIP * scale).round();
+    DOCK_EDGE_INSET_DIP + pill_thickness_dip + magnify_height_overflow_dip(icon_size_dip)
+        - dock_padding_y_dip
+}
+
 fn size_metrics(icon_size_dip: f64, position: DockPosition) -> SizeMetrics {
     let scale = icon_size_dip / BASE_ICON_SIZE_DIP;
     let dock_gap_dip = (BASE_DOCK_GAP_DIP * scale).round();
@@ -217,6 +231,9 @@ pub fn resize_dock_window_for_pill(
     let position = current_dock_position(window);
     let (pill_length, pill_thickness) = axis_css_dims(position.axis(), pill_width, pill_height);
     let window_length = window_length_dip(pill_length, icon_size_dip);
+    #[cfg(windows)]
+    let window_thickness = window_thickness_rest_dip(pill_thickness, icon_size_dip);
+    #[cfg(not(windows))]
     let window_thickness = window_thickness_dip(pill_thickness, icon_size_dip);
     let (target_width, target_height) =
         axis_css_dims(position.axis(), window_length, window_thickness);
@@ -237,6 +254,24 @@ pub fn formula_window_frame(
     let window_length = window_length_dip(pill_length, icon_size_dip);
     let (window_width, window_height) =
         axis_css_dims(position.axis(), window_length, metrics.window_thickness_dip);
+    (pill_width, pill_height, window_width, window_height)
+}
+
+/// Windows hybrid resting frame — pill-centric thickness without tooltip/menu
+/// reserve; magnify overflow is static (no hover window resize).
+pub fn formula_window_frame_rest(
+    entries: &[DockItem],
+    icon_size_dip: f64,
+    position: DockPosition,
+) -> (f64, f64, f64, f64) {
+    let pill_length = pill_length_dip(entries, icon_size_dip, position);
+    let metrics = size_metrics(icon_size_dip, position);
+    let (pill_width, pill_height) =
+        axis_css_dims(position.axis(), pill_length, metrics.pill_thickness_dip);
+    let window_length = window_length_dip(pill_length, icon_size_dip);
+    let rest_thickness = window_thickness_rest_dip(metrics.pill_thickness_dip, icon_size_dip);
+    let (window_width, window_height) =
+        axis_css_dims(position.axis(), window_length, rest_thickness);
     (pill_width, pill_height, window_width, window_height)
 }
 

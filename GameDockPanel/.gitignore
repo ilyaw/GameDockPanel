@@ -26,3 +26,5 @@ dist-ssr
 # Local AI session notes and one-off prompts (not shipped with the app)
 CLAUDE.md
 PROMPT_*.md
+WINDOWS_CODE_EXPORT*.md
+*_CODE_EXPORT_FOR_CLAUDE.md

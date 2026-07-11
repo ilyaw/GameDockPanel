@@ -21,6 +21,7 @@ body,
 
 .dock-root {
   height: 100%;
+  /* Required for WebView2 + Win11 Mica: transparent compositor layer under the pill. */
   background: transparent !important;
 }
 

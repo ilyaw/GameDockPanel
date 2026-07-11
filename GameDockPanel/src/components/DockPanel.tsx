@@ -28,6 +28,11 @@ import {
 import type { DockItem, DockSettings } from "../lib/types";
 import { countDockSeparators, isDockAppItem } from "../lib/types";
 
+/** Windows: icon activation goes through WebView2 pointer events (no global hook). */
+const IS_WINDOWS =
+  typeof navigator !== "undefined" &&
+  navigator.platform.toLowerCase().includes("win");
+
 /**
  * React only types `style` as known CSS properties — custom properties
  * (`--dock-glow-N`) are still valid inline style keys at runtime, just not
@@ -530,6 +535,33 @@ function HydratedDockPanel({
     return menuRect !== null && pointInDOMRect(x, y, menuRect);
   }, []);
 
+  const handleWindowsDockClick = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!IS_WINDOWS) return;
+      if (isDraggingRef.current || isReorderSettlingRef.current) return;
+      if (shouldSuppressDockClickAt(clientX, clientY)) return;
+      const id = hitTestIcon(iconRefs.current, clientX, clientY);
+      if (id) activateApp(id);
+    },
+    [activateApp, shouldSuppressDockClickAt],
+  );
+
+  const handleWindowsDockDoubleClick = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!IS_WINDOWS) return;
+      if (isDraggingRef.current || isReorderSettlingRef.current) return;
+      if (shouldSuppressDockClickAt(clientX, clientY)) return;
+      const id = hitTestIcon(iconRefs.current, clientX, clientY);
+      if (!id) return;
+      const app = itemsRef.current.find(
+        (candidate): candidate is Extract<DockItem, { type: "app" }> =>
+          isDockAppItem(candidate) && candidate.id === id,
+      );
+      if (app?.isActive) zoomApp(app.bundleId);
+    },
+    [shouldSuppressDockClickAt, zoomApp, itemsRef],
+  );
+
   const applyCursor = useCallback(
     (x: number, y: number) => {
       if (contextMenuOpenCountRef.current > 0) return;
@@ -970,6 +1002,22 @@ function HydratedDockPanel({
         data-dock-pill
         onContextMenu={handlePillContextMenu}
         onMouseEnter={enterDock}
+        onMouseDown={(event) => {
+          if (!IS_WINDOWS || contextMenuOpenCountRef.current === 0) return;
+          const rect = contextMenuHitRectRef.current;
+          if (rect && pointInDOMRect(event.clientX, event.clientY, rect)) {
+            suppressDockClickRef.current = true;
+          }
+        }}
+        onClick={(event) => {
+          if (!IS_WINDOWS || event.detail > 1) return;
+          handleWindowsDockClick(event.clientX, event.clientY);
+        }}
+        onDoubleClick={(event) => {
+          if (!IS_WINDOWS) return;
+          event.preventDefault();
+          handleWindowsDockDoubleClick(event.clientX, event.clientY);
+        }}
         onMouseMove={(event) => {
           if (contextMenuOpenCountRef.current > 0) return;
           lastNativeMoveAt.current = performance.now();
