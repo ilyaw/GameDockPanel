@@ -348,6 +348,14 @@ pub fn resize_dock_window_for_pill(
     sync_icon_size_preview(window, icon_size_dip);
 
     let position = current_dock_position(window);
+    if !pill_size_is_plausible(pill_width, pill_height, icon_size_dip, position) {
+        log::warn!(
+            "[dock] reject implausible pill {pill_width:.1}x{pill_height:.1} \
+             (icon={icon_size_dip:.0} pos={position:?}) — keep previous frame"
+        );
+        return Ok(false);
+    }
+
     let (pill_length, pill_thickness) = axis_css_dims(position.axis(), pill_width, pill_height);
 
     let mut window_length = window_length_rest_dip(pill_length, icon_size_dip);
@@ -382,6 +390,26 @@ pub fn resize_dock_window_for_pill(
     let changed = apply_dock_window_frame(window, target_width, target_height, position)?;
     store_pill_dims(window, pill_width, pill_height);
     Ok(changed)
+}
+
+/// Guard against transient DOM measures that collapse the dock (e.g. ~40×91
+/// after a broken Win32 style rewrite). Length must fit ≥ ~1 icon slot.
+pub fn pill_size_is_plausible(
+    width: f64,
+    height: f64,
+    icon_size_dip: f64,
+    position: DockPosition,
+) -> bool {
+    let min_thickness = (icon_size_dip * 0.75).max(40.0);
+    let min_length = (icon_size_dip * 1.25).max(56.0);
+    match position {
+        DockPosition::Top | DockPosition::Bottom => {
+            height >= min_thickness * 0.85 && width >= min_length
+        }
+        DockPosition::Left | DockPosition::Right => {
+            width >= min_thickness * 0.85 && height >= min_length
+        }
+    }
 }
 
 pub fn formula_window_frame(

@@ -22,11 +22,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, GWL_STYLE};
 
 use crate::commands::apps::{AppsState, MenuOverlayState};
 use crate::commands::settings::{DockPosition, DockWindowLayer};
@@ -311,8 +307,10 @@ fn clear_dock_window_title(window: &WebviewWindow) {
     }
 }
 
-/// Full frameless pass — call once before Mica/show. Do not re-run after Mica:
-/// `set_decorations` / `SetWindowLong`+`FRAMECHANGED` can fight the backdrop.
+/// Frameless + transparent via Tauri APIs only. Do **not** manually strip
+/// `GWL_STYLE` caption bits — leaving only `WS_CLIPSIBLINGS` (seen in the
+/// field as `0x04000000`) collapses the client/webview and the next DOM
+/// measure reports a ~40×91 "capsule" with a ghost close button.
 fn ensure_frameless_dock_chrome(window: &WebviewWindow) -> Result<(), String> {
     if let Err(err) = window.set_decorations(false) {
         log::warn!("[win-backdrop] set_decorations(false) failed: {err}");
@@ -323,35 +321,14 @@ fn ensure_frameless_dock_chrome(window: &WebviewWindow) -> Result<(), String> {
     clear_dock_window_title(window);
     assert_transparent_webview_bg(window, true);
 
-    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-        let caption_bits =
-            WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
-        log::info!("[win-backdrop] GWL_STYLE=0x{style:08x}");
-        let cleaned = style & !caption_bits;
-        if cleaned != style {
-            SetWindowLongPtrW(hwnd, GWL_STYLE, cleaned as isize);
-            if let Err(err) = SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            ) {
-                log::warn!("[win-backdrop] SetWindowPos(FRAMECHANGED) failed: {err}");
-            }
-            log::info!("[win-backdrop] stripped caption bits → GWL_STYLE=0x{cleaned:08x}");
-        }
+    if let Ok(hwnd) = window.hwnd() {
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+        log::info!("[win-backdrop] GWL_STYLE=0x{style:08x} (read-only; no SetWindowLong)");
     }
 
     match tauri::webview_version() {
         Ok(v) => {
             log::info!("[win-backdrop] webview2_version={v}");
-            // WebView2 144.x painted a ghost titlebar on transparent frameless
-            // windows; fixed in ~146+. Log a hint when the runtime looks old.
             if let Some(major) = v
                 .split('.')
                 .next()
@@ -729,10 +706,20 @@ pub fn sync_vibrancy_pill_from_web(
     height: f64,
 ) -> Result<(), String> {
     let call_n = SYNC_VIBRANCY_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let icon_size_dip = current_icon_size_dip(window);
+    let position = current_dock_position(window);
+    if !crate::platform::geometry::pill_size_is_plausible(width, height, icon_size_dip, position)
+    {
+        log::warn!(
+            "[win-backdrop] sync_vibrancy skipped implausible pill \
+             dip=({x:.1},{y:.1} {width:.1}x{height:.1}) icon={icon_size_dip} pos={position:?}"
+        );
+        return Ok(());
+    }
+
     store_pill_dims(window, width, height);
     store_pill_client_rect(x, y, width, height);
 
-    let icon_size_dip = current_icon_size_dip(window);
     let changed = resize_dock_window_for_pill(window, width, height, icon_size_dip)?;
     if changed {
         // Resize can shift the pill inside the client area — re-measure is
