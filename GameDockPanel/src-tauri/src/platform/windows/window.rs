@@ -582,6 +582,54 @@ fn reassert_dock_chrome_after_show(
     log_chrome_state("after show", window);
 }
 
+/// Tao/`set_size` often restores caption bits (`0x14CB0000`) after hover or
+/// geometry resize — without Mica that paints a white ghost titlebar over the
+/// Top/Bottom dock. Rewrite to `WS_POPUP`, pin outer size, then rewrite once
+/// more (a trailing `set_size` can reintroduce caption).
+pub(crate) fn reassert_frameless_chrome_keep_size(window: &WebviewWindow) {
+    clear_dock_window_title(window);
+    match rewrite_frameless_popup_style(window) {
+        Ok(false) => {}
+        Ok(true) => {
+            let scale = match window.scale_factor() {
+                Ok(s) if s > 0.0 => s,
+                _ => 1.0,
+            };
+            if let Ok(size) = window.outer_size() {
+                let width_dip = size.width as f64 / scale;
+                let height_dip = size.height as f64 / scale;
+                let position = current_dock_position(window);
+                if let Err(err) =
+                    reapply_dock_frame_after_chrome(window, width_dip, height_dip, position)
+                {
+                    log::warn!("[win-backdrop] frame reapply after resize chrome failed: {err}");
+                }
+            } else {
+                log::warn!("[win-backdrop] chrome reassert after resize: outer_size unavailable");
+            }
+            // Pinning size via Tauri can restore caption — strip again, no resize.
+            if let Err(err) = rewrite_frameless_popup_style(window) {
+                log::warn!("[win-backdrop] second chrome rewrite after resize failed: {err}");
+            }
+            log_chrome_state("after resize chrome reassert", window);
+        }
+        Err(err) => log::warn!("[win-backdrop] chrome rewrite after resize failed: {err}"),
+    }
+}
+
+/// True when GWL_STYLE still has caption/sysmenu or is missing WS_POPUP.
+fn style_needs_frameless_rewrite(window: &WebviewWindow) -> bool {
+    match read_gwl_styles(window) {
+        Some((style, _)) => {
+            let has_caption =
+                (style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0;
+            let is_popup = (style & WS_POPUP.0) != 0;
+            has_caption || !is_popup
+        }
+        None => false,
+    }
+}
+
 /// Ensure system backdrop is off. Win11 Mica paints the full HWND and does
 /// not clip under a custom 28px CSS/RGB pill — dark corners outside the ring.
 fn clear_dock_mica(window: &WebviewWindow) -> Result<(), String> {
@@ -613,6 +661,10 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
 fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
     if let Err(err) = clear_dock_mica(window) {
         log::warn!("[win-backdrop] clear_mica before region clear: {err}");
+    }
+    if style_needs_frameless_rewrite(window) {
+        log::warn!("[win-backdrop] caption creep before region clear — reasserting POPUP");
+        reassert_frameless_chrome_keep_size(window);
     }
     // Transparent bg is set at setup; only re-apply once if somehow unset.
     assert_transparent_webview_bg(window, false);
@@ -734,6 +786,11 @@ fn set_window_rgn_to_pill(
     // outside the RGB ring. Tint is CSS over transparent WebView2.
     if let Err(err) = clear_dock_mica(window) {
         log::warn!("[win-backdrop] clear_mica before pill region: {err}");
+    }
+    // Hover/`set_size` can restore caption chrome; kill it before clipping.
+    if style_needs_frameless_rewrite(window) {
+        log::warn!("[win-backdrop] caption creep before SetWindowRgn — reasserting POPUP");
+        reassert_frameless_chrome_keep_size(window);
     }
 
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
