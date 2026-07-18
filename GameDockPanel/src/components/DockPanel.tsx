@@ -521,7 +521,7 @@ function HydratedDockPanel({
         x: event.clientX - pillRect.left,
         y: event.clientY - pillRect.top,
       };
-      // Clear SetWindowRgn + menu hold before the menu mounts (Windows clip race).
+      // Expand HWND + menu hold before the menu mounts (Windows race).
       void setDockRegionRelaxed(true, { menuHold: true }).then(() => {
         setPillMenuAnchor(anchor);
         setPillMenuOpen(true);

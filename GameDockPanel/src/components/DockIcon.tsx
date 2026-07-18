@@ -770,8 +770,8 @@ export function DockIcon({
       aria-label={`${app.name}${app.isActive ? " (запущено)" : ""}`}
       onContextMenu={(event) => {
         event.preventDefault();
-        // Windows: clear SetWindowRgn before the menu mounts so the first
-        // frame is not clipped by the idle pill region.
+        // Windows: expand HWND before the menu mounts so the first frame
+        // has room outside the CSS pill.
         void setDockRegionRelaxed(true, { menuHold: true }).then(() => setMenuOpen(true));
       }}
       style={{ gap: ledAxis === "horizontal" ? iconLedGap : 0 }}

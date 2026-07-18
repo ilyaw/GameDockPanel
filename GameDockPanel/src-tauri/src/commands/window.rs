@@ -37,11 +37,11 @@ pub fn sync_vibrancy_pill(
     platform::sync_vibrancy_pill_from_web(&window, x, y, width, height)
 }
 
-/// Windows: clear (`relaxed=true`) or restore pill-shaped `SetWindowRgn`.
+/// Windows: expand (`relaxed=true`) or shrink the dock HWND for hover / menu.
 /// Call before opening a context menu / on dock hover so magnify and menus
-/// are not clipped. Pass `menu_hold: Some(true)` before mounting a context
-/// menu so the click-through poller cannot re-clip before `set_menu_overlay`
-/// lands. No-op on macOS / other platforms.
+/// have room outside the CSS pill. Pass `menu_hold: Some(true)` before
+/// mounting a context menu so the click-through poller cannot shrink before
+/// `set_menu_overlay` lands. No-op on macOS / other platforms.
 #[tauri::command]
 pub fn set_dock_region_relaxed(
     app: AppHandle,
@@ -105,8 +105,8 @@ pub fn set_menu_overlay(
 
     if let Some(window) = app.get_webview_window("main") {
         if overlay.is_active() {
-            // Clear clip + hold before growing so the first painted menu frame
-            // is not cut by a stale pill-shaped SetWindowRgn (Windows).
+            // Expand HWND + hold before growing so the first painted menu
+            // frame has room outside the CSS pill (Windows).
             #[cfg(target_os = "windows")]
             {
                 if let Err(err) =
@@ -121,7 +121,7 @@ pub fn set_menu_overlay(
             #[cfg(target_os = "windows")]
             {
                 // Drop hold only — keep REGION_RELAXED from hover so we don't
-                // flash a pill clip while the cursor is still on the dock.
+                // shrink while the cursor is still on the dock.
                 if let Err(err) = platform::clear_dock_menu_region_hold(&window) {
                     log::warn!("[win-backdrop] menu close hold clear failed: {err}");
                 }

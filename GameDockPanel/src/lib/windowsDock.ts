@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** WebView2 / Windows dock — used to gate SetWindowRgn relax calls. */
+/** WebView2 / Windows dock — used to gate hover/menu HWND expand calls. */
 export const IS_WINDOWS =
   typeof navigator !== "undefined" &&
   navigator.platform.toLowerCase().includes("win");
@@ -8,15 +8,15 @@ export const IS_WINDOWS =
 export type DockRegionRelaxOptions = {
   /**
    * When opening a context menu, pass `true` so the click-through poller
-   * cannot re-apply a pill clip before `set_menu_overlay` lands. Pass
+   * cannot shrink the HWND before `set_menu_overlay` lands. Pass
    * `false` when the menu fully closes.
    */
   menuHold?: boolean;
 };
 
 /**
- * Windows only: clear (`true`) or restore pill-shaped window region.
- * Await before opening a context menu so the first paint is not clipped.
+ * Windows only: expand (`true`) or shrink the dock HWND for hover / menu.
+ * Await before opening a context menu so the first paint has room.
  */
 export async function setDockRegionRelaxed(
   relaxed: boolean,

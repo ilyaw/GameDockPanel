@@ -70,8 +70,8 @@ fn magnify_length_overflow_dip(icon_size_dip: f64) -> f64 {
 }
 
 /// Windows resting thickness = near-edge inset + CSS pill (no magnify /
-/// tooltip / glow). HWND is clipped to the pill via SetWindowRgn; hover/menu
-/// grow HWND and clear the region so margins stay transparent (no Mica).
+/// tooltip / glow). Hover/menu grow HWND temporarily; tint is CSS over
+/// transparent WebView2 (no Mica, no GDI pill clip).
 #[cfg(windows)]
 pub fn window_thickness_rest_dip(pill_thickness_dip: f64, _icon_size_dip: f64) -> f64 {
     DOCK_EDGE_INSET_DIP + pill_thickness_dip
@@ -434,7 +434,7 @@ pub fn formula_window_frame(
 
 /// Windows hybrid resting frame — length equals the CSS pill (no glow /
 /// magnify bleed); thickness is inset + pill. Hover/menu grow temporarily;
-/// idle keeps a pill-shaped SetWindowRgn (no Mica; tint is CSS).
+/// shape is CSS-only (no Mica, no GDI SetWindowRgn).
 pub fn formula_window_frame_rest(
     entries: &[DockItem],
     icon_size_dip: f64,

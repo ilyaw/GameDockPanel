@@ -22,7 +22,7 @@ pub struct DiagnosticsPayload {
     pub settings: DiagnosticsSettings,
     pub platform_apps_implemented: bool,
     pub click_through_implemented: bool,
-    /// Windows-only SetWindowRgn / chrome snapshot (`micaEnabled: false`) —
+    /// Windows-only chrome / backdrop snapshot (`micaEnabled: false`) —
     /// `null` on other OSes.
     pub windows_backdrop: Option<serde_json::Value>,
     pub recent_log_lines: Vec<String>,
