@@ -23,9 +23,9 @@ use windows::Win32::Graphics::Gdi::{
 use crate::commands::apps::{AppsState, MenuOverlayState};
 use crate::commands::settings::{DockPosition, DockWindowLayer};
 use crate::platform::geometry::{
-    apply_dock_window_frame, current_dock_position, current_icon_size_dip,
-    formula_window_frame_rest, resize_dock_window_for_pill, store_pill_dims,
-    DOCK_EDGE_INSET_DIP, PILL_CORNER_RADIUS_DIP,
+    apply_dock_window_frame, current_dock_position, current_icon_size_dip, expand_for_hover,
+    formula_window_frame_rest, resize_dock_window_for_pill, set_expand_for_hover,
+    store_pill_dims, DOCK_EDGE_INSET_DIP, PILL_CORNER_RADIUS_DIP,
 };
 
 use super::input::start_dock_input;
@@ -176,6 +176,7 @@ pub fn set_dock_region_relaxed(
     if !relaxed && menu_blocks_pill_clip(window) {
         // Remember "not hovered" for after the menu closes, but keep HWND clear.
         REGION_RELAXED.store(false, Ordering::SeqCst);
+        set_expand_for_hover(true);
         log::info!(
             "[win-backdrop] region tighten deferred (menu_hold={} overlay={})",
             MENU_REGION_HOLD.load(Ordering::Relaxed),
@@ -185,6 +186,8 @@ pub fn set_dock_region_relaxed(
     }
 
     let prev = REGION_RELAXED.swap(relaxed, Ordering::SeqCst);
+    set_expand_for_hover(relaxed || menu_blocks_pill_clip(window));
+
     if prev == relaxed {
         // Still re-apply: a concurrent sync may have restored the pill clip
         // while the flag was already true (menu race / geometry sync).
@@ -194,6 +197,36 @@ pub fn set_dock_region_relaxed(
         return sync_pill_window_rgn(window);
     }
     log::info!("[win-backdrop] region_relaxed {prev} → {relaxed}");
+
+    // Rest HWND == pill; grow for magnify/tooltip while hovered, shrink on leave
+    // (menu overlay path uses ensure_window_fits / shrink_to_pill separately).
+    if !menu_overlay_active(window) {
+        let state = window.state::<AppsState>();
+        let pill_width = *state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pill_height = *state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pill_width >= 1.0 && pill_height >= 1.0 {
+            let icon_size_dip = current_icon_size_dip(window);
+            match resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip) {
+                Ok(changed) => {
+                    if changed {
+                        log::info!(
+                            "[win-backdrop] hover_frame resized={} expand={}",
+                            changed,
+                            relaxed
+                        );
+                    }
+                }
+                Err(err) => log::warn!("[win-backdrop] hover_frame resize failed: {err}"),
+            }
+        }
+    }
+
     if relaxed || menu_blocks_pill_clip(window) {
         clear_window_rgn(window)
     } else {
@@ -208,13 +241,14 @@ pub fn clear_dock_menu_region_hold(window: &WebviewWindow) -> Result<(), String>
     if prev {
         log::info!("[win-backdrop] menu_region_hold true → false (overlay closed)");
     }
+    set_expand_for_hover(REGION_RELAXED.load(Ordering::SeqCst) || menu_overlay_active(window));
     sync_pill_window_rgn(window)
 }
 
-/// Re-applies Mica + pill-shaped window region after any native resize.
+/// Re-applies backdrop for the current clip mode after any native resize.
+/// Idle → Mica + pill region; hover/menu → clear Mica + full HWND.
 pub fn refresh_windows_backdrop(window: &WebviewWindow) -> Result<(), String> {
-    log::info!("[win-backdrop] refresh: mica + pill region");
-    apply_dock_mica(window)?;
+    log::info!("[win-backdrop] refresh: sync region/mica for current mode");
     sync_pill_window_rgn(window)
 }
 
@@ -263,6 +297,24 @@ fn apply_dock_mica(window: &WebviewWindow) -> Result<(), String> {
     }
 }
 
+/// Drop Mica while the HWND is larger than the CSS pill (hover / menu).
+/// Otherwise DWM paints a gray shell in the magnify/menu margins. The pill
+/// keeps its CSS tint; idle re-applies Mica under the pill-shaped region.
+fn clear_dock_mica(window: &WebviewWindow) -> Result<(), String> {
+    use window_vibrancy::clear_mica;
+
+    match clear_mica(window) {
+        Ok(()) => {
+            log::info!("[win-backdrop] clear_mica ok (region relaxed)");
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("[win-backdrop] clear_mica failed: {e}");
+            Err(e.to_string())
+        }
+    }
+}
+
 fn menu_overlay_active(window: &WebviewWindow) -> bool {
     let state = window.state::<AppsState>();
     let guard = state
@@ -272,8 +324,13 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
     guard.is_active()
 }
 
-/// Clears the custom region so the full HWND (incl. menu overlay) is visible.
+/// Clears the custom region so the full HWND (incl. menu overlay) is visible,
+/// and removes Mica so expanded margins stay transparent (no gray shell).
 fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
+    // Clear backdrop first — otherwise a frame of full-HWND Mica can flash.
+    if let Err(err) = clear_dock_mica(window) {
+        log::warn!("[win-backdrop] clear_mica before region clear: {err}");
+    }
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     // None removes the region; system does not take ownership.
     let ok = unsafe { SetWindowRgn(hwnd, None, true) };
@@ -282,7 +339,7 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
         log::error!("[win-backdrop] SetWindowRgn(clear) failed gle={gle}");
         return Err(format!("SetWindowRgn(clear) failed gle={gle}"));
     }
-    log::info!("[win-backdrop] region cleared (menu overlay / full HWND)");
+    log::info!("[win-backdrop] region cleared + mica off (hover/menu margins transparent)");
     set_dwm_corner_preference(window, DWMWCP_ROUND)?;
     Ok(())
 }
@@ -385,6 +442,8 @@ fn set_window_rgn_to_pill(
     // Own rounding via region — disable DWM's ~8px OS round so it doesn't
     // paint a secondary dark shell outside the 28px CSS pill.
     set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
+    // Idle path: Mica only under the pill-shaped region (re-apply after hover clear).
+    apply_dock_mica(window)?;
 
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let hrgn = unsafe { CreateRoundRectRgn(left, top, right, bottom, diameter, diameter) };
@@ -449,7 +508,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         "[win-backdrop] setup_dock_window: position={position:?} icon_size={icon_size_dip} \
          apps={entry_count} pill={pill_width:.1}x{pill_height:.1} \
          window={window_width:.1}x{window_height:.1} scale={scale:.2} \
-         glow_bleed_expected=window_larger_than_pill"
+         rest=inset_plus_pill_no_glow"
     );
 
     apply_dock_window_frame(&window, window_width, window_height, position)?;
@@ -524,6 +583,10 @@ pub fn ensure_window_fits_menu_overlay(
 }
 
 pub fn shrink_dock_window_to_stored_pill(window: &WebviewWindow) -> Result<bool, String> {
+    if menu_overlay_active(window) {
+        log::info!("[win-backdrop] shrink_to_pill skipped: menu overlay still active");
+        return Ok(false);
+    }
     let state = window.state::<AppsState>();
     let pill_width = *state
         .pill_width_dip
@@ -540,7 +603,9 @@ pub fn shrink_dock_window_to_stored_pill(window: &WebviewWindow) -> Result<bool,
     let icon_size_dip = current_icon_size_dip(window);
     let changed = resize_dock_window_for_pill(window, pill_width, pill_height, icon_size_dip)?;
     log::info!(
-        "[win-backdrop] shrink_to_pill {pill_width:.1}x{pill_height:.1} resized={changed}"
+        "[win-backdrop] shrink_to_pill {pill_width:.1}x{pill_height:.1} resized={changed} \
+         hover_expand={}",
+        expand_for_hover()
     );
     if changed {
         refresh_windows_backdrop(window)?;
@@ -569,7 +634,7 @@ pub fn sync_vibrancy_pill_from_web(
         // coords we just stored (usually still correct for edge-anchored).
         refresh_windows_backdrop(window)?;
     } else {
-        apply_dock_mica(window)?;
+        // Idle → Mica + pill clip; hover/menu → clear Mica + full HWND.
         sync_pill_window_rgn(window)?;
     }
 
