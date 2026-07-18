@@ -8,8 +8,9 @@
 //! `NSVisualEffectView` can, and the hook thread had no Win32 message loop
 //! (`GetMessage`), so the callback was unreliable anyway.
 //!
-//! Pill clicks are handled by the WebView when the click-through poller sets
-//! `set_ignore_cursor_events(false)` over the rounded pill hit-test; see
+//! Pill clicks are handled by the WebView when the click-through poller clears
+//! `WS_EX_TRANSPARENT` over the rounded pill hit-test (native exstyle toggle —
+//! not Tao `set_ignore_cursor_events`, which restores `WS_CAPTION`); see
 //! `DockPanel.tsx` native pointer handlers on Windows. Global outside-window
 //! menu dismiss (macOS tap) is not replicated here — in-window dismiss still
 //! works via DOM listeners on `DockIcon`.
@@ -29,6 +30,8 @@ use crate::platform::geometry::{
     pill_thickness_hover_dip, DOCK_EDGE_INSET_DIP, PILL_CORNER_RADIUS_DIP,
 };
 
+use super::window::set_dock_click_through;
+
 const CLICK_POLL_MS: u64 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -47,6 +50,13 @@ fn start_click_through_poller(window: WebviewWindow) {
         let mut dock_hovered = false;
         let mut last_cursor: Option<DockCursorPayload> = None;
 
+        // Force initial TRANSPARENT|LAYERED on the UI thread — setup may have
+        // raced with Tao `show`/`always_on_top`, and `ignoring=true` alone
+        // would skip the first toggle.
+        if let Err(err) = set_dock_click_through(&window, true) {
+            log::warn!("[win-backdrop] initial click-through failed: {err}");
+        }
+
         loop {
             std::thread::sleep(Duration::from_millis(CLICK_POLL_MS));
 
@@ -61,7 +71,7 @@ fn start_click_through_poller(window: WebviewWindow) {
             let in_pill = pill_cursor.is_some();
             let in_window = cursor_in_window_bounds(&window, cursor_x, cursor_y);
             // Explorer drag-drop needs the WebView to receive OLE events — while
-            // `set_ignore_cursor_events(true)` is on, drops never reach
+            // click-through (`WS_EX_TRANSPARENT`) is on, drops never reach
             // `onDragDropEvent`. Briefly accept hits over the whole window while
             // the left button is held (typical external file drag).
             let lbutton_down = unsafe {
@@ -94,8 +104,11 @@ fn start_click_through_poller(window: WebviewWindow) {
 
             let should_ignore = !in_pill && !drag_over_window;
             if should_ignore != ignoring {
-                if window.set_ignore_cursor_events(should_ignore).is_ok() {
-                    ignoring = should_ignore;
+                match set_dock_click_through(&window, should_ignore) {
+                    Ok(()) => ignoring = should_ignore,
+                    Err(err) => {
+                        log::warn!("[win-backdrop] click-through toggle failed: {err}")
+                    }
                 }
             }
         }

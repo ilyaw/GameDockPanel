@@ -1,7 +1,9 @@
 //! Dock window geometry — shared between platforms. Mirrors the formulas in
 //! `src/lib/constants.ts` and the macOS implementation in `platform/macos.rs`.
 
-use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use tauri::{Manager, WebviewWindow};
+#[cfg(not(windows))]
+use tauri::{PhysicalPosition, PhysicalSize};
 
 use crate::commands::apps::{AppsState, DockItem, MenuOverlaySide, MenuOverlayState};
 use crate::commands::settings::{DockAxis, DockPosition, SettingsState};
@@ -289,12 +291,6 @@ pub fn apply_dock_window_frame(
     let width_px = (target_content_width * scale).round() as i32;
     let height_px = (target_content_height * scale).round() as i32;
 
-    if size_changed {
-        window
-            .set_size(PhysicalSize::new(width_px as u32, height_px as u32))
-            .map_err(|e| e.to_string())?;
-    }
-
     let (x, y) = match position {
         DockPosition::Bottom => (
             monitor_pos.x + (monitor_size.width as i32 - width_px) / 2,
@@ -314,9 +310,23 @@ pub fn apply_dock_window_frame(
         ),
     };
 
-    window
-        .set_position(PhysicalPosition::new(x, y))
-        .map_err(|e| e.to_string())?;
+    // Windows: one SetWindowPos — Tao set_size/set_position rewrite GWL_STYLE
+    // back to overlapped+caption (white ghost titlebar) on every hover resize.
+    #[cfg(windows)]
+    {
+        crate::platform::windows::set_dock_outer_frame(window, x, y, width_px, height_px)?;
+    }
+    #[cfg(not(windows))]
+    {
+        if size_changed {
+            window
+                .set_size(PhysicalSize::new(width_px as u32, height_px as u32))
+                .map_err(|e| e.to_string())?;
+        }
+        window
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|e| e.to_string())?;
+    }
 
     Ok(size_changed)
 }

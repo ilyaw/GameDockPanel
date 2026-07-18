@@ -23,7 +23,7 @@ use windows::Win32::Graphics::Gdi::SetWindowRgn;
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 use crate::commands::apps::{AppsState, MenuOverlayState};
@@ -211,19 +211,164 @@ pub(crate) fn log_implausible_pill_chrome(window: &WebviewWindow, width: f64, he
     );
 }
 
+/// Run HWND work on Tauri's UI thread. Safe from the click-through poller and
+/// from setup (already-main runs the closure inline — no deadlock).
+fn with_dock_main_thread<T, F>(window: &WebviewWindow, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|e| e.to_string())?;
+    rx.recv()
+        .map_err(|_| "dock HWND task did not complete on main thread".to_string())?
+}
+
+/// Ensure `WS_EX_LAYERED` without clobbering other exstyle bits.
+///
+/// Must run on the UI thread (caller marshals). Tao's
+/// `set_ignore_cursor_events(false)` drops LAYERED together with
+/// `WS_EX_TRANSPARENT`; without LAYERED, transparent WebView2 margins can
+/// paint as an opaque white strip above the CSS pill.
+fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    if (exstyle & WS_EX_LAYERED.0) != 0 {
+        return Ok(false);
+    }
+    let desired = exstyle | WS_EX_LAYERED.0;
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
+    if previous == 0 && exstyle != 0 {
+        let gle = last_win32_error();
+        if gle != 0 {
+            return Err(format!(
+                "SetWindowLongPtrW(GWL_EXSTYLE) failed gle={gle} was=0x{exstyle:08x}"
+            ));
+        }
+    }
+    log::warn!(
+        "[win-backdrop] WS_EX_LAYERED missing — restored EXSTYLE=0x{desired:08x} (was 0x{exstyle:08x})"
+    );
+    Ok(true)
+}
+
+fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    let desired = if ignore {
+        exstyle | WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0
+    } else {
+        (exstyle | WS_EX_LAYERED.0) & !WS_EX_TRANSPARENT.0
+    };
+    if desired == exstyle {
+        return Ok(());
+    }
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
+    if previous == 0 && exstyle != 0 {
+        let gle = last_win32_error();
+        if gle != 0 {
+            return Err(format!(
+                "SetWindowLongPtrW(GWL_EXSTYLE) click-through failed gle={gle} \
+                 was=0x{exstyle:08x} desired=0x{desired:08x}"
+            ));
+        }
+    }
+    log::debug!(
+        "[win-backdrop] click-through ignore={ignore}: EXSTYLE=0x{exstyle:08x} → 0x{desired:08x}"
+    );
+    Ok(())
+}
+
+/// Click-through via exstyle only — never go through Tao's
+/// `set_ignore_cursor_events`, which rewrites `GWL_STYLE` back to
+/// overlapped+`WS_CAPTION` (white ghost titlebar) on every hover toggle.
+///
+/// Marshals to the UI thread (poller must not touch HWND styles directly).
+pub(crate) fn set_dock_click_through(
+    window: &WebviewWindow,
+    ignore: bool,
+) -> Result<(), String> {
+    let window = window.clone();
+    with_dock_main_thread(&window, move || set_dock_click_through_impl(&window, ignore))
+}
+
+fn set_dock_outer_frame_impl(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width_px: i32,
+    height_px: i32,
+) -> Result<(), String> {
+    let width_px = width_px.max(1);
+    let height_px = height_px.max(1);
+    // Frameless popup: outer ≈ inner. These DIP×scale targets were historically
+    // passed to Tauri `set_size` (inner); with chrome_delta≈(0,0) they match
+    // the outer rect `SetWindowPos` expects.
+    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
+        if pos.x == x
+            && pos.y == y
+            && size.width as i32 == width_px
+            && size.height as i32 == height_px
+        {
+            return Ok(());
+        }
+    }
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            width_px,
+            height_px,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+    .map_err(|e| format!("SetWindowPos(dock frame) failed: {e}"))?;
+    Ok(())
+}
+
+/// Native outer move+size — avoids Tao `set_size`/`set_position`, which
+/// restore caption chrome (`0x14CB0000`) via `WindowFlags::apply_diff`.
+///
+/// Marshals to the UI thread. No-ops when the outer rect is already correct.
+pub(crate) fn set_dock_outer_frame(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width_px: i32,
+    height_px: i32,
+) -> Result<(), String> {
+    let window = window.clone();
+    with_dock_main_thread(&window, move || {
+        set_dock_outer_frame_impl(&window, x, y, width_px, height_px)
+    })
+}
+
 /// Rewrite overlapped caption chrome to a frameless `WS_POPUP` shell.
 ///
 /// Do **not** strip down to `WS_CLIPSIBLINGS` alone (`0x04000000`) — that
 /// collapses the client and the next DOM measure reports a ~40×91 capsule.
 ///
 /// Returns `Ok(true)` when style bits were rewritten, `Ok(false)` when already
-/// a caption-free popup.
+/// a caption-free popup. Always runs on the UI thread.
 fn rewrite_frameless_popup_style(window: &WebviewWindow) -> Result<bool, String> {
+    let window = window.clone();
+    with_dock_main_thread(&window, move || rewrite_frameless_popup_style_impl(&window))
+}
+
+fn rewrite_frameless_popup_style_impl(window: &WebviewWindow) -> Result<bool, String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
     let has_caption = (style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0;
     let is_popup = (style & WS_POPUP.0) != 0;
     if !has_caption && is_popup {
+        ensure_layered_exstyle(window)?;
         log::info!(
             "[win-backdrop] chrome rewrite skipped (already POPUP, no caption): STYLE=0x{style:08x}"
         );
@@ -268,6 +413,7 @@ fn rewrite_frameless_popup_style(window: &WebviewWindow) -> Result<bool, String>
             style_flag_bits(after),
         ));
     }
+    ensure_layered_exstyle(window)?;
     Ok(true)
 }
 
@@ -665,22 +811,25 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
         return Ok(());
     }
 
-    if let Err(err) = clear_dock_mica(window) {
-        log::warn!("[win-backdrop] clear_mica before region clear: {err}");
-    }
-    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-    // None removes the region; system does not take ownership.
-    let ok = unsafe { SetWindowRgn(hwnd, None, true) };
-    if ok == 0 {
-        let gle = last_win32_error();
-        log::error!("[win-backdrop] SetWindowRgn(clear) failed gle={gle}");
-        return Err(format!("SetWindowRgn(clear) failed gle={gle}"));
-    }
-    // Never DWMWCP_ROUND here — it paints a dark rounded HWND shell.
-    set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
-    WINDOW_RGN_CLEARED.store(true, Ordering::SeqCst);
-    log::info!("[win-backdrop] region cleared + mica off + DONOTROUND (no GDI pill clip)");
-    Ok(())
+    let window = window.clone();
+    with_dock_main_thread(&window, move || {
+        if let Err(err) = clear_dock_mica(&window) {
+            log::warn!("[win-backdrop] clear_mica before region clear: {err}");
+        }
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        // None removes the region; system does not take ownership.
+        let ok = unsafe { SetWindowRgn(hwnd, None, true) };
+        if ok == 0 {
+            let gle = last_win32_error();
+            log::error!("[win-backdrop] SetWindowRgn(clear) failed gle={gle}");
+            return Err(format!("SetWindowRgn(clear) failed gle={gle}"));
+        }
+        // Never DWMWCP_ROUND here — it paints a dark rounded HWND shell.
+        set_dwm_corner_preference(&window, DWMWCP_DONOTROUND)?;
+        WINDOW_RGN_CLEARED.store(true, Ordering::SeqCst);
+        log::info!("[win-backdrop] region cleared + mica off + DONOTROUND (no GDI pill clip)");
+        Ok(())
+    })
 }
 
 /// Fallback pill origin in client DIP when DOM sync has not run yet.
@@ -717,7 +866,18 @@ pub fn apply_dock_window_layer(
     log::info!("[win-backdrop] set_always_on_top={on_top} layer={layer:?}");
     window
         .set_always_on_top(on_top)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Tao `apply_diff` rewrites GWL_STYLE/EXSTYLE from WindowFlags and can
+    // restore WS_CAPTION + drop TRANSPARENT|LAYERED — same ghost titlebar /
+    // broken click-through as hover resize. Repair after every layer change
+    // (setup and Settings → «Слой отображения»).
+    reassert_frameless_chrome_keep_size(window);
+    let accept_hits = REGION_RELAXED.load(Ordering::SeqCst)
+        || MENU_REGION_HOLD.load(Ordering::SeqCst)
+        || menu_overlay_active(window);
+    set_dock_click_through(window, !accept_hits)?;
+    Ok(())
 }
 
 /// Sizes the dock from the app roster, anchors it, enables click-through, and shows.
@@ -762,10 +922,6 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         );
     }
 
-    // Frameless + transparent before region/show — strips residual caption bits
-    // and logs WebView2 version for ghost-titlebar triage.
-    ensure_frameless_dock_chrome(&window, window_width, window_height, position)?;
-
     let layer = {
         let state = app.state::<crate::commands::settings::SettingsState>();
         let guard = state
@@ -774,7 +930,17 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.dock_window_layer
     };
+    // always_on_top goes through Tao and may restore caption / wipe exstyle —
+    // strip chrome and re-apply click-through afterward.
     apply_dock_window_layer(&window, layer)?;
+
+    // Frameless + transparent before region/show — strips residual caption bits
+    // and logs WebView2 version for ghost-titlebar triage.
+    ensure_frameless_dock_chrome(&window, window_width, window_height, position)?;
+
+    // After every Tao style rewrite path — native click-through only (no
+    // set_ignore_cursor_events), so TRANSPARENT|LAYERED stick.
+    set_dock_click_through(&window, true)?;
 
     store_pill_dims(&window, pill_width, pill_height);
     if let Ok(rect) = fallback_pill_client_rect(&window, pill_width, pill_height) {
@@ -790,15 +956,15 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
 
     refresh_windows_backdrop(&window)?;
 
-    window
-        .set_ignore_cursor_events(true)
-        .map_err(|e| e.to_string())?;
-
     start_dock_input(window.clone());
 
     window.show().map_err(|e| e.to_string())?;
     // Re-assert popup chrome after show — caption bits can return.
     reassert_dock_chrome_after_show(&window, window_width, window_height, position);
+    // show()/reassert may touch styles via Tao — restore click-through.
+    if let Err(err) = set_dock_click_through(&window, true) {
+        log::warn!("[win-backdrop] click-through after show failed: {err}");
+    }
     log::info!(
         "[win-backdrop] setup_dock_window: window shown snapshot={:?}",
         windows_backdrop_snapshot(&window)
