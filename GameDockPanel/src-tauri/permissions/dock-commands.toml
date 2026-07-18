@@ -16,6 +16,7 @@ commands.allow = [
   "refresh_indicator_colors",
   "resize_dock_window",
   "sync_vibrancy_pill",
+  "set_dock_region_relaxed",
   "set_menu_overlay",
   "open_settings",
   "get_dock_settings",

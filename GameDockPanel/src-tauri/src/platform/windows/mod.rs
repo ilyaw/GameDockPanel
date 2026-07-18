@@ -14,6 +14,7 @@ pub use apps::{
 };
 pub use icons::resolve_app_icon;
 pub use window::{
-    apply_dock_window_layer, ensure_window_fits_menu_overlay, setup_dock_window,
-    shrink_dock_window_to_stored_pill, sync_vibrancy_pill_from_web,
+    apply_dock_window_layer, clear_dock_menu_region_hold, ensure_window_fits_menu_overlay,
+    set_dock_region_relaxed, setup_dock_window, shrink_dock_window_to_stored_pill,
+    sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
 };

@@ -37,6 +37,31 @@ pub fn sync_vibrancy_pill(
     platform::sync_vibrancy_pill_from_web(&window, x, y, width, height)
 }
 
+/// Windows: clear (`relaxed=true`) or restore pill-shaped `SetWindowRgn`.
+/// Call before opening a context menu / on dock hover so magnify and menus
+/// are not clipped. Pass `menu_hold: Some(true)` before mounting a context
+/// menu so the click-through poller cannot re-clip before `set_menu_overlay`
+/// lands. No-op on macOS / other platforms.
+#[tauri::command]
+pub fn set_dock_region_relaxed(
+    app: AppHandle,
+    relaxed: bool,
+    menu_hold: Option<bool>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "main window not found".to_string())?;
+        return platform::set_dock_region_relaxed(&window, relaxed, menu_hold);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, relaxed, menu_hold);
+        Ok(())
+    }
+}
+
 /// Called by `DockIcon` whenever its context menu opens or closes, with the
 /// menu's measured footprint and resolved placement side. See
 /// `AppsState::menu_overlay` for why the native click-through hit-test
@@ -80,8 +105,27 @@ pub fn set_menu_overlay(
 
     if let Some(window) = app.get_webview_window("main") {
         if overlay.is_active() {
+            // Clear clip + hold before growing so the first painted menu frame
+            // is not cut by a stale pill-shaped SetWindowRgn (Windows).
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(err) =
+                    platform::set_dock_region_relaxed(&window, true, Some(true))
+                {
+                    log::error!("[win-backdrop] menu open region relax failed: {err}");
+                    return Err(err);
+                }
+            }
             platform::ensure_window_fits_menu_overlay(&window, overlay)?;
         } else if was_active {
+            #[cfg(target_os = "windows")]
+            {
+                // Drop hold only — keep REGION_RELAXED from hover so we don't
+                // flash a pill clip while the cursor is still on the dock.
+                if let Err(err) = platform::clear_dock_menu_region_hold(&window) {
+                    log::warn!("[win-backdrop] menu close hold clear failed: {err}");
+                }
+            }
             platform::shrink_dock_window_to_stored_pill(&window)?;
             let _ = app.emit("dock-menu-overlay-closed", ());
         }

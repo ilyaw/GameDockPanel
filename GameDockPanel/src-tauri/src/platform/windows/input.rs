@@ -73,6 +73,13 @@ fn start_click_through_poller(window: WebviewWindow) {
             if in_pill != dock_hovered {
                 dock_hovered = in_pill;
                 let _ = window.emit("dock-hover", dock_hovered);
+                // Magnify + tooltip paint outside the CSS pill — relax the
+                // SetWindowRgn clip while hovered, restore when idle.
+                if let Err(err) =
+                    crate::platform::set_dock_region_relaxed(&window, dock_hovered, None)
+                {
+                    log::warn!("[win-backdrop] hover region_relaxed failed: {err}");
+                }
                 if !dock_hovered {
                     last_cursor = None;
                 }

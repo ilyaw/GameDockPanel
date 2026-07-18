@@ -36,7 +36,7 @@ import {
 } from "../lib/dockPlacement";
 import { DockContextMenuRow } from "./DockContextMenuRow";
 import { DockOverlayAnchor } from "./DockOverlayAnchor";
-
+import { setDockRegionRelaxed } from "../lib/windowsDock";
 interface WindowLogicalPoint {
   x: number;
   y: number;
@@ -770,7 +770,9 @@ export function DockIcon({
       aria-label={`${app.name}${app.isActive ? " (запущено)" : ""}`}
       onContextMenu={(event) => {
         event.preventDefault();
-        setMenuOpen(true);
+        // Windows: clear SetWindowRgn before the menu mounts so the first
+        // frame is not clipped by the idle pill region.
+        void setDockRegionRelaxed(true, { menuHold: true }).then(() => setMenuOpen(true));
       }}
       style={{ gap: ledAxis === "horizontal" ? iconLedGap : 0 }}
       className={`relative flex flex-col items-center outline-none ${

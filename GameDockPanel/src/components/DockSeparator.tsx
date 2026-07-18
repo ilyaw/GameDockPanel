@@ -15,7 +15,7 @@ import {
   resolveOverlaySide,
   type OverlaySide,
 } from "../lib/dockPlacement";
-
+import { setDockRegionRelaxed } from "../lib/windowsDock";
 interface WindowLogicalPoint {
   x: number;
   y: number;
@@ -165,7 +165,7 @@ export function DockSeparator({
       <div
         onContextMenu={(event) => {
           event.preventDefault();
-          setMenuOpen(true);
+          void setDockRegionRelaxed(true, { menuHold: true }).then(() => setMenuOpen(true));
         }}
         style={
           isVertical

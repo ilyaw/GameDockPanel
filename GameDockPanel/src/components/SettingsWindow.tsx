@@ -898,7 +898,7 @@ export function SettingsWindow() {
       <SettingsRow
         title="Диагностика"
         descriptionClassName="max-w-sm"
-        description="Скопируйте JSON для отладки или откройте папку с лог-файлами (на Windows — %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs)."
+        description="Для отладки с другом: 1) «Скопировать диагностику» → вставь JSON в чат 2) «Открыть папку логов» → пришли файл gamedockpanel*.log 3) скрин панели. На Windows логи: %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs."
       >
         <div className="flex flex-col items-end gap-2">
           <div className="flex flex-wrap justify-end gap-2">

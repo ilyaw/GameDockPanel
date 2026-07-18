@@ -27,12 +27,10 @@ import {
 } from "../lib/dockPlacement";
 import type { DockItem, DockSettings } from "../lib/types";
 import { countDockSeparators, isDockAppItem } from "../lib/types";
+import { IS_WINDOWS, setDockRegionRelaxed } from "../lib/windowsDock";
 
 /** Windows: icon activation goes through WebView2 pointer events (no global hook). */
-const IS_WINDOWS =
-  typeof navigator !== "undefined" &&
-  navigator.platform.toLowerCase().includes("win");
-
+// IS_WINDOWS imported from windowsDock — keep comment for dock-input readers.
 /**
  * React only types `style` as known CSS properties — custom properties
  * (`--dock-glow-N`) are still valid inline style keys at runtime, just not
@@ -304,7 +302,12 @@ function HydratedDockPanel({
 
   useEffect(() => {
     console.info(
-      `[dock] hydrated: apps=${items.filter(isDockAppItem).length} separators=${countDockSeparators(items)} position=${settings.dockPosition} iconSize=${settings.iconSizePx} panelEffect=${settings.panelEffect}`,
+      `[dock] hydrated: osWin=${IS_WINDOWS} apps=${items.filter(isDockAppItem).length} ` +
+        `separators=${countDockSeparators(items)} position=${settings.dockPosition} ` +
+        `iconSize=${settings.iconSizePx} animations=${settings.animationsEnabled} ` +
+        `borderStyle=${settings.borderStyle} borderWidth=${settings.borderWidthPx} ` +
+        `panelEffect=${settings.panelEffect} panelEffectOn=${settings.panelEffectEnabled} ` +
+        `bgAnim=${settings.backgroundAnimationEnabled} bgPreset=${settings.backgroundPreset}`,
     );
   }, []);
 
@@ -490,6 +493,10 @@ function HydratedDockPanel({
       ? contextMenuOpenCountRef.current + 1
       : Math.max(0, contextMenuOpenCountRef.current - 1);
     contextMenuOpenCountRef.current = next;
+    // Menu closed — drop hold; keep relaxed if cursor is still on the pill.
+    if (!open && next === 0) {
+      void setDockRegionRelaxed(dockHoveredRef.current, { menuHold: false });
+    }
   }, []);
 
   const handleContextMenuBoundsChange = useCallback((rect: DOMRect | null) => {
@@ -510,11 +517,15 @@ function HydratedDockPanel({
       if (!pillEl) return;
 
       const pillRect = pillEl.getBoundingClientRect();
-      setPillMenuAnchor({
+      const anchor = {
         x: event.clientX - pillRect.left,
         y: event.clientY - pillRect.top,
+      };
+      // Clear SetWindowRgn + menu hold before the menu mounts (Windows clip race).
+      void setDockRegionRelaxed(true, { menuHold: true }).then(() => {
+        setPillMenuAnchor(anchor);
+        setPillMenuOpen(true);
       });
-      setPillMenuOpen(true);
     },
     [],
   );
@@ -578,11 +589,19 @@ function HydratedDockPanel({
     mouseX.set(Infinity);
     mouseY.set(Infinity);
     setHoveredIconId(null);
+    // Keep region relaxed while a context menu is open (menu lives outside
+    // the pill hit-box after overlay grow).
+    if (contextMenuOpenCountRef.current === 0) {
+      void setDockRegionRelaxed(false);
+    }
   }, [mouseX, mouseY]);
 
   const enterDock = useCallback(() => {
     dockHoveredRef.current = true;
     setHoverSessionId((id) => id + 1);
+    // Relax before magnify/tooltip paint — faster than waiting for the
+    // 50ms click-through poller hover transition.
+    void setDockRegionRelaxed(true);
   }, []);
 
   /**
@@ -796,11 +815,15 @@ function HydratedDockPanel({
           if (rect.width < 1 || rect.height < 1) break;
 
           const iconSizePx = iconSizeAnimated.get();
-          await invoke("resize_dock_window", {
-            pillWidth: rect.width,
-            pillHeight: rect.height,
-            iconSizePx,
-          });
+          try {
+            await invoke("resize_dock_window", {
+              pillWidth: rect.width,
+              pillHeight: rect.height,
+              iconSizePx,
+            });
+          } catch (error: unknown) {
+            console.error("[dock] resize_dock_window failed:", error);
+          }
 
           if (!alive) break;
 
@@ -813,12 +836,20 @@ function HydratedDockPanel({
           if (!alive) break;
 
           const aligned = measurePill();
-          await invoke("sync_vibrancy_pill", {
-            x: aligned.x,
-            y: aligned.y,
-            width: aligned.width,
-            height: aligned.height,
-          });
+          console.info(
+            `[dock] geometry sync: pill=${aligned.width.toFixed(1)}x${aligned.height.toFixed(1)} ` +
+              `at=(${aligned.x.toFixed(1)},${aligned.y.toFixed(1)}) icon=${iconSizePx.toFixed(1)} win=${IS_WINDOWS}`,
+          );
+          try {
+            await invoke("sync_vibrancy_pill", {
+              x: aligned.x,
+              y: aligned.y,
+              width: aligned.width,
+              height: aligned.height,
+            });
+          } catch (error: unknown) {
+            console.error("[dock] sync_vibrancy_pill failed:", error);
+          }
 
           if (!syncPending) break;
         }
@@ -932,8 +963,19 @@ function HydratedDockPanel({
 
   const activePanelEffect = getPanelEffectPreset(settings.panelEffect);
   const panelEffectClasses = PANEL_EFFECT_CLASSES[activePanelEffect.id];
+  /** HUD overlays stay macOS-only — on Windows they fight Mica/tint readability. */
   const showPanelEffect =
-    settings.panelEffectEnabled && !!panelEffectClasses && !fileDragOver;
+    !IS_WINDOWS &&
+    settings.panelEffectEnabled &&
+    !!panelEffectClasses &&
+    !fileDragOver;
+
+  useEffect(() => {
+    console.info(
+      `[dock] decor: showBorderRing=${showBorderRing} showPanelEffect=${showPanelEffect} ` +
+        `reject=${isRejecting} dragOver=${fileDragOver} win=${IS_WINDOWS}`,
+    );
+  }, [showBorderRing, showPanelEffect, isRejecting, fileDragOver]);
 
   /**
    * Static border/shadow (from `staticGlowColor`) and CSS custom properties

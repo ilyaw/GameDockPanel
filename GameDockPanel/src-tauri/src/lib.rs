@@ -17,6 +17,9 @@ pub fn run() {
                 ));
             }
             builder
+                // Debug so [win-backdrop] / geometry details land in release
+                // builds too — friend ships logs for remote triage.
+                .level(log::LevelFilter::Debug)
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::LogDir {
                         file_name: Some("gamedockpanel".into()),
@@ -47,6 +50,7 @@ pub fn run() {
             commands::apps::refresh_indicator_colors,
             commands::window::resize_dock_window,
             commands::window::sync_vibrancy_pill,
+            commands::window::set_dock_region_relaxed,
             commands::window::set_menu_overlay,
             commands::window::open_settings,
             commands::settings::get_dock_settings,
@@ -58,9 +62,11 @@ pub fn run() {
         ])
         .setup(|app| {
             log::info!(
-                "GameDockPanel starting: os={} version={}",
+                "GameDockPanel starting: os={} arch={} version={} debug={}",
                 std::env::consts::OS,
-                app.package_info().version
+                std::env::consts::ARCH,
+                app.package_info().version,
+                cfg!(debug_assertions)
             );
             if let Ok(dir) = app.path().app_data_dir() {
                 log::info!("app_data_dir={}", dir.display());
