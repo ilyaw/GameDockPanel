@@ -18,3 +18,4 @@ pub use window::{
     set_dock_region_relaxed, setup_dock_window, shrink_dock_window_to_stored_pill,
     sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
 };
+pub(crate) use window::log_implausible_pill_chrome;

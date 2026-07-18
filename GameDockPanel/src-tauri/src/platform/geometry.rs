@@ -353,6 +353,8 @@ pub fn resize_dock_window_for_pill(
             "[dock] reject implausible pill {pill_width:.1}x{pill_height:.1} \
              (icon={icon_size_dip:.0} pos={position:?}) — keep previous frame"
         );
+        #[cfg(windows)]
+        crate::platform::windows::log_implausible_pill_chrome(window, pill_width, pill_height);
         return Ok(false);
     }
 

@@ -815,6 +815,33 @@ function HydratedDockPanel({
           if (rect.width < 1 || rect.height < 1) break;
 
           const iconSizePx = iconSizeAnimated.get();
+          const implausibleHorizontalPill =
+            IS_WINDOWS &&
+            !orientation.isVertical &&
+            rect.width > 0 &&
+            rect.width < rect.height;
+
+          if (implausibleHorizontalPill) {
+            console.warn(
+              `[dock] Windows geometry: Top/Bottom pill taller than wide ` +
+                `(${rect.width.toFixed(1)}x${rect.height.toFixed(1)}) — skip resize/sync`,
+              {
+                phase: "pre-resize",
+                orientation: orientation.position,
+                pillClassName: orientation.pillClassName,
+                rect: {
+                  x: rect.x,
+                  y: rect.y,
+                  width: rect.width,
+                  height: rect.height,
+                  top: rect.top,
+                  left: rect.left,
+                },
+              },
+            );
+            break;
+          }
+
           try {
             await invoke("resize_dock_window", {
               pillWidth: rect.width,
@@ -840,15 +867,40 @@ function HydratedDockPanel({
             `[dock] geometry sync: pill=${aligned.width.toFixed(1)}x${aligned.height.toFixed(1)} ` +
               `at=(${aligned.x.toFixed(1)},${aligned.y.toFixed(1)}) icon=${iconSizePx.toFixed(1)} win=${IS_WINDOWS}`,
           );
-          try {
-            await invoke("sync_vibrancy_pill", {
-              x: aligned.x,
-              y: aligned.y,
-              width: aligned.width,
-              height: aligned.height,
-            });
-          } catch (error: unknown) {
-            console.error("[dock] sync_vibrancy_pill failed:", error);
+          if (
+            IS_WINDOWS &&
+            !orientation.isVertical &&
+            aligned.width > 0 &&
+            aligned.width < aligned.height
+          ) {
+            console.warn(
+              `[dock] Windows geometry: Top/Bottom pill taller than wide ` +
+                `(${aligned.width.toFixed(1)}x${aligned.height.toFixed(1)}) — skip sync_vibrancy`,
+              {
+                phase: "post-resize",
+                orientation: orientation.position,
+                pillClassName: orientation.pillClassName,
+                rect: {
+                  x: aligned.x,
+                  y: aligned.y,
+                  width: aligned.width,
+                  height: aligned.height,
+                  top: aligned.top,
+                  left: aligned.left,
+                },
+              },
+            );
+          } else {
+            try {
+              await invoke("sync_vibrancy_pill", {
+                x: aligned.x,
+                y: aligned.y,
+                width: aligned.width,
+                height: aligned.height,
+              });
+            } catch (error: unknown) {
+              console.error("[dock] sync_vibrancy_pill failed:", error);
+            }
           }
 
           if (!syncPending) break;
@@ -918,7 +970,7 @@ function HydratedDockPanel({
       }
       observer.disconnect();
     };
-  }, [items, iconSizeAnimated, orientation.position]);
+  }, [items, iconSizeAnimated, orientation.position, orientation.isVertical, orientation.pillClassName]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

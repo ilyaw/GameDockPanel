@@ -22,7 +22,11 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, GWL_STYLE};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+};
 
 use crate::commands::apps::{AppsState, MenuOverlayState};
 use crate::commands::settings::{DockPosition, DockWindowLayer};
@@ -61,6 +65,11 @@ pub struct WindowsBackdropSnapshot {
     pub sync_vibrancy_calls: u64,
     pub set_rgn_ok_count: u64,
     pub set_rgn_err_count: u64,
+    /// Raw `GWL_STYLE` (hex-friendly u32).
+    pub gwl_style: Option<u32>,
+    pub gwl_exstyle: Option<u32>,
+    /// `outer − inner` size in px — frameless popup should be ~(0, 0).
+    pub chrome_delta_px: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -110,12 +119,184 @@ fn last_pill_client_rect() -> Option<PillClientRect> {
         .and_then(|guard| *guard)
 }
 
+fn read_gwl_styles(window: &WebviewWindow) -> Option<(u32, u32)> {
+    let hwnd = window.hwnd().ok()?;
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    Some((style, exstyle))
+}
+
+fn chrome_delta_px(window: &WebviewWindow) -> Option<(i32, i32)> {
+    let inner = window.inner_size().ok()?;
+    let outer = window.outer_size().ok()?;
+    Some((
+        outer.width as i32 - inner.width as i32,
+        outer.height as i32 - inner.height as i32,
+    ))
+}
+
+fn style_flag_bits(style: u32) -> String {
+    format!(
+        "CAPTION={} SYSMENU={} POPUP={} VISIBLE={} CLIPSIBLINGS={} CLIPCHILDREN={}",
+        u8::from((style & WS_CAPTION.0) == WS_CAPTION.0),
+        u8::from((style & WS_SYSMENU.0) != 0),
+        u8::from((style & WS_POPUP.0) != 0),
+        u8::from((style & WS_VISIBLE.0) != 0),
+        u8::from((style & WS_CLIPSIBLINGS.0) != 0),
+        u8::from((style & WS_CLIPCHILDREN.0) != 0),
+    )
+}
+
+fn log_chrome_state(phase: &str, window: &WebviewWindow) {
+    let styles = read_gwl_styles(window);
+    let delta = chrome_delta_px(window);
+    match (styles, delta) {
+        (Some((style, exstyle)), Some((dw, dh))) => {
+            log::info!(
+                "[win-backdrop] chrome {phase}: STYLE=0x{style:08x} EXSTYLE=0x{exstyle:08x} \
+                 {} chrome_delta=({dw},{dh})",
+                style_flag_bits(style),
+            );
+        }
+        (Some((style, exstyle)), None) => {
+            log::info!(
+                "[win-backdrop] chrome {phase}: STYLE=0x{style:08x} EXSTYLE=0x{exstyle:08x} \
+                 {} chrome_delta=?",
+                style_flag_bits(style),
+            );
+        }
+        _ => log::warn!("[win-backdrop] chrome {phase}: unable to read HWND styles"),
+    }
+}
+
+/// Extra context when DOM reports an implausible pill (e.g. 40×91 capsule).
+pub(crate) fn log_implausible_pill_chrome(window: &WebviewWindow, width: f64, height: f64) {
+    let stored = {
+        let state = window.state::<AppsState>();
+        let w = *state
+            .pill_width_dip
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let h = *state
+            .pill_height_dip
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        (w, h)
+    };
+    let inner = window
+        .inner_size()
+        .ok()
+        .map(|s| format!("{}x{}", s.width, s.height))
+        .unwrap_or_else(|| "?".into());
+    let outer = window
+        .outer_size()
+        .ok()
+        .map(|s| format!("{}x{}", s.width, s.height))
+        .unwrap_or_else(|| "?".into());
+    let style = read_gwl_styles(window)
+        .map(|(s, _)| format!("0x{s:08x}"))
+        .unwrap_or_else(|| "?".into());
+    let delta = chrome_delta_px(window)
+        .map(|(dw, dh)| format!("({dw},{dh})"))
+        .unwrap_or_else(|| "?".into());
+    log::warn!(
+        "[win-backdrop] implausible pill context: reported={width:.1}x{height:.1} \
+         stored_pill={:.1}x{:.1} inner={inner} outer={outer} GWL_STYLE={style} chrome_delta={delta}",
+        stored.0,
+        stored.1,
+    );
+}
+
+/// Rewrite overlapped caption chrome to a frameless `WS_POPUP` shell.
+///
+/// Do **not** strip down to `WS_CLIPSIBLINGS` alone (`0x04000000`) — that
+/// collapses the client and the next DOM measure reports a ~40×91 capsule.
+///
+/// Returns `Ok(true)` when style bits were rewritten, `Ok(false)` when already
+/// a caption-free popup.
+fn rewrite_frameless_popup_style(window: &WebviewWindow) -> Result<bool, String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+    let has_caption = (style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0;
+    let is_popup = (style & WS_POPUP.0) != 0;
+    if !has_caption && is_popup {
+        log::info!(
+            "[win-backdrop] chrome rewrite skipped (already POPUP, no caption): STYLE=0x{style:08x}"
+        );
+        return Ok(false);
+    }
+
+    let desired = WS_POPUP.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0 | (style & WS_VISIBLE.0);
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, desired as isize) };
+    if previous == 0 && style != 0 {
+        let gle = last_win32_error();
+        if gle != 0 {
+            return Err(format!(
+                "SetWindowLongPtrW(GWL_STYLE) failed gle={gle} was=0x{style:08x} desired=0x{desired:08x}"
+            ));
+        }
+    }
+    if let Err(err) = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    } {
+        log::warn!("[win-backdrop] SetWindowPos(FRAMECHANGED) after style rewrite: {err}");
+    }
+
+    let after = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+    let after_caption =
+        (after & WS_CAPTION.0) == WS_CAPTION.0 || (after & WS_SYSMENU.0) != 0;
+    let after_popup = (after & WS_POPUP.0) != 0;
+    log::info!(
+        "[win-backdrop] chrome rewritten → STYLE=0x{after:08x} {} (was 0x{style:08x})",
+        style_flag_bits(after),
+    );
+    if after_caption || !after_popup {
+        return Err(format!(
+            "frameless popup rewrite did not stick: STYLE=0x{after:08x} {} desired=0x{desired:08x}",
+            style_flag_bits(after),
+        ));
+    }
+    Ok(true)
+}
+
+/// Re-apply intended inner size/position after NC chrome changes so client
+/// metrics match the dock formula (NOSIZE+FRAMECHANGED can inflate inner).
+fn reapply_dock_frame_after_chrome(
+    window: &WebviewWindow,
+    window_width: f64,
+    window_height: f64,
+    position: DockPosition,
+) -> Result<(), String> {
+    let resized = apply_dock_window_frame(window, window_width, window_height, position)?;
+    if let Some((dw, dh)) = chrome_delta_px(window) {
+        log::info!(
+            "[win-backdrop] frame reapplied after chrome: target={window_width:.1}x{window_height:.1} \
+             resized={resized} chrome_delta=({dw},{dh})"
+        );
+    } else {
+        log::info!(
+            "[win-backdrop] frame reapplied after chrome: target={window_width:.1}x{window_height:.1} \
+             resized={resized}"
+        );
+    }
+    Ok(())
+}
+
 /// Support snapshot for diagnostics clipboard / log correlation.
 pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnapshot {
     let scale = window.scale_factor().ok();
     let inner = window.inner_size().ok().map(|s| (s.width, s.height));
     let outer = window.outer_size().ok().map(|s| (s.width, s.height));
     let outer_pos = window.outer_position().ok().map(|p| (p.x, p.y));
+    let styles = read_gwl_styles(window);
     let stored_pill = {
         let state = window.state::<AppsState>();
         let w = *state
@@ -152,6 +333,9 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         sync_vibrancy_calls: SYNC_VIBRANCY_CALLS.load(Ordering::Relaxed),
         set_rgn_ok_count: SET_RGN_OK.load(Ordering::Relaxed),
         set_rgn_err_count: SET_RGN_ERR.load(Ordering::Relaxed),
+        gwl_style: styles.map(|(s, _)| s),
+        gwl_exstyle: styles.map(|(_, e)| e),
+        chrome_delta_px: chrome_delta_px(window),
     }
 }
 
@@ -307,11 +491,20 @@ fn clear_dock_window_title(window: &WebviewWindow) {
     }
 }
 
-/// Frameless + transparent via Tauri APIs only. Do **not** manually strip
-/// `GWL_STYLE` caption bits — leaving only `WS_CLIPSIBLINGS` (seen in the
-/// field as `0x04000000`) collapses the client/webview and the next DOM
-/// measure reports a ~40×91 "capsule" with a ghost close button.
-fn ensure_frameless_dock_chrome(window: &WebviewWindow) -> Result<(), String> {
+/// Frameless dock chrome: Tauri decorations off, then rewrite Win32 style to
+/// `WS_POPUP|CLIPSIBLINGS|CLIPCHILDREN` when caption bits remain (Tao often
+/// leaves `0x04CB0000` after `set_decorations(false)`).
+///
+/// Always re-applies `window_width`×`window_height` afterward — removing NC
+/// chrome with `SWP_NOSIZE` can inflate the client past the dock formula.
+fn ensure_frameless_dock_chrome(
+    window: &WebviewWindow,
+    window_width: f64,
+    window_height: f64,
+    position: DockPosition,
+) -> Result<(), String> {
+    log_chrome_state("pre", window);
+
     if let Err(err) = window.set_decorations(false) {
         log::warn!("[win-backdrop] set_decorations(false) failed: {err}");
     }
@@ -321,10 +514,18 @@ fn ensure_frameless_dock_chrome(window: &WebviewWindow) -> Result<(), String> {
     clear_dock_window_title(window);
     assert_transparent_webview_bg(window, true);
 
-    if let Ok(hwnd) = window.hwnd() {
-        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
-        log::info!("[win-backdrop] GWL_STYLE=0x{style:08x} (read-only; no SetWindowLong)");
-    }
+    log_chrome_state("post set_decorations", window);
+    let rewritten = rewrite_frameless_popup_style(window)?;
+    // Re-frame whether or not we rewrote — set_decorations alone can change NC.
+    reapply_dock_frame_after_chrome(window, window_width, window_height, position)?;
+    log_chrome_state(
+        if rewritten {
+            "post rewrite+frame"
+        } else {
+            "post frame (no rewrite)"
+        },
+        window,
+    );
 
     match tauri::webview_version() {
         Ok(v) => {
@@ -347,10 +548,31 @@ fn ensure_frameless_dock_chrome(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-/// Light re-assert after first map — title + transparent bg only (no style rewrite).
-fn reassert_dock_chrome_after_show(window: &WebviewWindow) {
+/// Re-assert frameless popup after first map / Mica — styles can drift on show.
+/// If style changes, re-size the frame and refresh the pill region.
+fn reassert_dock_chrome_after_show(
+    window: &WebviewWindow,
+    window_width: f64,
+    window_height: f64,
+    position: DockPosition,
+) {
     clear_dock_window_title(window);
     assert_transparent_webview_bg(window, true);
+    match rewrite_frameless_popup_style(window) {
+        Ok(true) => {
+            if let Err(err) =
+                reapply_dock_frame_after_chrome(window, window_width, window_height, position)
+            {
+                log::warn!("[win-backdrop] frame reapply after show failed: {err}");
+            }
+            if let Err(err) = refresh_windows_backdrop(window) {
+                log::warn!("[win-backdrop] region refresh after show chrome failed: {err}");
+            }
+        }
+        Ok(false) => {}
+        Err(err) => log::warn!("[win-backdrop] chrome rewrite after show failed: {err}"),
+    }
+    log_chrome_state("after show", window);
 }
 
 fn apply_dock_mica(window: &WebviewWindow) -> Result<(), String> {
@@ -544,9 +766,16 @@ fn set_window_rgn_to_pill(
         return Err(format!("SetWindowRgn(pill) failed gle={gle}"));
     }
     SET_RGN_OK.fetch_add(1, Ordering::Relaxed);
+    let style = read_gwl_styles(window)
+        .map(|(s, _)| format!("0x{s:08x}"))
+        .unwrap_or_else(|| "?".into());
+    let delta = chrome_delta_px(window)
+        .map(|(dw, dh)| format!("({dw},{dh})"))
+        .unwrap_or_else(|| "?".into());
     log::info!(
         "[win-backdrop] SetWindowRgn ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
-         px=({left},{top})-({right},{bottom}) diameter={diameter} scale={scale:.2} ok#={}",
+         px=({left},{top})-({right},{bottom}) diameter={diameter} scale={scale:.2} \
+         STYLE={style} chrome_delta={delta} ok#={}",
         SET_RGN_OK.load(Ordering::Relaxed)
     );
     Ok(())
@@ -607,7 +836,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
 
     // Frameless + transparent before Mica/show — strips residual caption bits
     // and logs WebView2 version for ghost-titlebar triage.
-    ensure_frameless_dock_chrome(&window)?;
+    ensure_frameless_dock_chrome(&window, window_width, window_height, position)?;
 
     let layer = {
         let state = app.state::<crate::commands::settings::SettingsState>();
@@ -640,8 +869,8 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     start_dock_input(window.clone());
 
     window.show().map_err(|e| e.to_string())?;
-    // Title + transparent bg only — do not rewrite Win32 styles after Mica.
-    reassert_dock_chrome_after_show(&window);
+    // Re-assert popup chrome after show/Mica — caption bits can return.
+    reassert_dock_chrome_after_show(&window, window_width, window_height, position);
     log::info!(
         "[win-backdrop] setup_dock_window: window shown snapshot={:?}",
         windows_backdrop_snapshot(&window)
@@ -714,6 +943,7 @@ pub fn sync_vibrancy_pill_from_web(
             "[win-backdrop] sync_vibrancy skipped implausible pill \
              dip=({x:.1},{y:.1} {width:.1}x{height:.1}) icon={icon_size_dip} pos={position:?}"
         );
+        log_implausible_pill_chrome(window, width, height);
         return Ok(());
     }
 
