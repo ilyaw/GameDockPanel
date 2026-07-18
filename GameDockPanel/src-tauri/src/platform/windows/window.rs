@@ -1,12 +1,11 @@
-//! Windows dock window setup, geometry, DWM corners, and Mica backdrop.
+//! Windows dock window setup, geometry, DWM corners, and transparent backdrop.
 //!
-//! Mica applies to the full HWND. To match macOS (blur only under the CSS
-//! pill), we clip the window with `SetWindowRgn` to the measured rounded
-//! pill — otherwise glow-bleed / magnify margins show as a dark Mica
-//! "shell" outside the RGB frame. Region is cleared while hovered or a
-//! context-menu overlay is open; Mica is dropped and DWM stays
-//! `DONOTROUND` so expanded margins stay transparent (not a dark rounded
-//! HWND shell).
+//! Win11 system Mica paints the full HWND and does not reliably respect a
+//! GDI `SetWindowRgn` clip — that left dark corners outside the CSS/RGB
+//! pill. We never apply Mica; tint is CSS (`bg-black/40`) over a transparent
+//! WebView2. Idle still clips the HWND to the rounded pill as shape
+//! insurance; hover/menu clear the region and keep `DONOTROUND` so expanded
+//! margins stay transparent (not a dark rounded HWND shell).
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -70,6 +69,8 @@ pub struct WindowsBackdropSnapshot {
     pub gwl_exstyle: Option<u32>,
     /// `outer − inner` size in px — frameless popup should be ~(0, 0).
     pub chrome_delta_px: Option<(i32, i32)>,
+    /// Always `false` — Mica is disabled (dark full-HWND shell outside RGB).
+    pub mica_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -86,8 +87,8 @@ static SYNC_VIBRANCY_CALLS: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_OK: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_ERR: AtomicU64 = AtomicU64::new(0);
 /// When true, HWND region is cleared so magnify / tooltip / pending menu
-/// can paint outside the CSS pill. Idle dock keeps a pill clip so Mica
-/// does not show as a dark shell outside the RGB frame.
+/// can paint outside the CSS pill. Idle dock keeps a pill-shaped clip as
+/// shape insurance over the transparent WebView2 surface.
 static REGION_RELAXED: AtomicBool = AtomicBool::new(false);
 /// Held from context-menu pre-open until overlay teardown so the click-through
 /// poller cannot re-apply a pill clip while the menu is mounted but
@@ -336,6 +337,7 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         gwl_style: styles.map(|(s, _)| s),
         gwl_exstyle: styles.map(|(_, e)| e),
         chrome_delta_px: chrome_delta_px(window),
+        mica_enabled: false,
     }
 }
 
@@ -347,7 +349,7 @@ fn menu_blocks_pill_clip(window: &WebviewWindow) -> bool {
 ///
 /// `relaxed = true` (hover / pre-menu): full HWND so magnify, tooltips, and
 /// context menus are not clipped. `relaxed = false` (idle): clip to the CSS
-/// pill so Mica does not paint a dark shell outside the RGB frame.
+/// pill (shape insurance; tint is CSS, not Mica).
 ///
 /// `menu_hold = Some(true)` before mounting a context menu; `Some(false)` when
 /// the menu fully closes. While hold/overlay is active, requests to tighten
@@ -436,10 +438,10 @@ pub fn clear_dock_menu_region_hold(window: &WebviewWindow) -> Result<(), String>
     sync_pill_window_rgn(window)
 }
 
-/// Re-applies backdrop for the current clip mode after any native resize.
-/// Idle → Mica + pill region; hover/menu → clear Mica + full HWND.
+/// Re-applies region clip for the current mode after any native resize.
+/// Idle → pill region (no Mica); hover/menu → full HWND.
 pub fn refresh_windows_backdrop(window: &WebviewWindow) -> Result<(), String> {
-    log::info!("[win-backdrop] refresh: sync region/mica for current mode");
+    log::info!("[win-backdrop] refresh: sync region for current mode (mica off)");
     sync_pill_window_rgn(window)
 }
 
@@ -449,7 +451,7 @@ fn set_dwm_corner_preference(
 ) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     // Only DONOTROUND is used — DWMWCP_ROUND on a full HWND paints a dark
-    // rounded shell in hover/menu margins after Mica is cleared.
+    // rounded shell in hover/menu margins.
     let label = if preference == DWMWCP_DONOTROUND {
         "DONOTROUND"
     } else {
@@ -513,6 +515,11 @@ fn ensure_frameless_dock_chrome(
     }
     clear_dock_window_title(window);
     assert_transparent_webview_bg(window, true);
+    // Drop any system backdrop before first paint — Mica leaves dark corners
+    // outside the CSS/RGB pill even when SetWindowRgn is applied.
+    if let Err(err) = clear_dock_mica(window) {
+        log::warn!("[win-backdrop] clear_mica during chrome setup: {err}");
+    }
 
     log_chrome_state("post set_decorations", window);
     let rewritten = rewrite_frameless_popup_style(window)?;
@@ -548,7 +555,7 @@ fn ensure_frameless_dock_chrome(
     Ok(())
 }
 
-/// Re-assert frameless popup after first map / Mica — styles can drift on show.
+/// Re-assert frameless popup after first map — styles can drift on show.
 /// If style changes, re-size the frame and refresh the pill region.
 fn reassert_dock_chrome_after_show(
     window: &WebviewWindow,
@@ -575,31 +582,14 @@ fn reassert_dock_chrome_after_show(
     log_chrome_state("after show", window);
 }
 
-fn apply_dock_mica(window: &WebviewWindow) -> Result<(), String> {
-    use window_vibrancy::apply_mica;
-
-    // Always-dark, like macOS HudWindow — not system semantic Mica.
-    match apply_mica(window, Some(true)) {
-        Ok(()) => {
-            log::info!("[win-backdrop] apply_mica(dark=true) ok");
-            Ok(())
-        }
-        Err(e) => {
-            log::error!("[win-backdrop] apply_mica failed: {e}");
-            Err(e.to_string())
-        }
-    }
-}
-
-/// Drop Mica while the HWND is larger than the CSS pill (hover / menu).
-/// Otherwise DWM paints a gray shell in the magnify/menu margins. The pill
-/// keeps its CSS tint; idle re-applies Mica under the pill-shaped region.
+/// Ensure system backdrop is off. Win11 Mica paints the full HWND and does
+/// not clip under a custom 28px CSS/RGB pill — dark corners outside the ring.
 fn clear_dock_mica(window: &WebviewWindow) -> Result<(), String> {
     use window_vibrancy::clear_mica;
 
     match clear_mica(window) {
         Ok(()) => {
-            log::info!("[win-backdrop] clear_mica ok (region relaxed)");
+            log::info!("[win-backdrop] clear_mica ok (mica disabled)");
             Ok(())
         }
         Err(e) => {
@@ -618,10 +608,9 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
     guard.is_active()
 }
 
-/// Clears the custom region so the full HWND (incl. menu overlay) is visible,
-/// and removes Mica so expanded margins stay transparent (no gray shell).
+/// Clears the custom region so the full HWND (incl. menu overlay) is visible.
+/// Also re-asserts no Mica so expanded margins stay transparent.
 fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
-    // Clear backdrop first — otherwise a frame of full-HWND Mica can flash.
     if let Err(err) = clear_dock_mica(window) {
         log::warn!("[win-backdrop] clear_mica before region clear: {err}");
     }
@@ -690,8 +679,8 @@ fn resolve_pill_client_rect(window: &WebviewWindow) -> Result<PillClientRect, St
     fallback_pill_client_rect(window, width, height)
 }
 
-/// Clips HWND (+ Mica) to the rounded CSS pill. Cleared while a menu overlay
-/// is open, menu-hold is set, or the region is relaxed (hover / magnify / tooltip).
+/// Clips HWND to the rounded CSS pill. Cleared while a menu overlay is open,
+/// menu-hold is set, or the region is relaxed (hover / magnify / tooltip).
 fn sync_pill_window_rgn(window: &WebviewWindow) -> Result<(), String> {
     if menu_blocks_pill_clip(window) || REGION_RELAXED.load(Ordering::SeqCst) {
         log::info!(
@@ -741,8 +730,11 @@ fn set_window_rgn_to_pill(
     // Own rounding via region — disable DWM's ~8px OS round so it doesn't
     // paint a secondary dark shell outside the 28px CSS pill.
     set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
-    // Idle path: Mica only under the pill-shaped region (re-apply after hover clear).
-    apply_dock_mica(window)?;
+    // Never Mica: DWM backdrop ignores GDI region and fills dark corners
+    // outside the RGB ring. Tint is CSS over transparent WebView2.
+    if let Err(err) = clear_dock_mica(window) {
+        log::warn!("[win-backdrop] clear_mica before pill region: {err}");
+    }
 
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let hrgn = unsafe { CreateRoundRectRgn(left, top, right, bottom, diameter, diameter) };
@@ -834,7 +826,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         );
     }
 
-    // Frameless + transparent before Mica/show — strips residual caption bits
+    // Frameless + transparent before region/show — strips residual caption bits
     // and logs WebView2 version for ghost-titlebar triage.
     ensure_frameless_dock_chrome(&window, window_width, window_height, position)?;
 
@@ -869,7 +861,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     start_dock_input(window.clone());
 
     window.show().map_err(|e| e.to_string())?;
-    // Re-assert popup chrome after show/Mica — caption bits can return.
+    // Re-assert popup chrome after show — caption bits can return.
     reassert_dock_chrome_after_show(&window, window_width, window_height, position);
     log::info!(
         "[win-backdrop] setup_dock_window: window shown snapshot={:?}",
@@ -957,7 +949,7 @@ pub fn sync_vibrancy_pill_from_web(
         // coords we just stored (usually still correct for edge-anchored).
         refresh_windows_backdrop(window)?;
     } else {
-        // Idle → Mica + pill clip; hover/menu → clear Mica + full HWND.
+        // Idle → pill clip (no Mica); hover/menu → clear region + full HWND.
         sync_pill_window_rgn(window)?;
     }
 

@@ -1015,7 +1015,7 @@ function HydratedDockPanel({
 
   const activePanelEffect = getPanelEffectPreset(settings.panelEffect);
   const panelEffectClasses = PANEL_EFFECT_CLASSES[activePanelEffect.id];
-  /** HUD overlays stay macOS-only — on Windows they fight Mica/tint readability. */
+  /** HUD overlays stay macOS-only — on Windows they fight CSS tint readability. */
   const showPanelEffect =
     !IS_WINDOWS &&
     settings.panelEffectEnabled &&
