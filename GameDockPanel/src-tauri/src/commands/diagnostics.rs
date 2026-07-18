@@ -169,7 +169,7 @@ fn read_recent_log_lines(log_dir: &Option<String>, max_lines: usize) -> Vec<Stri
             p.is_file()
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.contains("gamedockpanel") && n.ends_with(".log"))
+                    .is_some_and(|n| n.starts_with("gamedockpanel") && n.ends_with(".log"))
         })
         .collect();
 

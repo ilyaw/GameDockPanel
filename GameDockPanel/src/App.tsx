@@ -1,3 +1,4 @@
+import { useLayoutEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { DockPanel } from "./components/DockPanel";
 import { SettingsWindow } from "./components/SettingsWindow";
@@ -13,6 +14,13 @@ import { SettingsWindow } from "./components/SettingsWindow";
  */
 function App() {
   const label = getCurrentWebviewWindow().label;
+
+  // Keep dock HTML title blank-ish so WebView2 ghost chrome has nothing to paint;
+  // settings gets a real caption string for the framed OS title bar.
+  useLayoutEffect(() => {
+    document.title = label === "settings" ? "GameDockPanel — Настройки" : " ";
+  }, [label]);
+
   return label === "settings" ? (
     <SettingsWindow />
   ) : (

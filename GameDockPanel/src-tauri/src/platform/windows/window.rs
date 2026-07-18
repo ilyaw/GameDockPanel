@@ -3,21 +3,29 @@
 //! Mica applies to the full HWND. To match macOS (blur only under the CSS
 //! pill), we clip the window with `SetWindowRgn` to the measured rounded
 //! pill — otherwise glow-bleed / magnify margins show as a dark Mica
-//! "shell" outside the RGB frame. Region is cleared while a context-menu
-//! overlay is open so menus outside the pill are not clipped.
+//! "shell" outside the RGB frame. Region is cleared while hovered or a
+//! context-menu overlay is open; Mica is dropped and DWM stays
+//! `DONOTROUND` so expanded margins stay transparent (not a dark rounded
+//! HWND shell).
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use tauri::utils::config::Color;
 use tauri::{App, Manager, WebviewWindow};
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
 };
 
 use crate::commands::apps::{AppsState, MenuOverlayState};
@@ -80,6 +88,9 @@ static REGION_RELAXED: AtomicBool = AtomicBool::new(false);
 /// poller cannot re-apply a pill clip while the menu is mounted but
 /// `menu_overlay` state has not landed yet (or cursor left the rest hit-box).
 static MENU_REGION_HOLD: AtomicBool = AtomicBool::new(false);
+/// WebView2 DefaultBackgroundColor already forced to alpha=0 — avoid
+/// re-setting it on every hover `clear_window_rgn` (expensive / flicker).
+static TRANSPARENT_BG_APPLIED: AtomicBool = AtomicBool::new(false);
 
 fn last_win32_error() -> u32 {
     unsafe { GetLastError().0 }
@@ -257,10 +268,10 @@ fn set_dwm_corner_preference(
     preference: DWM_WINDOW_CORNER_PREFERENCE,
 ) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    // Only DONOTROUND is used — DWMWCP_ROUND on a full HWND paints a dark
+    // rounded shell in hover/menu margins after Mica is cleared.
     let label = if preference == DWMWCP_DONOTROUND {
         "DONOTROUND"
-    } else if preference == DWMWCP_ROUND {
-        "ROUND"
     } else {
         "OTHER"
     };
@@ -279,6 +290,90 @@ fn set_dwm_corner_preference(
     }
     log::debug!("[win-backdrop] DWM corner preference={label}");
     Ok(())
+}
+
+fn assert_transparent_webview_bg(window: &WebviewWindow, force: bool) {
+    if !force && TRANSPARENT_BG_APPLIED.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Err(err) = window.set_background_color(Some(Color(0, 0, 0, 0))) {
+        log::warn!("[win-backdrop] set_background_color(transparent) failed: {err}");
+        return;
+    }
+    TRANSPARENT_BG_APPLIED.store(true, Ordering::Relaxed);
+}
+
+/// Space title — empty `""` lets WebView2 fall back to HTML `<title>` for the
+/// ghost titlebar text on buggy runtimes.
+fn clear_dock_window_title(window: &WebviewWindow) {
+    if let Err(err) = window.set_title(" ") {
+        log::warn!("[win-backdrop] set_title(\" \") failed: {err}");
+    }
+}
+
+/// Full frameless pass — call once before Mica/show. Do not re-run after Mica:
+/// `set_decorations` / `SetWindowLong`+`FRAMECHANGED` can fight the backdrop.
+fn ensure_frameless_dock_chrome(window: &WebviewWindow) -> Result<(), String> {
+    if let Err(err) = window.set_decorations(false) {
+        log::warn!("[win-backdrop] set_decorations(false) failed: {err}");
+    }
+    if let Err(err) = window.set_shadow(false) {
+        log::warn!("[win-backdrop] set_shadow(false) failed: {err}");
+    }
+    clear_dock_window_title(window);
+    assert_transparent_webview_bg(window, true);
+
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let caption_bits =
+            WS_CAPTION.0 | WS_SYSMENU.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0;
+        log::info!("[win-backdrop] GWL_STYLE=0x{style:08x}");
+        let cleaned = style & !caption_bits;
+        if cleaned != style {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, cleaned as isize);
+            if let Err(err) = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            ) {
+                log::warn!("[win-backdrop] SetWindowPos(FRAMECHANGED) failed: {err}");
+            }
+            log::info!("[win-backdrop] stripped caption bits → GWL_STYLE=0x{cleaned:08x}");
+        }
+    }
+
+    match tauri::webview_version() {
+        Ok(v) => {
+            log::info!("[win-backdrop] webview2_version={v}");
+            // WebView2 144.x painted a ghost titlebar on transparent frameless
+            // windows; fixed in ~146+. Log a hint when the runtime looks old.
+            if let Some(major) = v
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                if major > 0 && major < 146 {
+                    log::warn!(
+                        "[win-backdrop] WebView2 {v} may show a ghost titlebar on transparent \
+                         frameless windows — update the Evergreen WebView2 Runtime"
+                    );
+                }
+            }
+        }
+        Err(e) => log::warn!("[win-backdrop] webview2_version unavailable: {e}"),
+    }
+    Ok(())
+}
+
+/// Light re-assert after first map — title + transparent bg only (no style rewrite).
+fn reassert_dock_chrome_after_show(window: &WebviewWindow) {
+    clear_dock_window_title(window);
+    assert_transparent_webview_bg(window, true);
 }
 
 fn apply_dock_mica(window: &WebviewWindow) -> Result<(), String> {
@@ -331,6 +426,8 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
     if let Err(err) = clear_dock_mica(window) {
         log::warn!("[win-backdrop] clear_mica before region clear: {err}");
     }
+    // Transparent bg is set at setup; only re-apply once if somehow unset.
+    assert_transparent_webview_bg(window, false);
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     // None removes the region; system does not take ownership.
     let ok = unsafe { SetWindowRgn(hwnd, None, true) };
@@ -339,8 +436,11 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
         log::error!("[win-backdrop] SetWindowRgn(clear) failed gle={gle}");
         return Err(format!("SetWindowRgn(clear) failed gle={gle}"));
     }
-    log::info!("[win-backdrop] region cleared + mica off (hover/menu margins transparent)");
-    set_dwm_corner_preference(window, DWMWCP_ROUND)?;
+    // Never DWMWCP_ROUND here — it paints a dark rounded HWND shell.
+    set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
+    log::info!(
+        "[win-backdrop] region cleared + mica off + DONOTROUND (hover/menu margins transparent)"
+    );
     Ok(())
 }
 
@@ -528,6 +628,10 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         );
     }
 
+    // Frameless + transparent before Mica/show — strips residual caption bits
+    // and logs WebView2 version for ghost-titlebar triage.
+    ensure_frameless_dock_chrome(&window)?;
+
     let layer = {
         let state = app.state::<crate::commands::settings::SettingsState>();
         let guard = state
@@ -559,6 +663,8 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     start_dock_input(window.clone());
 
     window.show().map_err(|e| e.to_string())?;
+    // Title + transparent bg only — do not rewrite Win32 styles after Mica.
+    reassert_dock_chrome_after_show(&window);
     log::info!(
         "[win-backdrop] setup_dock_window: window shown snapshot={:?}",
         windows_backdrop_snapshot(&window)

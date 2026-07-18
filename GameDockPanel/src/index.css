@@ -6,9 +6,8 @@
 @custom-variant group-hover (&:is(:where(.group):hover *));
 
 /*
-  Dock webview only — the settings window uses an opaque shell under
-  `.settings-window`. Scoped here so WebView2 does not composite an empty
-  `#root` as a white rectangle behind the framed settings window.
+  Default shell is opaque so the settings webview does not flash the desktop
+  before React mounts. Dock opts into transparency via `:has(.dock-root)`.
 */
 html,
 body,
@@ -17,11 +16,13 @@ body,
   overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
+  background: #09090b;
 }
 
+html:has(.dock-root),
+html:has(.dock-root) body,
+html:has(.dock-root) #root,
 .dock-root {
-  height: 100%;
-  /* Required for WebView2 + Win11 Mica: transparent compositor layer under the pill. */
   background: transparent !important;
 }
 
