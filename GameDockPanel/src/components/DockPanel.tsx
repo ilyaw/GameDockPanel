@@ -1198,7 +1198,9 @@ function HydratedDockPanel({
         {showBorderRing && (
           <div
             aria-hidden
-            className="dock-border-clip pointer-events-none absolute inset-0 z-[1]"
+            className={`dock-border-clip pointer-events-none absolute z-[1] ${
+              IS_WINDOWS ? "" : "inset-0"
+            }`}
           >
             <div
               aria-hidden

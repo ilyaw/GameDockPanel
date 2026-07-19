@@ -11,7 +11,9 @@
 //!    on the top-level HWND too.
 //! 3. **Rainbow / jagged RGB ring** — a hard GDI edge can alias the CSS
 //!    border AA. Prefer that over opaque corner blobs; keep diameter matched
-//!    to `PILL_CORNER_RADIUS_DIP` (slightly aggressive +2 px).
+//!    to `PILL_CORNER_RADIUS_DIP` (slightly aggressive +2 px). Frontend insets
+//!    `.dock-border-clip` by 2px on Windows (`dock-root--windows`) so stroke
+//!    AA sits inside the hard clip instead of getting stair-stepped.
 //!
 //! Durable approach:
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes

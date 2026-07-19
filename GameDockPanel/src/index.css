@@ -265,10 +265,24 @@ img {
   conic-gradient bleed (WKWebView draws a duplicate cap if overflow is visible).
 */
 .dock-border-clip {
+  inset: 0;
   border-radius: var(--dock-pill-radius, 28px);
   clip-path: inset(0 round var(--dock-pill-radius, 28px));
   overflow: hidden;
   contain: paint;
+}
+
+/*
+  Windows + SetWindowRgn: GDI round-rects have no antialiasing, so a ring
+  painted flush to `inset: 0` gets its stroke AA chopped into stair-steps
+  ("обрывистый" rainbow). Pull the ring 2px inside the hard clip — the dark
+  pill fill still seals the outer edge; pale HWND crescents stay masked.
+  (DockPanel omits Tailwind `inset-0` on Windows so this rule wins cleanly.)
+*/
+.dock-root--windows .dock-border-clip {
+  inset: 2px;
+  border-radius: calc(var(--dock-pill-radius, 28px) - 2px);
+  clip-path: inset(0 round calc(var(--dock-pill-radius, 28px) - 2px));
 }
 
 /*
@@ -301,11 +315,12 @@ img {
     conic-gradient(
       from var(--gradient-angle),
       transparent 0deg,
-      transparent 302deg,
-      var(--dock-glow-1) 318deg,
-      var(--dock-glow-3) 332deg,
-      #fff 344deg,
-      var(--dock-glow-5) 352deg,
+      transparent 298deg,
+      color-mix(in srgb, var(--dock-glow-1) 55%, transparent) 310deg,
+      var(--dock-glow-1) 322deg,
+      var(--dock-glow-3) 334deg,
+      color-mix(in srgb, var(--dock-glow-5) 85%, white) 346deg,
+      var(--dock-glow-5) 354deg,
       transparent 360deg
     ),
     linear-gradient(var(--dock-border-dim), var(--dock-border-dim));
@@ -423,10 +438,10 @@ img {
     conic-gradient(
       from var(--dock-scan-angle),
       transparent 0deg,
-      transparent 308deg,
-      color-mix(in srgb, var(--dock-glow-1) 50%, transparent) 322deg,
-      color-mix(in srgb, var(--dock-glow-1) 85%, transparent) 336deg,
-      #fff 346deg,
+      transparent 304deg,
+      color-mix(in srgb, var(--dock-glow-1) 45%, transparent) 318deg,
+      color-mix(in srgb, var(--dock-glow-1) 80%, transparent) 332deg,
+      color-mix(in srgb, var(--dock-glow-1) 80%, white) 344deg,
       color-mix(in srgb, var(--dock-glow-3) 90%, transparent) 354deg,
       transparent 360deg
     ),
@@ -482,11 +497,11 @@ img {
     conic-gradient(
       from var(--gradient-angle),
       transparent 0deg,
-      transparent 304deg,
-      color-mix(in srgb, var(--dock-glow-2) 55%, transparent) 318deg,
-      var(--dock-glow-2) 332deg,
-      var(--dock-glow-3) 342deg,
-      #fff 350deg,
+      transparent 300deg,
+      color-mix(in srgb, var(--dock-glow-2) 50%, transparent) 314deg,
+      var(--dock-glow-2) 328deg,
+      var(--dock-glow-3) 340deg,
+      color-mix(in srgb, var(--dock-glow-3) 75%, white) 350deg,
       transparent 360deg
     ),
     linear-gradient(var(--dock-border-dim), var(--dock-border-dim));

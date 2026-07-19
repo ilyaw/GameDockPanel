@@ -2,6 +2,7 @@ import { useLayoutEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { DockPanel } from "./components/DockPanel";
 import { SettingsWindow } from "./components/SettingsWindow";
+import { IS_WINDOWS } from "./lib/windowsDock";
 
 /**
  * Both the dock and the settings window load this exact same bundle
@@ -24,7 +25,7 @@ function App() {
   return label === "settings" ? (
     <SettingsWindow />
   ) : (
-    <div className="dock-root h-full">
+    <div className={`dock-root h-full${IS_WINDOWS ? " dock-root--windows" : ""}`}>
       <DockPanel />
     </div>
   );
