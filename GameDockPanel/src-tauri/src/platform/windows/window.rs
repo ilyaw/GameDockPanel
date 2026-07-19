@@ -9,12 +9,13 @@
 //!    fills the full HWND; CSS radius does not punch alpha. DirectComposition
 //!    often ignores GDI regions on the *child* alone, so the clip must land
 //!    on the top-level HWND too.
-//! 3. **Rainbow / jagged RGB ring** — a hard GDI edge can alias the CSS
-//!    border AA. Prefer that over opaque corner blobs; keep diameter matched
-//!    to `PILL_CORNER_RADIUS_DIP` (no +2 squaring bias). Frontend insets
-//!    `.dock-border-clip` by 3px on Windows (`dock-root--windows`) and skips
-//!    `filter: drop-shadow` so stroke AA sits inside the hard clip instead of
-//!    getting stair-stepped into a "low HD" look.
+//! 3. **Rainbow / jagged RGB ring** — a hard GDI edge aliases CSS border AA.
+//!    Prefer that over opaque corner blobs; keep diameter matched to
+//!    `PILL_CORNER_RADIUS_DIP` (no +2 squaring bias). Frontend pulls BOTH
+//!    the dark fill and the RGB ring inside the RoundRect by the same
+//!    `--dock-win-edge-inset` (never border-only — that left a dark fringe
+//!    outside the rainbow) and soft-masks the paint edge so stair-steps hit
+//!    low-alpha pixels. Skip `filter: drop-shadow` on Windows borders.
 //!
 //! Durable approach:
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
@@ -1586,10 +1587,11 @@ fn set_window_rgn_to_pill(
     height_dip: f64,
 ) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    // Inflate 1 physical px so CSS border-radius AA fringe is not chopped by
-    // the hard GDI edge (SetWindowRgn has no antialiasing). Pale crescents in
-    // that 1px band stay negligible; the RGB ring is inset further in CSS.
-    const RGN_AA_INFLATE_PX: i32 = 1;
+    // Do not inflate past the client with negative region coords — Windows
+    // clamps them, so the hard GDI edge still sits on the HWND silhouette.
+    // Soft AA room comes from the frontend `--dock-win-edge-inset` paint
+    // inset + soft mask inside this RoundRect (see index.css).
+    const RGN_AA_INFLATE_PX: i32 = 0;
     let left = (x_dip * scale).round() as i32 - RGN_AA_INFLATE_PX;
     let top = (y_dip * scale).round() as i32 - RGN_AA_INFLATE_PX;
     // CreateRoundRectRgn right/bottom are exclusive.

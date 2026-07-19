@@ -273,17 +273,69 @@ img {
 }
 
 /*
-  Windows + SetWindowRgn: GDI round-rects have no antialiasing, so a ring
-  painted flush to `inset: 0` gets its stroke AA chopped into stair-steps
-  ("обрывистый" / "low HD" look). Pull the ring inside the hard clip — the
-  dark pill fill still seals the outer edge; pale HWND crescents stay masked.
-  3px leaves room for stroke AA that SetWindowRgn would otherwise stair-step.
-  (DockPanel omits Tailwind `inset-0` on Windows so this rule wins cleanly.)
+  Windows + SetWindowRgn: GDI round-rects have no AA, so paint flush to the
+  HWND edge gets stair-stepped. Pull BOTH the dark fill and the RGB ring
+  inside the hard clip by the same inset (never border-only — that left a
+  dark fringe outside the rainbow). Soft edge masks fade ~1.5px so residual
+  GDI knife edges hit low-alpha pixels. DockPanel omits Tailwind `inset-0`
+  on these layers on Windows so these rules win cleanly.
 */
+.dock-root--windows {
+  --dock-win-edge-inset: 2px;
+  --dock-win-paint-radius: calc(
+    var(--dock-pill-radius, 28px) - var(--dock-win-edge-inset)
+  );
+}
+
+.dock-root--windows .dock-pill-decor-clip,
 .dock-root--windows .dock-border-clip {
-  inset: 3px;
-  border-radius: calc(var(--dock-pill-radius, 28px) - 3px);
-  clip-path: inset(0 round calc(var(--dock-pill-radius, 28px) - 3px));
+  inset: var(--dock-win-edge-inset);
+  border-radius: var(--dock-win-paint-radius);
+  clip-path: inset(0 round var(--dock-win-paint-radius));
+  -webkit-mask-image:
+    linear-gradient(
+      to top,
+      transparent 0,
+      #000 1.5px,
+      #000 calc(100% - 1.5px),
+      transparent
+    ),
+    linear-gradient(
+      to left,
+      transparent 0,
+      #000 1.5px,
+      #000 calc(100% - 1.5px),
+      transparent
+    );
+  -webkit-mask-composite: source-in;
+  mask-image:
+    linear-gradient(
+      to top,
+      transparent 0,
+      #000 1.5px,
+      #000 calc(100% - 1.5px),
+      transparent
+    ),
+    linear-gradient(
+      to left,
+      transparent 0,
+      #000 1.5px,
+      #000 calc(100% - 1.5px),
+      transparent
+    );
+  mask-composite: intersect;
+}
+
+/*
+  Nested decor clip (bg-flow wrapper) is already inside the outer inset —
+  keep it flush to its parent so blur children fill the paint footprint.
+*/
+.dock-root--windows .dock-pill-decor-clip .dock-pill-decor-clip {
+  inset: 0;
+  border-radius: inherit;
+  clip-path: inset(0 round var(--dock-win-paint-radius));
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 
 /*

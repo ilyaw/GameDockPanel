@@ -1186,7 +1186,11 @@ function HydratedDockPanel({
       >
         <div
           aria-hidden
-          className="dock-pill-decor-clip pointer-events-none absolute inset-0 z-0"
+          className={`dock-pill-decor-clip pointer-events-none absolute z-0 ${
+            // Windows: omit inset-0 so shared --dock-win-edge-inset in
+            // index.css pulls fill + RGB inside SetWindowRgn together.
+            IS_WINDOWS ? "" : "inset-0"
+          }`}
         >
           {settings.backgroundAnimationEnabled && !fileDragOver && (
             // Isolated clip wrapper: `filter: blur()` on an oversized layer
