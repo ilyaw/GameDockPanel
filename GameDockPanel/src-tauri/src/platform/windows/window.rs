@@ -222,10 +222,13 @@ where
     F: FnOnce(&WebviewWindow) -> Result<T, String> + Send + 'static,
 {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let window = window.clone();
+    // Separate clones: `run_on_main_thread` borrows the receiver while the
+    // closure must own (and move) the handle it passes to `f`.
+    let window_for_task = window.clone();
     window
+        .clone()
         .run_on_main_thread(move || {
-            let _ = tx.send(f(&window));
+            let _ = tx.send(f(&window_for_task));
         })
         .map_err(|e| e.to_string())?;
     rx.recv()
