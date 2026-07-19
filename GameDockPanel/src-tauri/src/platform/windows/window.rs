@@ -6,17 +6,21 @@
 //! 1. **Ghost titlebar / pale blue bar** — Tao restores `WS_CAPTION` and/or
 //!    drops `WS_EX_LAYERED`; WebView2 then paints an opaque NC strip.
 //! 2. **Pale rectangular corners** outside CSS `rounded-[28px]` — WebView2
-//!    fills the full child HWND; CSS radius does not punch alpha.
-//! 3. **Rainbow / jagged RGB ring** — `SetWindowRgn` on the *top-level*
-//!    layered HWND hard-clips DWM compositing and chops CSS border AA.
+//!    fills the full HWND; CSS radius does not punch alpha. DirectComposition
+//!    often ignores GDI regions on the *child* alone, so the clip must land
+//!    on the top-level HWND too.
+//! 3. **Rainbow / jagged RGB ring** — a hard GDI edge can alias the CSS
+//!    border AA. Prefer that over opaque corner blobs; keep diameter matched
+//!    to `PILL_CORNER_RADIUS_DIP` (slightly aggressive +2 px).
 //!
-//! Durable approach (no more on/off thrash):
+//! Durable approach:
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
 //!   re-assert popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`.
 //! - Never Mica (`DONOTROUND` only).
-//! - Idle `CreateRoundRectRgn` on the **WebView2 child** HWND (not the
-//!   parent) so opaque corners are clipped without rainbow parent edges.
-//! - Hover/menu clear that child region for magnify/tooltip.
+//! - Always `SetWindowRgn` = `RoundRect(pill) OR (client DIFF pill AABB)` on
+//!   **both** the top-level HWND and the WebView2 child. Corner crescents
+//!   stay clipped; magnify/menu margins (outside the pill AABB) stay visible.
+//!   Never fully clear the region on hover/menu — that re-opens pale corners.
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,7 +34,8 @@ use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ, HRGN,
+    RGN_DIFF, RGN_ERROR, RGN_OR,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -125,7 +130,7 @@ static REGION_RELAXED: AtomicBool = AtomicBool::new(false);
 /// `menu_overlay` state has not landed yet (or cursor left the rest hit-box).
 static MENU_REGION_HOLD: AtomicBool = AtomicBool::new(false);
 /// WebView2 DefaultBackgroundColor already forced to alpha=0 — avoid
-/// re-setting it on every hover `clear_window_rgn` (expensive / flicker).
+/// re-setting it on every hover region sync (expensive / flicker).
 static TRANSPARENT_BG_APPLIED: AtomicBool = AtomicBool::new(false);
 /// Dock HWND subclass installed (WM_NCCALCSIZE / chrome repair).
 static DOCK_SUBCLASS_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -880,13 +885,13 @@ fn menu_blocks_pill_clip(window: &WebviewWindow) -> bool {
 
 /// Clears or restores the pill-shaped `SetWindowRgn` clip.
 ///
-/// `relaxed = true` (hover / pre-menu): full HWND so magnify, tooltips, and
-/// context menus are not clipped. `relaxed = false` (idle): clip to the CSS
-/// pill (hides opaque WebView2 corners outside `rounded-[28px]`).
+/// `relaxed = true` (hover / pre-menu): expand HWND for magnify/tooltip, but
+/// keep the combined pill∪margins region so corner crescents stay clipped.
+/// `relaxed = false` (idle): shrink HWND and clip to the CSS pill.
 ///
 /// `menu_hold = Some(true)` before mounting a context menu; `Some(false)` when
-/// the menu fully closes. While hold/overlay is active, requests to tighten
-/// the clip (poller leave, leaveDock) are deferred so the menu is never cut.
+/// the menu fully closes. While hold/overlay is active, requests to shrink the
+/// hover frame are deferred so the menu is never cut.
 pub fn set_dock_region_relaxed(
     window: &WebviewWindow,
     relaxed: bool,
@@ -900,7 +905,8 @@ pub fn set_dock_region_relaxed(
     }
 
     if !relaxed && menu_blocks_pill_clip(window) {
-        // Remember "not hovered" for after the menu closes, but keep HWND clear.
+        // Remember "not hovered" for after the menu closes, but keep the
+        // expanded frame + combined region while the menu is up.
         REGION_RELAXED.store(false, Ordering::SeqCst);
         set_expand_for_hover(true);
         log::info!(
@@ -908,18 +914,15 @@ pub fn set_dock_region_relaxed(
             MENU_REGION_HOLD.load(Ordering::Relaxed),
             menu_overlay_active(window)
         );
-        return clear_window_rgn(window);
+        return sync_pill_window_rgn(window);
     }
 
     let prev = REGION_RELAXED.swap(relaxed, Ordering::SeqCst);
     set_expand_for_hover(relaxed || menu_blocks_pill_clip(window));
 
     if prev == relaxed {
-        // Still re-apply: a concurrent sync may have restored the pill clip
+        // Still re-apply: a concurrent sync may have restored a stale clip
         // while the flag was already true (menu race / geometry sync).
-        if relaxed || menu_blocks_pill_clip(window) {
-            return clear_window_rgn(window);
-        }
         return sync_pill_window_rgn(window);
     }
     log::info!("[win-backdrop] region_relaxed {prev} → {relaxed}");
@@ -953,15 +956,11 @@ pub fn set_dock_region_relaxed(
         }
     }
 
-    if relaxed || menu_blocks_pill_clip(window) {
-        clear_window_rgn(window)
-    } else {
-        sync_pill_window_rgn(window)
-    }
+    sync_pill_window_rgn(window)
 }
 
 /// Clears `MENU_REGION_HOLD` without touching hover `REGION_RELAXED`, then
-/// re-syncs the clip (pill if idle, clear if still hovered).
+/// re-syncs the combined pill∪margins clip.
 pub fn clear_dock_menu_region_hold(window: &WebviewWindow) -> Result<(), String> {
     let prev = MENU_REGION_HOLD.swap(false, Ordering::SeqCst);
     if prev {
@@ -972,7 +971,7 @@ pub fn clear_dock_menu_region_hold(window: &WebviewWindow) -> Result<(), String>
 }
 
 /// Re-applies region clip for the current mode after any native resize.
-/// Idle → pill region (no Mica); hover/menu → full HWND.
+/// Always pill∪margins (never a full clear — that reopens pale corners).
 pub fn refresh_windows_backdrop(window: &WebviewWindow) -> Result<(), String> {
     log::info!("[win-backdrop] refresh: sync region for current mode (mica off)");
     sync_pill_window_rgn(window)
@@ -1231,36 +1230,173 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
     guard.is_active()
 }
 
-/// Clears the custom region so the full HWND (incl. menu overlay) is visible.
-/// Also re-asserts no Mica so expanded margins stay transparent.
-fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
+/// Builds `RoundRect(pill) OR (client DIFF pill AABB)` in physical pixels.
+///
+/// Corner crescents inside the pill's axis-aligned box but outside the CSS
+/// curve stay clipped; everything outside that box (magnify / tooltip / menu
+/// margins) stays visible. When the HWND equals the pill AABB the DIFF is
+/// empty and the result is just the round rect.
+unsafe fn create_dock_clip_hrgn(
+    pill_left: i32,
+    pill_top: i32,
+    pill_right: i32,
+    pill_bottom: i32,
+    diameter: i32,
+    client_w: i32,
+    client_h: i32,
+) -> Result<HRGN, String> {
+    unsafe fn delete_hrgn(hrgn: HRGN) {
+        if !hrgn.is_invalid() {
+            let _ = DeleteObject(HGDIOBJ(hrgn.0));
+        }
+    }
+
+    let pill_round =
+        unsafe { CreateRoundRectRgn(pill_left, pill_top, pill_right, pill_bottom, diameter, diameter) };
+    if pill_round.is_invalid() {
+        return Err(format!(
+            "CreateRoundRectRgn failed gle={}",
+            last_win32_error()
+        ));
+    }
+
+    let win = unsafe { CreateRectRgn(0, 0, client_w, client_h) };
+    let aabb = unsafe { CreateRectRgn(pill_left, pill_top, pill_right, pill_bottom) };
+    let outside = unsafe { CreateRectRgn(0, 0, 0, 0) };
+    let result = unsafe { CreateRectRgn(0, 0, 0, 0) };
+
+    if win.is_invalid() || aabb.is_invalid() || outside.is_invalid() || result.is_invalid() {
+        unsafe {
+            delete_hrgn(pill_round);
+            delete_hrgn(win);
+            delete_hrgn(aabb);
+            delete_hrgn(outside);
+            delete_hrgn(result);
+        }
+        return Err(format!(
+            "CreateRectRgn failed gle={}",
+            last_win32_error()
+        ));
+    }
+
+    let diff = unsafe { CombineRgn(Some(outside), Some(win), Some(aabb), RGN_DIFF) };
+    if diff == RGN_ERROR {
+        unsafe {
+            delete_hrgn(pill_round);
+            delete_hrgn(win);
+            delete_hrgn(aabb);
+            delete_hrgn(outside);
+            delete_hrgn(result);
+        }
+        return Err(format!("CombineRgn(DIFF) failed gle={}", last_win32_error()));
+    }
+    let combined = unsafe { CombineRgn(Some(result), Some(pill_round), Some(outside), RGN_OR) };
+    if combined == RGN_ERROR {
+        unsafe {
+            delete_hrgn(pill_round);
+            delete_hrgn(win);
+            delete_hrgn(aabb);
+            delete_hrgn(outside);
+            delete_hrgn(result);
+        }
+        return Err(format!("CombineRgn(OR) failed gle={}", last_win32_error()));
+    }
+
+    // Temps only — `result` is owned by the caller / SetWindowRgn.
+    unsafe {
+        delete_hrgn(pill_round);
+        delete_hrgn(win);
+        delete_hrgn(aabb);
+        delete_hrgn(outside);
+    }
+    Ok(result)
+}
+
+fn apply_hrgn_to_hwnd(hwnd: HWND, hrgn: HRGN, label: &str) -> Result<(), String> {
+    let ok = unsafe { SetWindowRgn(hwnd, Some(hrgn), true) };
+    if ok == 0 {
+        let gle = last_win32_error();
+        let _ = unsafe { DeleteObject(HGDIOBJ(hrgn.0)) };
+        SET_RGN_ERR.fetch_add(1, Ordering::Relaxed);
+        log::error!("[win-backdrop] SetWindowRgn({label}) failed gle={gle}");
+        return Err(format!("SetWindowRgn({label}) failed gle={gle}"));
+    }
+    Ok(())
+}
+
+/// Applies the combined dock clip to the top-level HWND (DComp-visible) and
+/// the WebView2 child. Never clears on hover/menu — see module docs.
+fn set_window_rgn_to_pill(
+    window: &WebviewWindow,
+    x_dip: f64,
+    y_dip: f64,
+    width_dip: f64,
+    height_dip: f64,
+) -> Result<(), String> {
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let left = (x_dip * scale).round() as i32;
+    let top = (y_dip * scale).round() as i32;
+    // CreateRoundRectRgn right/bottom are exclusive.
+    let right = ((x_dip + width_dip) * scale).round() as i32;
+    let bottom = ((y_dip + height_dip) * scale).round() as i32;
+    // +2 px: GDI round-rect is slightly squarer than CSS border-radius; bias
+    // toward clipping opaque corner pixels rather than leaving a pale crescent.
+    // Clamp so diameter never exceeds the shorter pill axis (exclusive rect).
+    let diameter = {
+        let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32 + 2;
+        let max_fit = (right - left).min(bottom - top).max(2);
+        nominal.min(max_fit)
+    };
+
+    if right <= left || bottom <= top {
+        log::warn!(
+            "[win-backdrop] SetWindowRgn skipped empty rect dip=({x_dip:.1},{y_dip:.1} \
+             {width_dip:.1}x{height_dip:.1}) px=({left},{top})-({right},{bottom}) scale={scale:.2}"
+        );
+        return Ok(());
+    }
+
+    set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
+    if let Err(err) = clear_dock_mica(window) {
+        log::warn!("[win-backdrop] clear_mica before pill region: {err}");
+    }
     if style_needs_frameless_rewrite(window) {
-        log::warn!("[win-backdrop] caption creep before region clear — reasserting POPUP");
+        log::warn!("[win-backdrop] caption creep before SetWindowRgn — reasserting POPUP");
         reassert_frameless_chrome_keep_size(window);
     }
 
-    // Transparent bg is set at setup; only re-apply once if somehow unset.
-    assert_transparent_webview_bg(window, false);
-
-    with_dock_main_thread(window, |window| {
-        if let Err(err) = clear_dock_mica(window) {
-            log::warn!("[win-backdrop] clear_mica before region clear: {err}");
-        }
+    with_dock_main_thread(window, move |window| {
         let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let inner = window.inner_size().map_err(|e| e.to_string())?;
+        let client_w = inner.width as i32;
+        let client_h = inner.height as i32;
         let clip = webview_clip_hwnd(hwnd);
-        // Also clear top-level in case an older build left a parent region.
-        let _ = unsafe { SetWindowRgn(hwnd, None, true) };
-        let ok = unsafe { SetWindowRgn(clip, None, true) };
-        if ok == 0 {
-            let gle = last_win32_error();
-            log::error!("[win-backdrop] SetWindowRgn(clear) failed gle={gle}");
-            return Err(format!("SetWindowRgn(clear) failed gle={gle}"));
+
+        let hrgn_parent = unsafe {
+            create_dock_clip_hrgn(left, top, right, bottom, diameter, client_w, client_h)
+        }?;
+        // Parent first — DirectComposition respects the top-level region.
+        apply_hrgn_to_hwnd(hwnd, hrgn_parent, "toplevel")?;
+
+        if clip != hwnd {
+            let hrgn_child = unsafe {
+                create_dock_clip_hrgn(left, top, right, bottom, diameter, client_w, client_h)
+            }?;
+            apply_hrgn_to_hwnd(clip, hrgn_child, "webview child")?;
         }
-        // Never DWMWCP_ROUND here — it paints a dark rounded HWND shell.
-        set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
+
+        SET_RGN_OK.fetch_add(1, Ordering::Relaxed);
+        let style = read_gwl_styles(window)
+            .map(|(s, _)| format!("0x{s:08x}"))
+            .unwrap_or_else(|| "?".into());
+        let delta = chrome_delta_px(window)
+            .map(|(dw, dh)| format!("({dw},{dh})"))
+            .unwrap_or_else(|| "?".into());
         log::info!(
-            "[win-backdrop] region cleared on webview child + mica off + DONOTROUND \
-             (hover/menu margins transparent)"
+            "[win-backdrop] SetWindowRgn(pill∪margins) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
+             px=({left},{top})-({right},{bottom}) diameter={diameter} client={client_w}x{client_h} \
+             scale={scale:.2} STYLE={style} chrome_delta={delta} ok#={}",
+            SET_RGN_OK.load(Ordering::Relaxed)
         );
         Ok(())
     })
@@ -1294,11 +1430,27 @@ fn fallback_pill_client_rect(
 }
 
 fn resolve_pill_client_rect(window: &WebviewWindow) -> Result<PillClientRect, String> {
-    if let Some(rect) = last_pill_client_rect() {
+    // Prefer latest measured size, but always re-derive origin from the current
+    // client + dock position. After hover expand/shrink, LAST_PILL's x/y can
+    // lag one frame behind the new HWND (still centered for the *previous*
+    // width) — clipping with that stale AABB leaves pale strips beside the
+    // real pill and fails to mask its corner crescents.
+    let (width, height) = if let Some(rect) = last_pill_client_rect() {
         if rect.width >= 1.0 && rect.height >= 1.0 {
-            return Ok(rect);
+            (rect.width, rect.height)
+        } else {
+            stored_pill_size(window)?
         }
+    } else {
+        stored_pill_size(window)?
+    };
+    if width < 1.0 || height < 1.0 {
+        return Err("pill dims not ready for window region".to_string());
     }
+    fallback_pill_client_rect(window, width, height)
+}
+
+fn stored_pill_size(window: &WebviewWindow) -> Result<(f64, f64), String> {
     let state = window.state::<AppsState>();
     let width = *state
         .pill_width_dip
@@ -1308,25 +1460,11 @@ fn resolve_pill_client_rect(window: &WebviewWindow) -> Result<PillClientRect, St
         .pill_height_dip
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if width < 1.0 || height < 1.0 {
-        return Err("pill dims not ready for window region".to_string());
-    }
-    fallback_pill_client_rect(window, width, height)
+    Ok((width, height))
 }
 
-/// Clips HWND to the rounded CSS pill. Cleared while a menu overlay is open,
-/// menu-hold is set, or the region is relaxed (hover / magnify / tooltip).
+/// Re-applies the combined pill∪margins clip from the latest measured pill.
 fn sync_pill_window_rgn(window: &WebviewWindow) -> Result<(), String> {
-    if menu_blocks_pill_clip(window) || REGION_RELAXED.load(Ordering::SeqCst) {
-        log::info!(
-            "[win-backdrop] sync_rgn: clear (menu={} hold={} relaxed={})",
-            menu_overlay_active(window),
-            MENU_REGION_HOLD.load(Ordering::Relaxed),
-            REGION_RELAXED.load(Ordering::Relaxed)
-        );
-        return clear_window_rgn(window);
-    }
-
     let rect = match resolve_pill_client_rect(window) {
         Ok(rect) => rect,
         Err(err) => {
@@ -1336,96 +1474,16 @@ fn sync_pill_window_rgn(window: &WebviewWindow) -> Result<(), String> {
         }
     };
 
-    set_window_rgn_to_pill(window, rect.x, rect.y, rect.width, rect.height)
-}
-
-fn set_window_rgn_to_pill(
-    window: &WebviewWindow,
-    x_dip: f64,
-    y_dip: f64,
-    width_dip: f64,
-    height_dip: f64,
-) -> Result<(), String> {
-    let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let left = (x_dip * scale).round() as i32;
-    let top = (y_dip * scale).round() as i32;
-    // CreateRoundRectRgn right/bottom are exclusive.
-    let right = ((x_dip + width_dip) * scale).round() as i32;
-    let bottom = ((y_dip + height_dip) * scale).round() as i32;
-    let diameter = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
-
-    if right <= left || bottom <= top {
-        log::warn!(
-            "[win-backdrop] SetWindowRgn skipped empty rect dip=({x_dip:.1},{y_dip:.1} \
-             {width_dip:.1}x{height_dip:.1}) px=({left},{top})-({right},{bottom}) scale={scale:.2}"
-        );
-        return Ok(());
-    }
-
-    // Own rounding via region — disable DWM's ~8px OS round so it doesn't
-    // paint a secondary dark shell outside the 28px CSS pill.
-    set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
-    // Never Mica: DWM backdrop ignores GDI region and fills dark corners
-    // outside the RGB ring. Tint is CSS over transparent WebView2.
-    if let Err(err) = clear_dock_mica(window) {
-        log::warn!("[win-backdrop] clear_mica before pill region: {err}");
-    }
-    // Hover/`set_size` can restore caption chrome; kill it before clipping.
-    if style_needs_frameless_rewrite(window) {
-        log::warn!("[win-backdrop] caption creep before SetWindowRgn — reasserting POPUP");
-        reassert_frameless_chrome_keep_size(window);
-    }
-
-    with_dock_main_thread(window, move |window| {
-        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-        // Clip the WebView2 *child* — parent SetWindowRgn causes rainbow AA on
-        // layered DWM compositing. Child clip hides opaque corner pixels.
-        let clip = webview_clip_hwnd(hwnd);
-        if clip == hwnd {
-            log::warn!(
-                "[win-backdrop] SetWindowRgn skipped — no WebView2 child yet \
-                 (parent clip causes rainbow AA)"
-            );
-            return Ok(());
-        }
-        // Drop any stale parent region from older builds.
-        let _ = unsafe { SetWindowRgn(hwnd, None, false) };
-
-        let hrgn = unsafe { CreateRoundRectRgn(left, top, right, bottom, diameter, diameter) };
-        if hrgn.is_invalid() {
-            let gle = last_win32_error();
-            SET_RGN_ERR.fetch_add(1, Ordering::Relaxed);
-            log::error!("[win-backdrop] CreateRoundRectRgn failed gle={gle}");
-            return Err(format!("CreateRoundRectRgn failed gle={gle}"));
-        }
-        // On success SetWindowRgn takes ownership of hrgn — do not DeleteObject.
-        let ok = unsafe { SetWindowRgn(clip, Some(hrgn), true) };
-        if ok == 0 {
-            let gle = last_win32_error();
-            let _ = unsafe { DeleteObject(HGDIOBJ(hrgn.0)) };
-            SET_RGN_ERR.fetch_add(1, Ordering::Relaxed);
-            log::error!(
-                "[win-backdrop] SetWindowRgn(webview child) failed gle={gle} \
-                 dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
-                 px=({left},{top})-({right},{bottom}) diameter={diameter} scale={scale:.2}"
-            );
-            return Err(format!("SetWindowRgn(webview child) failed gle={gle}"));
-        }
-        SET_RGN_OK.fetch_add(1, Ordering::Relaxed);
-        let style = read_gwl_styles(window)
-            .map(|(s, _)| format!("0x{s:08x}"))
-            .unwrap_or_else(|| "?".into());
-        let delta = chrome_delta_px(window)
-            .map(|(dw, dh)| format!("({dw},{dh})"))
-            .unwrap_or_else(|| "?".into());
+    if menu_blocks_pill_clip(window) || REGION_RELAXED.load(Ordering::SeqCst) {
         log::info!(
-            "[win-backdrop] SetWindowRgn(webview child) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
-             px=({left},{top})-({right},{bottom}) diameter={diameter} scale={scale:.2} \
-             STYLE={style} chrome_delta={delta} ok#={}",
-            SET_RGN_OK.load(Ordering::Relaxed)
+            "[win-backdrop] sync_rgn: pill∪margins (menu={} hold={} relaxed={})",
+            menu_overlay_active(window),
+            MENU_REGION_HOLD.load(Ordering::Relaxed),
+            REGION_RELAXED.load(Ordering::Relaxed)
         );
-        Ok(())
-    })
+    }
+
+    set_window_rgn_to_pill(window, rect.x, rect.y, rect.width, rect.height)
 }
 
 pub fn apply_dock_window_layer(
