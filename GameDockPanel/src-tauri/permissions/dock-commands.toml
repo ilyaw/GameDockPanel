@@ -21,4 +21,5 @@ commands.allow = [
   "open_settings",
   "get_dock_settings",
   "update_dock_settings",
+  "report_webview_render_metrics",
 ]

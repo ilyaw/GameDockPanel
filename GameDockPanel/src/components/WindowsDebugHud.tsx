@@ -13,6 +13,8 @@ export type WindowsDiagSnapshot = {
   regionRelaxed: boolean;
   menuRegionHold: boolean;
   scaleFactor: number | null;
+  frontendDevicePixelRatio: number | null;
+  frontendViewportCss: [number, number] | null;
   innerSizePx: [number, number] | null;
   outerSizePx: [number, number] | null;
   outerPositionPx: [number, number] | null;
@@ -36,6 +38,8 @@ export type WindowsDiagSnapshot = {
   captionCreepCount: number;
   healthIssues: string[];
   healthy: boolean;
+  /** Advisory — Tauri scale vs JS DPR; does not mean chrome is broken. */
+  dpiMismatch: string | null;
 };
 
 function hexStyle(n: number | null): string {
@@ -118,6 +122,9 @@ export function WindowsDebugHud({ enabled }: { enabled: boolean }) {
             <p className={bad ? "font-semibold text-red-300" : "font-semibold text-emerald-300"}>
               {snap.healthy ? "HEALTHY" : `BAD: ${snap.healthIssues.join(", ")}`}
             </p>
+            {snap.dpiMismatch && (
+              <p className="font-semibold text-amber-300">DPI_MISMATCH {snap.dpiMismatch}</p>
+            )}
             <p>
               pos={snap.dockPosition} outer={pair(snap.outerSizePx)} @
               {snap.outerPositionPx
@@ -131,7 +138,8 @@ export function WindowsDebugHud({ enabled }: { enabled: boolean }) {
                   ? `${pill.width.toFixed(0)}×${pill.height.toFixed(0)}@(${pill.x.toFixed(0)},${pill.y.toFixed(0)})`
                   : "?"
               }{" "}
-              stored={pair(snap.storedPillDip, 0)} scale={snap.scaleFactor?.toFixed(2) ?? "?"}
+              stored={pair(snap.storedPillDip, 0)} scale={snap.scaleFactor?.toFixed(2) ?? "?"}{" "}
+              dpr={snap.frontendDevicePixelRatio?.toFixed(2) ?? "?"}
             </p>
             <p>
               CAPTION={snap.hasCaption ? "1" : "0"} POPUP={snap.isPopup ? "1" : "0"} LAYERED=

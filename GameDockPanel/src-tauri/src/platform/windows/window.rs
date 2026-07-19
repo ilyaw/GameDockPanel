@@ -11,9 +11,10 @@
 //!    on the top-level HWND too.
 //! 3. **Rainbow / jagged RGB ring** — a hard GDI edge can alias the CSS
 //!    border AA. Prefer that over opaque corner blobs; keep diameter matched
-//!    to `PILL_CORNER_RADIUS_DIP` (slightly aggressive +2 px). Frontend insets
-//!    `.dock-border-clip` by 2px on Windows (`dock-root--windows`) so stroke
-//!    AA sits inside the hard clip instead of getting stair-stepped.
+//!    to `PILL_CORNER_RADIUS_DIP` (no +2 squaring bias). Frontend insets
+//!    `.dock-border-clip` by 3px on Windows (`dock-root--windows`) and skips
+//!    `filter: drop-shadow` so stroke AA sits inside the hard clip instead of
+//!    getting stair-stepped into a "low HD" look.
 //!
 //! Durable approach:
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
@@ -76,6 +77,10 @@ pub struct WindowsBackdropSnapshot {
     pub region_relaxed: bool,
     pub menu_region_hold: bool,
     pub scale_factor: Option<f64>,
+    /// From JS `window.devicePixelRatio` (via `report_webview_render_metrics`).
+    pub frontend_device_pixel_ratio: Option<f64>,
+    /// From JS `window.innerWidth` × `innerHeight` (CSS px).
+    pub frontend_viewport_css: Option<(f64, f64)>,
     pub inner_size_px: Option<(u32, u32)>,
     pub outer_size_px: Option<(u32, u32)>,
     pub outer_position_px: Option<(i32, i32)>,
@@ -101,9 +106,14 @@ pub struct WindowsBackdropSnapshot {
     pub chrome_repair_count: u64,
     pub layered_restore_count: u64,
     pub caption_creep_count: u64,
-    /// Empty when healthy; otherwise human-readable issue tags.
+    /// Empty when healthy; otherwise human-readable chrome issue tags.
+    /// Advisory DPI signals live in `dpi_mismatch` — never here (would flood
+    /// the unhealthy poller path and paint a false chrome-failure HUD).
     pub health_issues: Vec<String>,
     pub healthy: bool,
+    /// Advisory only: `|tauri_scale − devicePixelRatio| > 0.08`. Does **not**
+    /// affect `healthy` / chrome repair.
+    pub dpi_mismatch: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -115,7 +125,73 @@ pub struct WindowsPillRect {
     pub height: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FrontendRenderMetrics {
+    device_pixel_ratio: f64,
+    viewport_css_w: f64,
+    viewport_css_h: f64,
+}
+
+/// Store WebView JS metrics so `[win-diag]` can flag DPI mismatches.
+/// Logs only when values actually change (hover HWND resize must not spam).
+pub fn store_frontend_render_metrics(
+    device_pixel_ratio: f64,
+    viewport_css_w: f64,
+    viewport_css_h: f64,
+) {
+    if !device_pixel_ratio.is_finite()
+        || device_pixel_ratio <= 0.0
+        || !viewport_css_w.is_finite()
+        || !viewport_css_h.is_finite()
+        || viewport_css_w < 0.0
+        || viewport_css_h < 0.0
+    {
+        log::warn!(
+            "[win-diag] ignoring invalid frontend render metrics \
+             dpr={device_pixel_ratio} viewport={viewport_css_w}x{viewport_css_h}"
+        );
+        return;
+    }
+    let metrics = FrontendRenderMetrics {
+        device_pixel_ratio,
+        viewport_css_w,
+        viewport_css_h,
+    };
+    let changed = {
+        let Ok(mut guard) = FRONTEND_RENDER.lock() else {
+            return;
+        };
+        let changed = match *guard {
+            Some(prev) => {
+                (prev.device_pixel_ratio - metrics.device_pixel_ratio).abs() > 0.01
+                    || (prev.viewport_css_w - metrics.viewport_css_w).abs() > 0.5
+                    || (prev.viewport_css_h - metrics.viewport_css_h).abs() > 0.5
+            }
+            None => true,
+        };
+        if changed {
+            *guard = Some(metrics);
+        }
+        changed
+    };
+    if changed {
+        log::info!(
+            "[win-diag] frontend render dpr={device_pixel_ratio:.3} \
+             viewport_css={viewport_css_w:.1}x{viewport_css_h:.1}"
+        );
+    }
+}
+
+fn frontend_render_metrics() -> Option<FrontendRenderMetrics> {
+    FRONTEND_RENDER
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+}
+
 static LAST_PILL_CLIENT: Mutex<Option<PillClientRect>> = Mutex::new(None);
+/// JS render metrics for DPI blur triage (`devicePixelRatio` vs Tauri scale).
+static FRONTEND_RENDER: Mutex<Option<FrontendRenderMetrics>> = Mutex::new(None);
 static SYNC_VIBRANCY_CALLS: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_OK: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_ERR: AtomicU64 = AtomicU64::new(0);
@@ -161,7 +237,9 @@ fn flush_frame_changed(hwnd: HWND) {
 }
 
 /// WebView2 paints into a child HWND — that is what must be region-clipped.
-/// Clipping the top-level layered window produces the rainbow AA artifact.
+/// Clipping the top-level layered window produces the rainbow AA artifact;
+/// we still clip both because DirectComposition often ignores child-only
+/// regions (pale corner crescents otherwise).
 fn webview_clip_hwnd(toplevel: HWND) -> HWND {
     let Ok(child) = (unsafe { GetWindow(toplevel, GW_CHILD) }) else {
         if let Ok(mut guard) = LAST_CHILD_CLASS.lock() {
@@ -179,9 +257,16 @@ fn webview_clip_hwnd(toplevel: HWND) -> HWND {
     let len = unsafe { GetClassNameW(child, &mut buf) };
     if len > 0 {
         let name = String::from_utf16_lossy(&buf[..len as usize]);
-        log::debug!("[win-backdrop] clip target child class={name}");
+        // Only log on change — diag poller used to spam this every 2s.
+        let mut changed = false;
         if let Ok(mut guard) = LAST_CHILD_CLASS.lock() {
-            *guard = Some(name);
+            if guard.as_deref() != Some(name.as_str()) {
+                *guard = Some(name.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            log::info!("[win-backdrop] clip target child class={name}");
         }
     }
     child
@@ -755,6 +840,16 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         stored_pill,
         outer,
     );
+    let fe = frontend_render_metrics();
+    // Advisory only — must not enter `health_issues` (that path logs every 2s
+    // and paints the chrome-failure HUD red wash).
+    let dpi_mismatch = match (scale, fe) {
+        (Some(sf), Some(m)) if (sf - m.device_pixel_ratio).abs() > 0.08 => Some(format!(
+            "scale={sf:.2} dpr={:.2}",
+            m.device_pixel_ratio
+        )),
+        _ => None,
+    };
     let healthy = health_issues.is_empty();
 
     WindowsBackdropSnapshot {
@@ -763,6 +858,8 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         region_relaxed: REGION_RELAXED.load(Ordering::Relaxed),
         menu_region_hold: MENU_REGION_HOLD.load(Ordering::Relaxed),
         scale_factor: scale,
+        frontend_device_pixel_ratio: fe.map(|m| m.device_pixel_ratio),
+        frontend_viewport_css: fe.map(|m| (m.viewport_css_w, m.viewport_css_h)),
         inner_size_px: inner,
         outer_size_px: outer,
         outer_position_px: outer_pos,
@@ -786,6 +883,7 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         caption_creep_count: CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
         health_issues,
         healthy,
+        dpi_mismatch,
     }
 }
 
@@ -813,6 +911,7 @@ fn start_windows_diag_poller(window: WebviewWindow) {
     std::thread::spawn(move || {
         let mut tick: u64 = 0;
         let mut last_issues: Vec<String> = Vec::new();
+        let mut last_dpi_mismatch: Option<String> = None;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(2000));
             tick = tick.wrapping_add(1);
@@ -840,16 +939,28 @@ fn start_windows_diag_poller(window: WebviewWindow) {
                 }
                 last_issues = snap.health_issues.clone();
             }
+            let dpi_changed = snap.dpi_mismatch != last_dpi_mismatch;
+            if dpi_changed {
+                match &snap.dpi_mismatch {
+                    Some(detail) => log::warn!("[win-diag] DPI_MISMATCH {detail}"),
+                    None if last_dpi_mismatch.is_some() => {
+                        log::info!("[win-diag] DPI_MISMATCH cleared");
+                    }
+                    None => {}
+                }
+                last_dpi_mismatch = snap.dpi_mismatch.clone();
+            }
             // HUD needs a steady stream; unhealthy always logs periodically.
             if overlay || !snap.healthy || tick % 15 == 0 {
                 if overlay || !snap.healthy {
                     log::info!(
-                        "[win-diag] tick={tick} healthy={} issues={:?} pos={} \
+                        "[win-diag] tick={tick} healthy={} issues={:?} dpi_mismatch={:?} pos={} \
                          outer={:?}@{:?} pill_client={:?} stored={:?} \
                          CAPTION={} POPUP={} LAYERED={} TRANSPARENT_EX={} \
                          rgn_ok={} rgn_err={} sync_vib={} relaxed={} hold={}",
                         snap.healthy,
                         snap.health_issues,
+                        snap.dpi_mismatch,
                         snap.dock_position,
                         snap.outer_size_px,
                         snap.outer_position_px,
@@ -866,14 +977,20 @@ fn start_windows_diag_poller(window: WebviewWindow) {
                         snap.menu_region_hold,
                     );
                 } else {
-                    log::debug!(
-                        "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?}",
+                    log::info!(
+                        "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?} \
+                         scale={:?} dpr_js={:?} viewport_css={:?} inner={:?} dpi_mismatch={:?}",
                         snap.outer_size_px,
-                        snap.stored_pill_dip
+                        snap.stored_pill_dip,
+                        snap.scale_factor,
+                        snap.frontend_device_pixel_ratio,
+                        snap.frontend_viewport_css,
+                        snap.inner_size_px,
+                        snap.dpi_mismatch,
                     );
                 }
             }
-            if overlay || issues_changed || !snap.healthy {
+            if overlay || issues_changed || !snap.healthy || dpi_changed {
                 let _ = window.emit("dock-win-diag", &snap);
             }
         }
@@ -1336,16 +1453,19 @@ fn set_window_rgn_to_pill(
     height_dip: f64,
 ) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    let left = (x_dip * scale).round() as i32;
-    let top = (y_dip * scale).round() as i32;
+    // Inflate 1 physical px so CSS border-radius AA fringe is not chopped by
+    // the hard GDI edge (SetWindowRgn has no antialiasing). Pale crescents in
+    // that 1px band stay negligible; the RGB ring is inset further in CSS.
+    const RGN_AA_INFLATE_PX: i32 = 1;
+    let left = (x_dip * scale).round() as i32 - RGN_AA_INFLATE_PX;
+    let top = (y_dip * scale).round() as i32 - RGN_AA_INFLATE_PX;
     // CreateRoundRectRgn right/bottom are exclusive.
-    let right = ((x_dip + width_dip) * scale).round() as i32;
-    let bottom = ((y_dip + height_dip) * scale).round() as i32;
-    // +2 px: GDI round-rect is slightly squarer than CSS border-radius; bias
-    // toward clipping opaque corner pixels rather than leaving a pale crescent.
+    let right = ((x_dip + width_dip) * scale).round() as i32 + RGN_AA_INFLATE_PX;
+    let bottom = ((y_dip + height_dip) * scale).round() as i32 + RGN_AA_INFLATE_PX;
+    // Match CSS radius exactly — a +N squaring bias made corners stair-step more.
     // Clamp so diameter never exceeds the shorter pill axis (exclusive rect).
     let diameter = {
-        let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32 + 2;
+        let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
         let max_fit = (right - left).min(bottom - top).max(2);
         nominal.min(max_fit)
     };

@@ -922,7 +922,7 @@ export function SettingsWindow() {
       <SettingsRow
         title="Диагностика"
         descriptionClassName="max-w-sm"
-        description="Для отладки с другом: 1) «Скопировать диагностику» → вставь JSON в чат 2) «Открыть папку логов» → пришли файл gamedockpanel*.log 3) скрин панели (лучше с оверлеем). На Windows логи: %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs. Ищи строки [win-diag] / [win-backdrop]."
+        description="Для отладки с другом: 1) «Скопировать диагностику» → вставь JSON в чат 2) «Открыть папку логов» → пришли файл gamedockpanel*.log 3) скрин панели (лучше с оверлеем). На Windows логи: %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs. Ищи [win-diag] scale/dpr_js и строку DPI_MISMATCH (advisory, не chrome BAD)."
       >
         <div className="flex flex-col items-end gap-2">
           <div className="flex flex-wrap justify-end gap-2">

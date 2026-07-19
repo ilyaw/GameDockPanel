@@ -16,7 +16,8 @@ pub use icons::resolve_app_icon;
 pub use window::{
     apply_dock_window_layer, clear_dock_menu_region_hold, ensure_window_fits_menu_overlay,
     log_windows_diag_snapshot, set_dock_region_relaxed, setup_dock_window,
-    shrink_dock_window_to_stored_pill, sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
+    shrink_dock_window_to_stored_pill, store_frontend_render_metrics,
+    sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
 };
 pub(crate) use window::{
     log_implausible_pill_chrome, reassert_frameless_chrome_keep_size, set_dock_outer_frame,

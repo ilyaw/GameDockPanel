@@ -275,14 +275,29 @@ img {
 /*
   Windows + SetWindowRgn: GDI round-rects have no antialiasing, so a ring
   painted flush to `inset: 0` gets its stroke AA chopped into stair-steps
-  ("обрывистый" rainbow). Pull the ring 2px inside the hard clip — the dark
-  pill fill still seals the outer edge; pale HWND crescents stay masked.
+  ("обрывистый" / "low HD" look). Pull the ring inside the hard clip — the
+  dark pill fill still seals the outer edge; pale HWND crescents stay masked.
+  3px leaves room for stroke AA that SetWindowRgn would otherwise stair-step.
   (DockPanel omits Tailwind `inset-0` on Windows so this rule wins cleanly.)
 */
 .dock-root--windows .dock-border-clip {
-  inset: 2px;
-  border-radius: calc(var(--dock-pill-radius, 28px) - 2px);
-  clip-path: inset(0 round calc(var(--dock-pill-radius, 28px) - 2px));
+  inset: 3px;
+  border-radius: calc(var(--dock-pill-radius, 28px) - 3px);
+  clip-path: inset(0 round calc(var(--dock-pill-radius, 28px) - 3px));
+}
+
+/*
+  `filter: drop-shadow` forces an offscreen bitmap; combined with SetWindowRgn
+  it re-rasterizes soft and crunchy (the "480p" look on the rainbow). Keep the
+  conic stroke; skip filtered glow on Windows. Also disables neon-pulse
+  brightness on flow-pulse borders — accepted tradeoff vs soft glow.
+*/
+.dock-root--windows .dock-border-spectrum,
+.dock-root--windows .dock-border-pulse,
+.dock-root--windows .dock-border-glitch,
+.dock-root--windows .dock-border-scan-ring,
+.dock-root--windows .dock-border-flow-ring {
+  filter: none !important;
 }
 
 /*

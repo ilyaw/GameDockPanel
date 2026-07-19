@@ -39,8 +39,8 @@ pub use windows::{
     ensure_window_fits_menu_overlay, is_bundle_running, log_windows_diag_snapshot, quit_app,
     refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon, reveal_app_in_finder,
     set_dock_region_relaxed, setup_dock_window, shrink_dock_window_to_stored_pill,
-    start_apps_monitoring, sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
-    zoom_app_above_dock,
+    start_apps_monitoring, store_frontend_render_metrics, sync_vibrancy_pill_from_web,
+    windows_backdrop_snapshot, zoom_app_above_dock,
 };
 
 #[cfg(target_os = "windows")]

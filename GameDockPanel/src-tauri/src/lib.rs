@@ -134,6 +134,7 @@ pub fn run() {
             commands::diagnostics::get_diagnostics,
             commands::diagnostics::open_log_dir,
             commands::diagnostics::log_windows_diag,
+            commands::diagnostics::report_webview_render_metrics,
             #[cfg(debug_assertions)]
             commands::settings::qa_set_border,
         ])

@@ -1,4 +1,5 @@
 import { useLayoutEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { DockPanel } from "./components/DockPanel";
 import { SettingsWindow } from "./components/SettingsWindow";
@@ -20,6 +21,23 @@ function App() {
   // settings gets a real caption string for the framed OS title bar.
   useLayoutEffect(() => {
     document.title = label === "settings" ? "GameDockPanel — Настройки" : " ";
+  }, [label]);
+
+  // Windows: report DPR vs Tauri scale so blurry/"low HD" triage shows in logs.
+  useLayoutEffect(() => {
+    if (!IS_WINDOWS || label !== "main") return;
+    const report = () => {
+      void invoke("report_webview_render_metrics", {
+        devicePixelRatio: window.devicePixelRatio,
+        viewportCssW: window.innerWidth,
+        viewportCssH: window.innerHeight,
+      }).catch((error: unknown) => {
+        console.warn("[dock] report_webview_render_metrics failed:", error);
+      });
+    };
+    report();
+    window.addEventListener("resize", report);
+    return () => window.removeEventListener("resize", report);
   }, [label]);
 
   return label === "settings" ? (
