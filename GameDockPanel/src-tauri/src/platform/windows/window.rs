@@ -213,15 +213,19 @@ pub(crate) fn log_implausible_pill_chrome(window: &WebviewWindow, width: f64, he
 
 /// Run HWND work on Tauri's UI thread. Safe from the click-through poller and
 /// from setup (already-main runs the closure inline — no deadlock).
+///
+/// Clones `window` for the main-thread closure so callers can pass a borrow
+/// without fighting the borrow checker (`&window` + `move || … &window`).
 fn with_dock_main_thread<T, F>(window: &WebviewWindow, f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
+    F: FnOnce(&WebviewWindow) -> Result<T, String> + Send + 'static,
 {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let window = window.clone();
     window
         .run_on_main_thread(move || {
-            let _ = tx.send(f());
+            let _ = tx.send(f(&window));
         })
         .map_err(|e| e.to_string())?;
     rx.recv()
@@ -292,8 +296,9 @@ pub(crate) fn set_dock_click_through(
     window: &WebviewWindow,
     ignore: bool,
 ) -> Result<(), String> {
-    let window = window.clone();
-    with_dock_main_thread(&window, move || set_dock_click_through_impl(&window, ignore))
+    with_dock_main_thread(window, move |window| {
+        set_dock_click_through_impl(window, ignore)
+    })
 }
 
 fn set_dock_outer_frame_impl(
@@ -344,9 +349,8 @@ pub(crate) fn set_dock_outer_frame(
     width_px: i32,
     height_px: i32,
 ) -> Result<(), String> {
-    let window = window.clone();
-    with_dock_main_thread(&window, move || {
-        set_dock_outer_frame_impl(&window, x, y, width_px, height_px)
+    with_dock_main_thread(window, move |window| {
+        set_dock_outer_frame_impl(window, x, y, width_px, height_px)
     })
 }
 
@@ -358,8 +362,7 @@ pub(crate) fn set_dock_outer_frame(
 /// Returns `Ok(true)` when style bits were rewritten, `Ok(false)` when already
 /// a caption-free popup. Always runs on the UI thread.
 fn rewrite_frameless_popup_style(window: &WebviewWindow) -> Result<bool, String> {
-    let window = window.clone();
-    with_dock_main_thread(&window, move || rewrite_frameless_popup_style_impl(&window))
+    with_dock_main_thread(window, rewrite_frameless_popup_style_impl)
 }
 
 fn rewrite_frameless_popup_style_impl(window: &WebviewWindow) -> Result<bool, String> {
@@ -811,9 +814,8 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
         return Ok(());
     }
 
-    let window = window.clone();
-    with_dock_main_thread(&window, move || {
-        if let Err(err) = clear_dock_mica(&window) {
+    with_dock_main_thread(window, |window| {
+        if let Err(err) = clear_dock_mica(window) {
             log::warn!("[win-backdrop] clear_mica before region clear: {err}");
         }
         let hwnd = window.hwnd().map_err(|e| e.to_string())?;
@@ -825,7 +827,7 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
             return Err(format!("SetWindowRgn(clear) failed gle={gle}"));
         }
         // Never DWMWCP_ROUND here — it paints a dark rounded HWND shell.
-        set_dwm_corner_preference(&window, DWMWCP_DONOTROUND)?;
+        set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
         WINDOW_RGN_CLEARED.store(true, Ordering::SeqCst);
         log::info!("[win-backdrop] region cleared + mica off + DONOTROUND (no GDI pill clip)");
         Ok(())

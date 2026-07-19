@@ -83,13 +83,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin({
-            let mut builder = tauri_plugin_log::Builder::new();
+            let builder = tauri_plugin_log::Builder::new();
             #[cfg(debug_assertions)]
-            {
-                builder = builder.target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ));
-            }
+            let builder = builder.target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Stdout,
+            ));
             builder
                 // Debug so [win-backdrop] / geometry details land in release
                 // builds too — friend ships logs for remote triage.
