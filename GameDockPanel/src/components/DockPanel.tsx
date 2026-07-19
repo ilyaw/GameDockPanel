@@ -28,6 +28,7 @@ import {
 import type { DockItem, DockSettings } from "../lib/types";
 import { countDockSeparators, isDockAppItem } from "../lib/types";
 import { IS_WINDOWS, setDockRegionRelaxed } from "../lib/windowsDock";
+import { WindowsDebugHud } from "./WindowsDebugHud";
 
 /** Windows: icon activation goes through WebView2 pointer events (no global hook). */
 // IS_WINDOWS imported from windowsDock — keep comment for dock-input readers.
@@ -867,6 +868,20 @@ function HydratedDockPanel({
             `[dock] geometry sync: pill=${aligned.width.toFixed(1)}x${aligned.height.toFixed(1)} ` +
               `at=(${aligned.x.toFixed(1)},${aligned.y.toFixed(1)}) icon=${iconSizePx.toFixed(1)} win=${IS_WINDOWS}`,
           );
+          if (IS_WINDOWS) {
+            console.info("[dock][win-diag] geometry", {
+              pill: {
+                x: aligned.x,
+                y: aligned.y,
+                w: aligned.width,
+                h: aligned.height,
+              },
+              position: orientation.position,
+              iconSizePx,
+              wrapper: orientation.wrapperClassName,
+              viewport: { w: window.innerWidth, h: window.innerHeight },
+            });
+          }
           if (
             IS_WINDOWS &&
             !orientation.isVertical &&
@@ -1091,6 +1106,7 @@ function HydratedDockPanel({
     <div
       className={`pointer-events-none fixed inset-0 z-50 flex overflow-visible ${orientation.wrapperClassName}`}
     >
+      {IS_WINDOWS && <WindowsDebugHud enabled={Boolean(settings.windowsDebugOverlay)} />}
       <motion.div
         ref={pillRef}
         data-dock-pill

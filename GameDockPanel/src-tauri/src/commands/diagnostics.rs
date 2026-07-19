@@ -111,11 +111,12 @@ pub fn get_diagnostics(app: AppHandle) -> Result<DiagnosticsPayload, String> {
         }
     };
 
-    let recent_log_lines = read_recent_log_lines(&log_dir, 200);
+    let recent_log_lines = read_recent_log_lines(&log_dir, 400);
 
     let support_hint = format!(
         "Send: (1) this JSON from «Скопировать диагностику» (2) the latest gamedockpanel*.log \
-         from logDir (3) a screenshot of the dock. Look for lines tagged [win-backdrop] and [dock]."
+         from logDir (3) screenshot with Windows debug overlay ON if possible. \
+         Look for [win-diag] / [win-backdrop] / [dock]. Toggle overlay in Settings → System."
     );
 
     log::info!(
@@ -124,7 +125,7 @@ pub fn get_diagnostics(app: AppHandle) -> Result<DiagnosticsPayload, String> {
         recent_log_lines.len()
     );
     if let Some(ref snap) = windows_backdrop {
-        log::info!("[win-backdrop] diagnostics snapshot={snap}");
+        log::info!("[win-diag] diagnostics snapshot={snap}");
     }
 
     Ok(DiagnosticsPayload {
@@ -153,6 +154,24 @@ pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&log_dir).map_err(|e| e.to_string())?;
     log::info!("open_log_dir: {}", log_dir.display());
     tauri_plugin_opener::open_path(&log_dir, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Windows: write one chrome/region snapshot to the log and emit `dock-win-diag`.
+#[tauri::command]
+pub fn log_windows_diag(app: AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "main window not found".to_string())?;
+        let snap = crate::platform::log_windows_diag_snapshot(&window);
+        serde_json::to_value(snap).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("log_windows_diag is Windows-only".to_string())
+    }
 }
 
 fn read_recent_log_lines(log_dir: &Option<String>, max_lines: usize) -> Vec<String> {

@@ -157,6 +157,10 @@ pub struct DockSettings {
     /// field existed.
     #[serde(default)]
     pub dock_window_layer: DockWindowLayer,
+    /// Windows-only: live chrome HUD on the dock + denser `[win-diag]` logs.
+    /// Harmless on macOS (ignored by UI). `#[serde(default)]` for old configs.
+    #[serde(default)]
+    pub windows_debug_overlay: bool,
 }
 
 fn default_led_color_mode() -> String {
@@ -234,6 +238,7 @@ impl Default for DockSettings {
             magnify_neighbor_strength: default_magnify_neighbor_strength(),
             dock_position: DockPosition::default(),
             dock_window_layer: DockWindowLayer::default(),
+            windows_debug_overlay: false,
         }
     }
 }

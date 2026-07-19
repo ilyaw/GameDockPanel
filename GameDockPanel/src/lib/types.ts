@@ -134,4 +134,6 @@ export interface DockSettings {
   dockPosition: DockPosition;
   /** Whether the dock stays above app windows or sits below them. */
   dockWindowLayer: DockWindowLayer;
+  /** Windows-only: chrome HUD on the dock + denser `[win-diag]` logs. */
+  windowsDebugOverlay: boolean;
 }

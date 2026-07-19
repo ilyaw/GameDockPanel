@@ -800,6 +800,7 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   ledFixedColor: "#ff9d3b",
   dockPosition: "bottom",
   dockWindowLayer: "above_windows",
+  windowsDebugOverlay: false,
 };
 
 export type LedColorMode = DockSettings["ledColorMode"];

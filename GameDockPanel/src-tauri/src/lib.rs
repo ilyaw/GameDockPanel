@@ -133,6 +133,7 @@ pub fn run() {
             commands::settings::update_dock_settings,
             commands::diagnostics::get_diagnostics,
             commands::diagnostics::open_log_dir,
+            commands::diagnostics::log_windows_diag,
             #[cfg(debug_assertions)]
             commands::settings::qa_set_border,
         ])

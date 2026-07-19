@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tauri::utils::config::Color;
-use tauri::{App, Manager, WebviewWindow};
+use tauri::{App, Emitter, Manager, WebviewWindow};
 use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
@@ -84,6 +84,19 @@ pub struct WindowsBackdropSnapshot {
     pub chrome_delta_px: Option<(i32, i32)>,
     /// Always `false` — Mica is disabled (dark full-HWND shell outside RGB).
     pub mica_enabled: bool,
+    /// Decoded chrome flags for HUD / support paste.
+    pub has_caption: bool,
+    pub is_popup: bool,
+    pub is_layered: bool,
+    pub is_transparent_ex: bool,
+    pub chrome_subclass_installed: bool,
+    pub webview_child_class: Option<String>,
+    pub chrome_repair_count: u64,
+    pub layered_restore_count: u64,
+    pub caption_creep_count: u64,
+    /// Empty when healthy; otherwise human-readable issue tags.
+    pub health_issues: Vec<String>,
+    pub healthy: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -99,6 +112,11 @@ static LAST_PILL_CLIENT: Mutex<Option<PillClientRect>> = Mutex::new(None);
 static SYNC_VIBRANCY_CALLS: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_OK: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_ERR: AtomicU64 = AtomicU64::new(0);
+static CHROME_REPAIR_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAYERED_RESTORE_COUNT: AtomicU64 = AtomicU64::new(0);
+static CAPTION_CREEP_COUNT: AtomicU64 = AtomicU64::new(0);
+static LAST_CHILD_CLASS: Mutex<Option<String>> = Mutex::new(None);
+static DIAG_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
 /// When true, HWND region is cleared so magnify / tooltip / pending menu
 /// are not clipped; also drives hover frame sizing.
 static REGION_RELAXED: AtomicBool = AtomicBool::new(false);
@@ -139,9 +157,15 @@ fn flush_frame_changed(hwnd: HWND) {
 /// Clipping the top-level layered window produces the rainbow AA artifact.
 fn webview_clip_hwnd(toplevel: HWND) -> HWND {
     let Ok(child) = (unsafe { GetWindow(toplevel, GW_CHILD) }) else {
+        if let Ok(mut guard) = LAST_CHILD_CLASS.lock() {
+            *guard = None;
+        }
         return toplevel;
     };
     if child.is_invalid() {
+        if let Ok(mut guard) = LAST_CHILD_CLASS.lock() {
+            *guard = None;
+        }
         return toplevel;
     }
     let mut buf = [0u16; 96];
@@ -149,8 +173,63 @@ fn webview_clip_hwnd(toplevel: HWND) -> HWND {
     if len > 0 {
         let name = String::from_utf16_lossy(&buf[..len as usize]);
         log::debug!("[win-backdrop] clip target child class={name}");
+        if let Ok(mut guard) = LAST_CHILD_CLASS.lock() {
+            *guard = Some(name);
+        }
     }
     child
+}
+
+fn assess_chrome_health(
+    style: Option<u32>,
+    exstyle: Option<u32>,
+    chrome_delta: Option<(i32, i32)>,
+    stored_pill: Option<(f64, f64)>,
+    outer: Option<(u32, u32)>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    if let Some(style) = style {
+        let has_caption =
+            (style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0;
+        let is_popup = (style & WS_POPUP.0) != 0;
+        if has_caption {
+            issues.push("CAPTION".into());
+        }
+        if !is_popup {
+            issues.push("NOT_POPUP".into());
+        }
+    } else {
+        issues.push("NO_STYLE".into());
+    }
+    if let Some(exstyle) = exstyle {
+        if (exstyle & WS_EX_LAYERED.0) == 0 {
+            issues.push("NO_LAYERED".into());
+        }
+    } else {
+        issues.push("NO_EXSTYLE".into());
+    }
+    if let Some((dw, dh)) = chrome_delta {
+        if dw.abs() > 1 || dh.abs() > 1 {
+            issues.push(format!("CHROME_DELTA({dw},{dh})"));
+        }
+    }
+    if let (Some((pw, ph)), Some((ow, oh))) = (stored_pill, outer) {
+        // Paperclip / collapse: outer much smaller than stored pill, or
+        // horizontal dock taller than wide at tiny width.
+        if pw > 80.0 && (ow as f64) < pw * 0.5 {
+            issues.push(format!("OUTER_TOO_NARROW({ow}<{pw:.0})"));
+        }
+        if ph > 40.0 && (oh as f64) < ph * 0.5 {
+            issues.push(format!("OUTER_TOO_SHORT({oh}<{ph:.0})"));
+        }
+        if pw > ph && ow > 0 && ow < oh {
+            issues.push(format!("ORIENT_FLIP? outer={ow}x{oh} pill={pw:.0}x{ph:.0}"));
+        }
+    }
+    if !DOCK_SUBCLASS_INSTALLED.load(Ordering::Relaxed) {
+        issues.push("NO_SUBCLASS".into());
+    }
+    issues
 }
 
 fn hwnd_needs_frameless_rewrite(hwnd: HWND) -> bool {
@@ -166,25 +245,37 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) {
     }
     let _guard = scopeguard_reset_repairing();
 
+    let mut repaired = false;
     if hwnd_needs_frameless_rewrite(hwnd) {
+        CAPTION_CREEP_COUNT.fetch_add(1, Ordering::Relaxed);
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
         let desired = WS_POPUP.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0 | (style & WS_VISIBLE.0);
         unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, desired as isize) };
-        log::info!(
-            "[win-backdrop] subclass repair STYLE 0x{style:08x} → 0x{desired:08x}"
+        repaired = true;
+        log::warn!(
+            "[win-backdrop] subclass repair STYLE 0x{style:08x} → 0x{desired:08x} \
+             (caption creep #{})",
+            CAPTION_CREEP_COUNT.load(Ordering::Relaxed)
         );
     }
 
     let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
     if (exstyle & WS_EX_LAYERED.0) == 0 {
+        LAYERED_RESTORE_COUNT.fetch_add(1, Ordering::Relaxed);
         let desired = exstyle | WS_EX_LAYERED.0;
         unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
+        repaired = true;
         log::warn!(
-            "[win-backdrop] subclass repair LAYERED EXSTYLE 0x{exstyle:08x} → 0x{desired:08x}"
+            "[win-backdrop] subclass repair LAYERED EXSTYLE 0x{exstyle:08x} → 0x{desired:08x} \
+             (restore #{})",
+            LAYERED_RESTORE_COUNT.load(Ordering::Relaxed)
         );
     }
 
-    flush_frame_changed(hwnd);
+    if repaired {
+        CHROME_REPAIR_COUNT.fetch_add(1, Ordering::Relaxed);
+        flush_frame_changed(hwnd);
+    }
 }
 
 /// Tiny RAII so repair flag clears on all paths without try/finally noise.
@@ -405,7 +496,9 @@ fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
     }
     flush_frame_changed(hwnd);
     log::warn!(
-        "[win-backdrop] WS_EX_LAYERED missing — restored EXSTYLE=0x{desired:08x} (was 0x{exstyle:08x})"
+        "[win-backdrop] WS_EX_LAYERED missing — restored EXSTYLE=0x{desired:08x} (was 0x{exstyle:08x}) \
+         restore#={}",
+        LAYERED_RESTORE_COUNT.fetch_add(1, Ordering::Relaxed) + 1
     );
     Ok(true)
 }
@@ -610,6 +703,11 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
     let outer = window.outer_size().ok().map(|s| (s.width, s.height));
     let outer_pos = window.outer_position().ok().map(|p| (p.x, p.y));
     let styles = read_gwl_styles(window);
+    let delta = chrome_delta_px(window);
+    // Refresh child class name for the HUD.
+    if let Ok(hwnd) = window.hwnd() {
+        let _ = webview_clip_hwnd(hwnd);
+    }
     let stored_pill = {
         let state = window.state::<AppsState>();
         let w = *state
@@ -632,6 +730,26 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         width: r.width,
         height: r.height,
     });
+    let (style, exstyle) = styles.unwrap_or((0, 0));
+    let has_styles = styles.is_some();
+    let has_caption = has_styles
+        && ((style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0);
+    let is_popup = has_styles && (style & WS_POPUP.0) != 0;
+    let is_layered = has_styles && (exstyle & WS_EX_LAYERED.0) != 0;
+    let is_transparent_ex = has_styles && (exstyle & WS_EX_TRANSPARENT.0) != 0;
+    let child_class = LAST_CHILD_CLASS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let health_issues = assess_chrome_health(
+        styles.map(|(s, _)| s),
+        styles.map(|(_, e)| e),
+        delta,
+        stored_pill,
+        outer,
+    );
+    let healthy = health_issues.is_empty();
+
     WindowsBackdropSnapshot {
         last_pill_client: last_pill,
         menu_overlay_active: menu_overlay_active(window),
@@ -648,9 +766,112 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         set_rgn_err_count: SET_RGN_ERR.load(Ordering::Relaxed),
         gwl_style: styles.map(|(s, _)| s),
         gwl_exstyle: styles.map(|(_, e)| e),
-        chrome_delta_px: chrome_delta_px(window),
+        chrome_delta_px: delta,
         mica_enabled: false,
+        has_caption,
+        is_popup,
+        is_layered,
+        is_transparent_ex,
+        chrome_subclass_installed: DOCK_SUBCLASS_INSTALLED.load(Ordering::Relaxed),
+        webview_child_class: child_class,
+        chrome_repair_count: CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
+        layered_restore_count: LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
+        caption_creep_count: CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
+        health_issues,
+        healthy,
     }
+}
+
+fn windows_debug_overlay_enabled(window: &WebviewWindow) -> bool {
+    let state = window.state::<crate::commands::settings::SettingsState>();
+    let guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.windows_debug_overlay
+}
+
+/// Force one snapshot into the log + `dock-win-diag` event (settings button).
+pub fn log_windows_diag_snapshot(window: &WebviewWindow) -> WindowsBackdropSnapshot {
+    let snap = windows_backdrop_snapshot(window);
+    log::info!("[win-diag] MANUAL snapshot={snap:?}");
+    let _ = window.emit("dock-win-diag", &snap);
+    snap
+}
+
+fn start_windows_diag_poller(window: WebviewWindow) {
+    if DIAG_POLLER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let mut tick: u64 = 0;
+        let mut last_issues: Vec<String> = Vec::new();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(2000));
+            tick = tick.wrapping_add(1);
+            let snap = windows_backdrop_snapshot(&window);
+            let overlay = windows_debug_overlay_enabled(&window);
+            let issues_changed = snap.health_issues != last_issues;
+            if issues_changed {
+                if snap.healthy {
+                    log::info!("[win-diag] HEALTH RESTORED after {:?}", last_issues);
+                } else {
+                    log::warn!(
+                        "[win-diag] HEALTH BAD issues={:?} style={:?} ex={:?} delta={:?} \
+                         outer={:?} pill={:?} child={:?} repairs={} layered_restores={} caption_creeps={}",
+                        snap.health_issues,
+                        snap.gwl_style.map(|s| format!("0x{s:08x}")),
+                        snap.gwl_exstyle.map(|e| format!("0x{e:08x}")),
+                        snap.chrome_delta_px,
+                        snap.outer_size_px,
+                        snap.stored_pill_dip,
+                        snap.webview_child_class,
+                        snap.chrome_repair_count,
+                        snap.layered_restore_count,
+                        snap.caption_creep_count,
+                    );
+                }
+                last_issues = snap.health_issues.clone();
+            }
+            // HUD needs a steady stream; unhealthy always logs periodically.
+            if overlay || !snap.healthy || tick % 15 == 0 {
+                if overlay || !snap.healthy {
+                    log::info!(
+                        "[win-diag] tick={tick} healthy={} issues={:?} pos={} \
+                         outer={:?}@{:?} pill_client={:?} stored={:?} \
+                         CAPTION={} POPUP={} LAYERED={} TRANSPARENT_EX={} \
+                         rgn_ok={} rgn_err={} sync_vib={} relaxed={} hold={}",
+                        snap.healthy,
+                        snap.health_issues,
+                        snap.dock_position,
+                        snap.outer_size_px,
+                        snap.outer_position_px,
+                        snap.last_pill_client,
+                        snap.stored_pill_dip,
+                        snap.has_caption,
+                        snap.is_popup,
+                        snap.is_layered,
+                        snap.is_transparent_ex,
+                        snap.set_rgn_ok_count,
+                        snap.set_rgn_err_count,
+                        snap.sync_vibrancy_calls,
+                        snap.region_relaxed,
+                        snap.menu_region_hold,
+                    );
+                } else {
+                    log::debug!(
+                        "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?}",
+                        snap.outer_size_px,
+                        snap.stored_pill_dip
+                    );
+                }
+            }
+            if overlay || issues_changed || !snap.healthy {
+                let _ = window.emit("dock-win-diag", &snap);
+            }
+        }
+    });
+    log::info!("[win-diag] poller started (2s; emits dock-win-diag when overlay/unhealthy)");
 }
 
 fn menu_blocks_pill_clip(window: &WebviewWindow) -> bool {
@@ -1312,6 +1533,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     refresh_windows_backdrop(&window)?;
 
     start_dock_input(window.clone());
+    start_windows_diag_poller(window.clone());
 
     window.show().map_err(|e| e.to_string())?;
     // Re-assert popup chrome after show — caption bits can return.

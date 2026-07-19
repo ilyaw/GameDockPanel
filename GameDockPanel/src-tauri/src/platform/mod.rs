@@ -36,8 +36,8 @@ pub(crate) use windows::seed::seed_app_candidates;
 #[cfg(target_os = "windows")]
 pub use windows::{
     activate_or_launch_app, apply_dock_window_layer, clear_dock_menu_region_hold,
-    ensure_window_fits_menu_overlay, is_bundle_running, quit_app, refresh_dock_icons,
-    resolve_bundle_id_from_path, resolve_app_icon, reveal_app_in_finder,
+    ensure_window_fits_menu_overlay, is_bundle_running, log_windows_diag_snapshot, quit_app,
+    refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon, reveal_app_in_finder,
     set_dock_region_relaxed, setup_dock_window, shrink_dock_window_to_stored_pill,
     start_apps_monitoring, sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
     zoom_app_above_dock,

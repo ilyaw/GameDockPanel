@@ -7,4 +7,5 @@ commands.allow = [
   "refresh_indicator_colors",
   "get_diagnostics",
   "open_log_dir",
+  "log_windows_diag",
 ]

@@ -24,6 +24,7 @@ import {
   type PanelEffectPreset,
 } from "../lib/constants";
 import type { DockSettings } from "../lib/types";
+import { IS_WINDOWS } from "../lib/windowsDock";
 
 type SettingsTabId = "panel" | "indicators" | "border" | "background" | "system";
 
@@ -349,6 +350,7 @@ export function SettingsWindow() {
   );
   const [diagnosticsCopied, setDiagnosticsCopied] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [diagSnapNote, setDiagSnapNote] = useState<string | null>(null);
   const previewPendingPxRef = useRef<number | null>(null);
   const previewRafRef = useRef(0);
   const persistSizeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -438,6 +440,28 @@ export function SettingsWindow() {
     } catch (error: unknown) {
       console.error("Failed to open log dir:", error);
       setDiagnosticsError("Не удалось открыть папку логов.");
+    }
+  }, []);
+
+  const logWindowsDiagNow = useCallback(async () => {
+    setDiagnosticsError(null);
+    setDiagSnapNote(null);
+    try {
+      const snap = await invoke<Record<string, unknown>>("log_windows_diag");
+      console.info("[win-diag] manual snapshot", snap);
+      const healthy = snap.healthy === true;
+      const issues = Array.isArray(snap.healthIssues)
+        ? (snap.healthIssues as string[]).join(", ")
+        : "";
+      setDiagSnapNote(
+        healthy
+          ? "Снимок записан в лог (HEALTHY)."
+          : `Снимок в лог: BAD — ${issues || "см. консоль"}`,
+      );
+      setTimeout(() => setDiagSnapNote(null), 4000);
+    } catch (error: unknown) {
+      console.error("Failed to log windows diag:", error);
+      setDiagnosticsError("Не удалось записать win-diag снимок.");
     }
   }, []);
 
@@ -898,7 +922,7 @@ export function SettingsWindow() {
       <SettingsRow
         title="Диагностика"
         descriptionClassName="max-w-sm"
-        description="Для отладки с другом: 1) «Скопировать диагностику» → вставь JSON в чат 2) «Открыть папку логов» → пришли файл gamedockpanel*.log 3) скрин панели. На Windows логи: %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs."
+        description="Для отладки с другом: 1) «Скопировать диагностику» → вставь JSON в чат 2) «Открыть папку логов» → пришли файл gamedockpanel*.log 3) скрин панели (лучше с оверлеем). На Windows логи: %LOCALAPPDATA%\\com.ilya.gamedockpanel\\logs. Ищи строки [win-diag] / [win-backdrop]."
       >
         <div className="flex flex-col items-end gap-2">
           <div className="flex flex-wrap justify-end gap-2">
@@ -920,12 +944,41 @@ export function SettingsWindow() {
             >
               Открыть папку логов
             </button>
+            {IS_WINDOWS && (
+              <button
+                type="button"
+                className="settings-window__btn rounded-md px-3 py-1.5 text-xs"
+                onClick={() => {
+                  void logWindowsDiagNow();
+                }}
+              >
+                Снимок в лог
+              </button>
+            )}
           </div>
+          {diagSnapNote && (
+            <p className="max-w-xs text-right text-xs text-emerald-400">{diagSnapNote}</p>
+          )}
           {diagnosticsError && (
             <p className="max-w-xs text-right text-xs text-red-400">{diagnosticsError}</p>
           )}
         </div>
       </SettingsRow>
+
+      {IS_WINDOWS && (
+        <SettingsRow
+          title="Оверлей отладки Windows"
+          descriptionClassName="max-w-sm"
+          description="На доке: пурпурная рамка = HWND, голубая = CSS-пилюля, красный фон = chrome сломан (CAPTION / нет LAYERED / Δ). В лог каждые 2с пишется [win-diag]. Оставь включённым и пришли скрин + лог."
+        >
+          <ToggleSwitch
+            checked={Boolean(settings.windowsDebugOverlay)}
+            onChange={(value) => {
+              update({ windowsDebugOverlay: value });
+            }}
+          />
+        </SettingsRow>
+      )}
     </SettingsSectionCard>
   );
 
