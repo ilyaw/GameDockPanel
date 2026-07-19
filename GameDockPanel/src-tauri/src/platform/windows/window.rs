@@ -1,13 +1,22 @@
 //! Windows dock window setup, geometry, DWM corners, and transparent backdrop.
 //!
-//! Win11 system Mica paints the full HWND and does not reliably respect a
-//! GDI `SetWindowRgn` clip — that left dark corners outside the CSS/RGB
-//! pill. We never apply Mica; tint is CSS (`bg-black/40`) over a transparent
-//! WebView2. Idle still clips the HWND to the rounded pill via
-//! `CreateRoundRectRgn` — without that clip, opaque WebView2 corner pixels
-//! leak past CSS `rounded-[28px]` as a pale rectangle behind the RGB ring.
-//! Hover/menu clear the region so magnify/tooltip margins are not cut; DWM
-//! stays `DONOTROUND` (not a dark rounded HWND shell).
+//! ## Why this keeps changing (and what finally sticks)
+//!
+//! Three separate bugs were being "fixed" in a circle:
+//! 1. **Ghost titlebar / pale blue bar** — Tao restores `WS_CAPTION` and/or
+//!    drops `WS_EX_LAYERED`; WebView2 then paints an opaque NC strip.
+//! 2. **Pale rectangular corners** outside CSS `rounded-[28px]` — WebView2
+//!    fills the full child HWND; CSS radius does not punch alpha.
+//! 3. **Rainbow / jagged RGB ring** — `SetWindowRgn` on the *top-level*
+//!    layered HWND hard-clips DWM compositing and chops CSS border AA.
+//!
+//! Durable approach (no more on/off thrash):
+//! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
+//!   re-assert popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`.
+//! - Never Mica (`DONOTROUND` only).
+//! - Idle `CreateRoundRectRgn` on the **WebView2 child** HWND (not the
+//!   parent) so opaque corners are clipped without rainbow parent edges.
+//! - Hover/menu clear that child region for magnify/tooltip.
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,7 +24,7 @@ use std::sync::Mutex;
 
 use tauri::utils::config::Color;
 use tauri::{App, Manager, WebviewWindow};
-use windows::Win32::Foundation::GetLastError;
+use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
     DWM_WINDOW_CORNER_PREFERENCE,
@@ -23,9 +32,11 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
 };
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_CLIPCHILDREN,
+    GetClassNameW, GetWindow, GetWindowLongPtrW, PostMessageW, SetWindowLongPtrW, SetWindowPos,
+    GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, WM_APP, WM_NCCALCSIZE, WM_NCPAINT, WM_STYLECHANGED, WS_CAPTION, WS_CLIPCHILDREN,
     WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
@@ -98,9 +109,143 @@ static MENU_REGION_HOLD: AtomicBool = AtomicBool::new(false);
 /// WebView2 DefaultBackgroundColor already forced to alpha=0 — avoid
 /// re-setting it on every hover `clear_window_rgn` (expensive / flicker).
 static TRANSPARENT_BG_APPLIED: AtomicBool = AtomicBool::new(false);
+/// Dock HWND subclass installed (WM_NCCALCSIZE / chrome repair).
+static DOCK_SUBCLASS_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Guard against re-entrant style repair from WM_STYLECHANGED.
+static DOCK_CHROME_REPAIRING: AtomicBool = AtomicBool::new(false);
+
+/// Posted by the subclass when Tao restores caption / drops LAYERED.
+const WM_DOCK_REPAIR_CHROME: u32 = WM_APP + 0x44D;
 
 fn last_win32_error() -> u32 {
     unsafe { GetLastError().0 }
+}
+
+fn flush_frame_changed(hwnd: HWND) {
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    };
+}
+
+/// WebView2 paints into a child HWND — that is what must be region-clipped.
+/// Clipping the top-level layered window produces the rainbow AA artifact.
+fn webview_clip_hwnd(toplevel: HWND) -> HWND {
+    let Ok(child) = (unsafe { GetWindow(toplevel, GW_CHILD) }) else {
+        return toplevel;
+    };
+    if child.is_invalid() {
+        return toplevel;
+    }
+    let mut buf = [0u16; 96];
+    let len = unsafe { GetClassNameW(child, &mut buf) };
+    if len > 0 {
+        let name = String::from_utf16_lossy(&buf[..len as usize]);
+        log::debug!("[win-backdrop] clip target child class={name}");
+    }
+    child
+}
+
+fn hwnd_needs_frameless_rewrite(hwnd: HWND) -> bool {
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+    let has_caption = (style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0;
+    let is_popup = (style & WS_POPUP.0) != 0;
+    has_caption || !is_popup
+}
+
+fn repair_dock_hwnd_chrome(hwnd: HWND) {
+    if DOCK_CHROME_REPAIRING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _guard = scopeguard_reset_repairing();
+
+    if hwnd_needs_frameless_rewrite(hwnd) {
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+        let desired = WS_POPUP.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0 | (style & WS_VISIBLE.0);
+        unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, desired as isize) };
+        log::info!(
+            "[win-backdrop] subclass repair STYLE 0x{style:08x} → 0x{desired:08x}"
+        );
+    }
+
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    if (exstyle & WS_EX_LAYERED.0) == 0 {
+        let desired = exstyle | WS_EX_LAYERED.0;
+        unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
+        log::warn!(
+            "[win-backdrop] subclass repair LAYERED EXSTYLE 0x{exstyle:08x} → 0x{desired:08x}"
+        );
+    }
+
+    flush_frame_changed(hwnd);
+}
+
+/// Tiny RAII so repair flag clears on all paths without try/finally noise.
+fn scopeguard_reset_repairing() -> impl Drop {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            DOCK_CHROME_REPAIRING.store(false, Ordering::SeqCst);
+        }
+    }
+    Reset
+}
+
+unsafe extern "system" fn dock_chrome_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _uidsubclass: usize,
+    _dwrefdata: usize,
+) -> LRESULT {
+    match msg {
+        // Client area = full window rect — kills the pale/blue ghost titlebar
+        // even for the brief moments Tao has restored WS_CAPTION.
+        WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
+        WM_NCPAINT => return LRESULT(0),
+        WM_STYLECHANGED => {
+            let _ = PostMessageW(Some(hwnd), WM_DOCK_REPAIR_CHROME, WPARAM(0), LPARAM(0));
+        }
+        m if m == WM_DOCK_REPAIR_CHROME => {
+            repair_dock_hwnd_chrome(hwnd);
+            return LRESULT(0);
+        }
+        _ => {}
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+fn install_dock_chrome_subclass(window: &WebviewWindow) -> Result<(), String> {
+    if DOCK_SUBCLASS_INSTALLED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let ok = unsafe {
+        SetWindowSubclass(
+            hwnd,
+            Some(dock_chrome_subclass_proc),
+            0x47_44_50_57, // 'GDPW'
+            0,
+        )
+    };
+    if !ok.as_bool() {
+        let gle = last_win32_error();
+        return Err(format!("SetWindowSubclass failed gle={gle}"));
+    }
+    DOCK_SUBCLASS_INSTALLED.store(true, Ordering::SeqCst);
+    // Force an immediate NC recalc so the ghost bar never paints once.
+    flush_frame_changed(hwnd);
+    repair_dock_hwnd_chrome(hwnd);
+    log::info!("[win-backdrop] chrome subclass installed (NCCALCSIZE + style repair)");
+    Ok(())
 }
 
 fn store_pill_client_rect(x: f64, y: f64, width: f64, height: f64) {
@@ -239,6 +384,9 @@ where
 /// `set_ignore_cursor_events(false)` drops LAYERED together with
 /// `WS_EX_TRANSPARENT`; without LAYERED, transparent WebView2 margins can
 /// paint as an opaque white strip above the CSS pill.
+///
+/// After any EXSTYLE change we must `SWP_FRAMECHANGED` — otherwise DWM keeps
+/// the old compositing mode and LAYERED appears set but still paints opaque.
 fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
@@ -255,6 +403,7 @@ fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
             ));
         }
     }
+    flush_frame_changed(hwnd);
     log::warn!(
         "[win-backdrop] WS_EX_LAYERED missing — restored EXSTYLE=0x{desired:08x} (was 0x{exstyle:08x})"
     );
@@ -282,6 +431,7 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
             ));
         }
     }
+    flush_frame_changed(hwnd);
     log::debug!(
         "[win-backdrop] click-through ignore={ignore}: EXSTYLE=0x{exstyle:08x} → 0x{desired:08x}"
     );
@@ -876,8 +1026,10 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
             log::warn!("[win-backdrop] clear_mica before region clear: {err}");
         }
         let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-        // None removes the region; system does not take ownership.
-        let ok = unsafe { SetWindowRgn(hwnd, None, true) };
+        let clip = webview_clip_hwnd(hwnd);
+        // Also clear top-level in case an older build left a parent region.
+        let _ = unsafe { SetWindowRgn(hwnd, None, true) };
+        let ok = unsafe { SetWindowRgn(clip, None, true) };
         if ok == 0 {
             let gle = last_win32_error();
             log::error!("[win-backdrop] SetWindowRgn(clear) failed gle={gle}");
@@ -886,7 +1038,8 @@ fn clear_window_rgn(window: &WebviewWindow) -> Result<(), String> {
         // Never DWMWCP_ROUND here — it paints a dark rounded HWND shell.
         set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
         log::info!(
-            "[win-backdrop] region cleared + mica off + DONOTROUND (hover/menu margins transparent)"
+            "[win-backdrop] region cleared on webview child + mica off + DONOTROUND \
+             (hover/menu margins transparent)"
         );
         Ok(())
     })
@@ -1004,6 +1157,19 @@ fn set_window_rgn_to_pill(
 
     with_dock_main_thread(window, move |window| {
         let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        // Clip the WebView2 *child* — parent SetWindowRgn causes rainbow AA on
+        // layered DWM compositing. Child clip hides opaque corner pixels.
+        let clip = webview_clip_hwnd(hwnd);
+        if clip == hwnd {
+            log::warn!(
+                "[win-backdrop] SetWindowRgn skipped — no WebView2 child yet \
+                 (parent clip causes rainbow AA)"
+            );
+            return Ok(());
+        }
+        // Drop any stale parent region from older builds.
+        let _ = unsafe { SetWindowRgn(hwnd, None, false) };
+
         let hrgn = unsafe { CreateRoundRectRgn(left, top, right, bottom, diameter, diameter) };
         if hrgn.is_invalid() {
             let gle = last_win32_error();
@@ -1012,17 +1178,17 @@ fn set_window_rgn_to_pill(
             return Err(format!("CreateRoundRectRgn failed gle={gle}"));
         }
         // On success SetWindowRgn takes ownership of hrgn — do not DeleteObject.
-        let ok = unsafe { SetWindowRgn(hwnd, Some(hrgn), true) };
+        let ok = unsafe { SetWindowRgn(clip, Some(hrgn), true) };
         if ok == 0 {
             let gle = last_win32_error();
             let _ = unsafe { DeleteObject(HGDIOBJ(hrgn.0)) };
             SET_RGN_ERR.fetch_add(1, Ordering::Relaxed);
             log::error!(
-                "[win-backdrop] SetWindowRgn(pill) failed gle={gle} \
+                "[win-backdrop] SetWindowRgn(webview child) failed gle={gle} \
                  dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
                  px=({left},{top})-({right},{bottom}) diameter={diameter} scale={scale:.2}"
             );
-            return Err(format!("SetWindowRgn(pill) failed gle={gle}"));
+            return Err(format!("SetWindowRgn(webview child) failed gle={gle}"));
         }
         SET_RGN_OK.fetch_add(1, Ordering::Relaxed);
         let style = read_gwl_styles(window)
@@ -1032,7 +1198,7 @@ fn set_window_rgn_to_pill(
             .map(|(dw, dh)| format!("({dw},{dh})"))
             .unwrap_or_else(|| "?".into());
         log::info!(
-            "[win-backdrop] SetWindowRgn ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
+            "[win-backdrop] SetWindowRgn(webview child) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
              px=({left},{top})-({right},{bottom}) diameter={diameter} scale={scale:.2} \
              STYLE={style} chrome_delta={delta} ok#={}",
             SET_RGN_OK.load(Ordering::Relaxed)
@@ -1120,6 +1286,12 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
     // Frameless + transparent before region/show — strips residual caption bits
     // and logs WebView2 version for ghost-titlebar triage.
     ensure_frameless_dock_chrome(&window, window_width, window_height, position)?;
+
+    // Permanent NC kill + style repair — stops the caption/LAYERED thrash that
+    // painted the pale blue bar above the RGB pill.
+    if let Err(err) = install_dock_chrome_subclass(&window) {
+        log::warn!("[win-backdrop] chrome subclass failed (falling back to poll repair): {err}");
+    }
 
     // After every Tao style rewrite path — native click-through only (no
     // set_ignore_cursor_events), so TRANSPARENT|LAYERED stick.
