@@ -140,8 +140,31 @@ function Sync-Repository {
         Push-Location $Root
         try {
             & git fetch origin main 2>&1 | Write-Host
+            if ($LASTEXITCODE -ne 0) { throw "git fetch failed (exit $LASTEXITCODE)" }
+
             & git checkout main 2>&1 | Write-Host
+            if ($LASTEXITCODE -ne 0) { throw "git checkout main failed (exit $LASTEXITCODE)" }
+
+            # Build machine must track origin/main. Local edits (often Cargo.toml
+            # from a half-applied patch) block `pull --ff-only` — stash them.
+            $porcelain = & git status --porcelain
+            if ($porcelain) {
+                Write-Warn "Local changes would block pull — stashing:"
+                $porcelain | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+                & git stash push -u -m "windows-setup-and-build auto-stash" 2>&1 | Write-Host
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warn "stash failed — discarding tracked local edits (build machine)"
+                    & git checkout -- . 2>&1 | Write-Host
+                    & git clean -fd --exclude=node_modules --exclude=src-tauri/target 2>&1 | Write-Host
+                }
+            }
+
             & git pull --ff-only origin main 2>&1 | Write-Host
+            if ($LASTEXITCODE -ne 0) {
+                Write-Fail "git pull не удался. Разреши конфликты вручную или удали папку и запусти снова."
+                throw "git pull --ff-only failed (exit $LASTEXITCODE)"
+            }
+            Write-Ok "On latest origin/main"
         } finally {
             Pop-Location
         }
