@@ -29,9 +29,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::commands::apps::{AppsState, MenuOverlayState};
 use crate::commands::settings::{DockPosition, DockWindowLayer};
 use crate::platform::geometry::{
-    apply_dock_window_frame, current_dock_position, current_icon_size_dip, expand_for_hover,
-    formula_window_frame_rest, resize_dock_window_for_pill, set_expand_for_hover,
-    store_pill_dims, DOCK_EDGE_INSET_DIP,
+    apply_dock_window_frame, axis_css_dims, current_dock_position, current_icon_size_dip,
+    expand_for_hover, formula_window_frame_rest, resize_dock_window_for_pill, set_expand_for_hover,
+    store_pill_dims, window_length_rest_dip, window_thickness_rest_dip, DOCK_EDGE_INSET_DIP,
 };
 
 use super::input::start_dock_input;
@@ -311,8 +311,9 @@ fn set_dock_outer_frame_impl(
     width_px: i32,
     height_px: i32,
 ) -> Result<(), String> {
-    let width_px = width_px.max(1);
-    let height_px = height_px.max(1);
+    // Absolute floor — never lock in the ~40×91 "paperclip" client collapse.
+    let width_px = width_px.max(64);
+    let height_px = height_px.max(64);
     // Frameless popup: outer ≈ inner. These DIP×scale targets were historically
     // passed to Tauri `set_size` (inner); with chrome_delta≈(0,0) they match
     // the outer rect `SetWindowPos` expects.
@@ -344,7 +345,9 @@ fn set_dock_outer_frame_impl(
 /// Native outer move+size — avoids Tao `set_size`/`set_position`, which
 /// restore caption chrome (`0x14CB0000`) via `WindowFlags::apply_diff`.
 ///
-/// Marshals to the UI thread. No-ops when the outer rect is already correct.
+/// Marshals to the UI thread. Strips caption **before** `SetWindowPos`:
+/// applying content-sized outer dims while `WS_CAPTION` is still set shrinks
+/// the client into the RGB "paperclip" (~40×91).
 pub(crate) fn set_dock_outer_frame(
     window: &WebviewWindow,
     x: i32,
@@ -353,6 +356,12 @@ pub(crate) fn set_dock_outer_frame(
     height_px: i32,
 ) -> Result<(), String> {
     with_dock_main_thread(window, move |window| {
+        if style_needs_frameless_rewrite(window) {
+            log::warn!(
+                "[win-backdrop] caption present before SetWindowPos — rewriting POPUP first"
+            );
+            rewrite_frameless_popup_style_impl(window)?;
+        }
         set_dock_outer_frame_impl(window, x, y, width_px, height_px)
     })
 }
@@ -725,39 +734,71 @@ fn reassert_dock_chrome_after_show(
     log_chrome_state("after show", window);
 }
 
-/// Tao/`set_size` often restores caption bits (`0x14CB0000`) after hover or
-/// geometry resize — without Mica that paints a white ghost titlebar over the
-/// Top/Bottom dock. Rewrite to `WS_POPUP`, pin outer size, then rewrite once
-/// more (a trailing `set_size` can reintroduce caption).
+/// Recover frameless popup after Tao stomps `GWL_STYLE` back to caption.
+///
+/// Re-applies the **formula** frame from the stored pill — never the current
+/// `outer_size`, which may already be the collapsed paperclip client.
 pub(crate) fn reassert_frameless_chrome_keep_size(window: &WebviewWindow) {
     clear_dock_window_title(window);
+    if !style_needs_frameless_rewrite(window) {
+        return;
+    }
     match rewrite_frameless_popup_style(window) {
         Ok(false) => {}
         Ok(true) => {
-            let scale = match window.scale_factor() {
-                Ok(s) if s > 0.0 => s,
-                _ => 1.0,
-            };
-            if let Ok(size) = window.outer_size() {
-                let width_dip = size.width as f64 / scale;
-                let height_dip = size.height as f64 / scale;
-                let position = current_dock_position(window);
+            let position = current_dock_position(window);
+            if let Some((width_dip, height_dip)) = formula_frame_from_stored_pill(window) {
                 if let Err(err) =
                     reapply_dock_frame_after_chrome(window, width_dip, height_dip, position)
                 {
-                    log::warn!("[win-backdrop] frame reapply after resize chrome failed: {err}");
+                    log::warn!("[win-backdrop] frame reapply after chrome failed: {err}");
                 }
             } else {
-                log::warn!("[win-backdrop] chrome reassert after resize: outer_size unavailable");
+                log::warn!(
+                    "[win-backdrop] chrome reassert: no stored pill — skip frame reapply"
+                );
             }
-            // Pinning size via Tauri can restore caption — strip again, no resize.
+            // Tao may stomp style again during SetWindowPos — strip once more.
             if let Err(err) = rewrite_frameless_popup_style(window) {
-                log::warn!("[win-backdrop] second chrome rewrite after resize failed: {err}");
+                log::warn!("[win-backdrop] second chrome rewrite failed: {err}");
             }
-            log_chrome_state("after resize chrome reassert", window);
+            let accept_hits = REGION_RELAXED.load(Ordering::SeqCst)
+                || MENU_REGION_HOLD.load(Ordering::SeqCst)
+                || menu_overlay_active(window);
+            if let Err(err) = set_dock_click_through(window, !accept_hits) {
+                log::warn!("[win-backdrop] click-through after chrome reassert failed: {err}");
+            }
+            log_chrome_state("after chrome reassert", window);
         }
-        Err(err) => log::warn!("[win-backdrop] chrome rewrite after resize failed: {err}"),
+        Err(err) => log::warn!("[win-backdrop] chrome rewrite failed: {err}"),
     }
+}
+
+/// Rest-frame DIP size from the last known CSS pill (ignores hover expand).
+fn formula_frame_from_stored_pill(window: &WebviewWindow) -> Option<(f64, f64)> {
+    let state = window.state::<AppsState>();
+    let pill_width = *state
+        .pill_width_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pill_height = *state
+        .pill_height_dip
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if pill_width < 1.0 || pill_height < 1.0 {
+        return None;
+    }
+    let position = current_dock_position(window);
+    let icon_size_dip = current_icon_size_dip(window);
+    let (pill_length, pill_thickness) =
+        axis_css_dims(position.axis(), pill_width, pill_height);
+    let window_length = window_length_rest_dip(pill_length, icon_size_dip);
+    let window_thickness = window_thickness_rest_dip(pill_thickness, icon_size_dip);
+    Some(axis_css_dims(
+        position.axis(),
+        window_length,
+        window_thickness,
+    ))
 }
 
 /// True when GWL_STYLE still has caption/sysmenu or is missing WS_POPUP.

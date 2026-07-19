@@ -401,9 +401,8 @@ pub fn resize_dock_window_for_pill(
         axis_css_dims(position.axis(), window_length, window_thickness);
     let changed = apply_dock_window_frame(window, target_width, target_height, position)?;
     store_pill_dims(window, pill_width, pill_height);
-    // Win32: Tauri resize restores caption chrome — kill ghost titlebar.
-    #[cfg(windows)]
-    crate::platform::windows::reassert_frameless_chrome_keep_size(window);
+    // Native SetWindowPos path already strips caption before resize — no
+    // post-hoc reassert from (possibly collapsed) outer_size.
     Ok(changed)
 }
 
