@@ -71,12 +71,14 @@ fn magnify_length_overflow_dip(icon_size_dip: f64) -> f64 {
     (icon_size_dip * (MAGNIFY_MAX_SCALE - 1.0)).ceil()
 }
 
-/// Windows resting thickness = near-edge inset + CSS pill (no magnify /
-/// tooltip / glow). Hover/menu grow HWND temporarily; tint is CSS over
-/// transparent WebView2 (no Mica, no GDI pill clip).
+/// Windows resting thickness = CSS pill only (no near-edge inset, no magnify /
+/// tooltip / glow). The screen-edge gap is applied as an *outer* HWND offset in
+/// `apply_dock_window_frame` — keeping an empty inset strip *inside* the
+/// WebView2 client paints as an opaque pale bar when layered alpha flickers
+/// (Top dock: white/blue strip flush above the RGB pill).
 #[cfg(windows)]
 pub fn window_thickness_rest_dip(pill_thickness_dip: f64, _icon_size_dip: f64) -> f64 {
-    DOCK_EDGE_INSET_DIP + pill_thickness_dip
+    pill_thickness_dip
 }
 
 #[cfg(not(windows))]
@@ -98,7 +100,10 @@ pub fn window_length_rest_dip(pill_length_dip: f64, icon_size_dip: f64) -> f64 {
     window_length_dip(pill_length_dip, icon_size_dip)
 }
 
-/// Hover frame: room for edge inset + magnify + tooltip (no glow / menu).
+/// Hover frame: room for magnify + tooltip (no glow / menu).
+///
+/// On Windows the near-edge inset lives outside the HWND (see
+/// `window_thickness_rest_dip`); only the far-side reserve is inside.
 fn window_frame_hover_dip(
     pill_length_dip: f64,
     pill_thickness_dip: f64,
@@ -110,6 +115,9 @@ fn window_frame_hover_dip(
     let far_reserve = magnify
         .max(TOOLTIP_GAP_DIP + TOOLTIP_HEIGHT_DIP)
         - dock_padding_y_dip;
+    #[cfg(windows)]
+    let thickness = pill_thickness_dip + far_reserve.max(0.0);
+    #[cfg(not(windows))]
     let thickness = DOCK_EDGE_INSET_DIP + pill_thickness_dip + far_reserve.max(0.0);
     let length = pill_length_dip + magnify_length_overflow_dip(icon_size_dip);
     (length, thickness)
@@ -193,11 +201,10 @@ pub fn menu_fit_window_axes_dip(
             - dock_padding_y_dip
     };
 
-    // Windows rest = inset + pill; menu grow adds far reserve (no glow length).
-    // Other platforms keep the macOS-style inset + glow length base.
+    // Windows: near-edge inset is an outer HWND offset — thickness is pill +
+    // far reserve only. Other platforms keep inset inside the window.
     #[cfg(windows)]
-    let target_thickness_dip =
-        DOCK_EDGE_INSET_DIP + pill_thickness_dip + far_reserve_dip.max(0.0);
+    let target_thickness_dip = pill_thickness_dip + far_reserve_dip.max(0.0);
     #[cfg(not(windows))]
     let target_thickness_dip = DOCK_EDGE_INSET_DIP + pill_thickness_dip + far_reserve_dip;
 
@@ -291,21 +298,28 @@ pub fn apply_dock_window_frame(
     let width_px = (target_content_width * scale).round() as i32;
     let height_px = (target_content_height * scale).round() as i32;
 
+    // Windows: near-edge gap is an outer HWND offset (not an empty client
+    // strip). macOS keeps the inset inside the vibrancy-masked window.
+    #[cfg(windows)]
+    let edge_inset_px = (DOCK_EDGE_INSET_DIP * scale).round() as i32;
+    #[cfg(not(windows))]
+    let edge_inset_px = 0;
+
     let (x, y) = match position {
         DockPosition::Bottom => (
             monitor_pos.x + (monitor_size.width as i32 - width_px) / 2,
-            monitor_pos.y + monitor_size.height as i32 - height_px,
+            monitor_pos.y + monitor_size.height as i32 - height_px - edge_inset_px,
         ),
         DockPosition::Top => (
             monitor_pos.x + (monitor_size.width as i32 - width_px) / 2,
-            monitor_pos.y,
+            monitor_pos.y + edge_inset_px,
         ),
         DockPosition::Left => (
-            monitor_pos.x,
+            monitor_pos.x + edge_inset_px,
             monitor_pos.y + (monitor_size.height as i32 - height_px) / 2,
         ),
         DockPosition::Right => (
-            monitor_pos.x + monitor_size.width as i32 - width_px,
+            monitor_pos.x + monitor_size.width as i32 - width_px - edge_inset_px,
             monitor_pos.y + (monitor_size.height as i32 - height_px) / 2,
         ),
     };
@@ -441,8 +455,9 @@ pub fn formula_window_frame(
     (pill_width, pill_height, window_width, window_height)
 }
 
-/// Windows hybrid resting frame — length equals the CSS pill (no glow /
-/// magnify bleed); thickness is inset + pill. Hover/menu grow temporarily;
+/// Windows hybrid resting frame — length/thickness equal the CSS pill (no
+/// glow / magnify / near-edge inset inside the HWND). Screen-edge gap is an
+/// outer offset in `apply_dock_window_frame`. Hover/menu grow temporarily;
 /// shape is CSS-only (no Mica, no GDI SetWindowRgn).
 pub fn formula_window_frame_rest(
     entries: &[DockItem],

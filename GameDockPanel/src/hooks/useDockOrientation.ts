@@ -5,6 +5,7 @@ import type {
   OverlaySide,
 } from "../lib/dockPlacement";
 import type { DockPosition } from "../lib/types";
+import { IS_WINDOWS } from "../lib/windowsDock";
 
 /** Bar orientation for the running-app LED dot. */
 export type LedAxis = "horizontal" | "vertical";
@@ -39,7 +40,10 @@ export interface DockOrientation {
    * near-edge `justify-*` (which side the dock is pinned to) + `items-center`
    * (centers the content-sized pill on the cross axis — replaces the pill's
    * old `mx-auto`, which only ever centered on X) + the near-edge inset
-   * padding (mirrors `DOCK_EDGE_INSET_PX`).
+   * padding on macOS (`pt-2`/`pb-2`/… mirrors `DOCK_EDGE_INSET_PX`).
+   * On Windows that inset is an *outer* HWND offset (see geometry.rs) — an
+   * empty padded strip inside WebView2 paints as an opaque pale bar above
+   * the RGB pill when layered alpha flickers, so Windows wrappers omit it.
    */
   wrapperClassName: string;
   /**
@@ -112,9 +116,26 @@ const ORIENTATION_BY_POSITION: Record<DockPosition, Omit<DockOrientation, "posit
   },
 };
 
+/** Drop near-edge `p*-2` padding — Windows keeps that gap outside the HWND. */
+function windowsWrapperClassName(base: string): string {
+  return base
+    .replace(/\bpt-2\b/g, "")
+    .replace(/\bpb-2\b/g, "")
+    .replace(/\bpl-2\b/g, "")
+    .replace(/\bpr-2\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function useDockOrientation(position: DockPosition): DockOrientation {
-  return useMemo(
-    () => ({ position, ...ORIENTATION_BY_POSITION[position] }),
-    [position],
-  );
+  return useMemo(() => {
+    const base = ORIENTATION_BY_POSITION[position];
+    return {
+      position,
+      ...base,
+      wrapperClassName: IS_WINDOWS
+        ? windowsWrapperClassName(base.wrapperClassName)
+        : base.wrapperClassName,
+    };
+  }, [position]);
 }

@@ -27,7 +27,7 @@ use crate::commands::apps::AppsState;
 use crate::commands::settings::DockPosition;
 use crate::platform::geometry::{
     axis_css_dims, current_dock_position, current_icon_size_dip, menu_overlay_axis_extents,
-    pill_thickness_hover_dip, DOCK_EDGE_INSET_DIP, PILL_CORNER_RADIUS_DIP,
+    pill_thickness_hover_dip, PILL_CORNER_RADIUS_DIP,
 };
 
 use super::window::set_dock_click_through;
@@ -148,11 +148,12 @@ fn pill_cursor_at_screen(
 
     let pill_w = (pill_w_dip * scale).round() as i32;
     let pill_h = (pill_h_dip * scale).round() as i32;
-    let inset = (DOCK_EDGE_INSET_DIP * scale).round() as i32;
+    // Near-edge inset is outside the HWND (see geometry.rs) — pill is flush
+    // to the near client edge; do not offset hit-test by DOCK_EDGE_INSET.
     let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
 
     let (pill_left, pill_top, pill_right, pill_bottom) =
-        pill_rect_for_position(position, outer_pos, outer_size, pill_w, pill_h, inset);
+        pill_rect_for_position(position, outer_pos, outer_size, pill_w, pill_h, 0);
 
     if !in_rounded_rect(
         screen_x,

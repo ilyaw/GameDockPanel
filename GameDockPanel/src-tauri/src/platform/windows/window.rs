@@ -31,7 +31,7 @@ use crate::commands::settings::{DockPosition, DockWindowLayer};
 use crate::platform::geometry::{
     apply_dock_window_frame, axis_css_dims, current_dock_position, current_icon_size_dip,
     expand_for_hover, formula_window_frame_rest, resize_dock_window_for_pill, set_expand_for_hover,
-    store_pill_dims, window_length_rest_dip, window_thickness_rest_dip, DOCK_EDGE_INSET_DIP,
+    store_pill_dims, window_length_rest_dip, window_thickness_rest_dip,
 };
 
 use super::input::start_dock_input;
@@ -738,9 +738,19 @@ fn reassert_dock_chrome_after_show(
 ///
 /// Re-applies the **formula** frame from the stored pill — never the current
 /// `outer_size`, which may already be the collapsed paperclip client.
+///
+/// Even when style is already `WS_POPUP`, still re-assert `WS_EX_LAYERED` and
+/// a transparent WebView2 background — Tao/`set_always_on_top` can drop
+/// LAYERED without restoring caption, and that paints the empty client
+/// margins as an opaque pale strip above/beside the CSS pill.
 pub(crate) fn reassert_frameless_chrome_keep_size(window: &WebviewWindow) {
     clear_dock_window_title(window);
+    assert_transparent_webview_bg(window, true);
+
     if !style_needs_frameless_rewrite(window) {
+        if let Err(err) = with_dock_main_thread(window, ensure_layered_exstyle) {
+            log::warn!("[win-backdrop] ensure LAYERED (style ok) failed: {err}");
+        }
         return;
     }
     match rewrite_frameless_popup_style(window) {
@@ -888,13 +898,14 @@ fn fallback_pill_client_rect(
     let inner = window.inner_size().map_err(|e| e.to_string())?;
     let client_w = inner.width as f64 / scale;
     let client_h = inner.height as f64 / scale;
-    let inset = DOCK_EDGE_INSET_DIP;
+    // Near-edge inset is outside the HWND on Windows — pill sits flush to the
+    // near client edge (CSS wrapper has no pt-2/pb-2/pl-2/pr-2 either).
     let position = current_dock_position(window);
     let (x, y) = match position {
-        DockPosition::Bottom => ((client_w - width) * 0.5, client_h - inset - height),
-        DockPosition::Top => ((client_w - width) * 0.5, inset),
-        DockPosition::Left => (inset, (client_h - height) * 0.5),
-        DockPosition::Right => (client_w - inset - width, (client_h - height) * 0.5),
+        DockPosition::Bottom => ((client_w - width) * 0.5, client_h - height),
+        DockPosition::Top => ((client_w - width) * 0.5, 0.0),
+        DockPosition::Left => (0.0, (client_h - height) * 0.5),
+        DockPosition::Right => (client_w - width, (client_h - height) * 0.5),
     };
     Ok(PillClientRect {
         x,
@@ -948,7 +959,7 @@ pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
         "[win-backdrop] setup_dock_window: position={position:?} icon_size={icon_size_dip} \
          apps={entry_count} pill={pill_width:.1}x{pill_height:.1} \
          window={window_width:.1}x{window_height:.1} scale={scale:.2} \
-         rest=inset_plus_pill_no_glow"
+         rest=pill_only_edge_inset_outer"
     );
 
     apply_dock_window_frame(&window, window_width, window_height, position)?;
