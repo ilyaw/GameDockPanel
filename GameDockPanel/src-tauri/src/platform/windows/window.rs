@@ -18,12 +18,14 @@
 //!
 //! Durable approach:
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
-//!   re-assert popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`.
+//!   re-assert popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`, then force
+//!   transparent WebView2 bg + invalidate (LAYERED alone can leave a white fill).
 //! - Never Mica (`DONOTROUND` only).
-//! - Always `SetWindowRgn` = `RoundRect(pill) OR (client DIFF pill AABB)` on
-//!   **both** the top-level HWND and the WebView2 child. Corner crescents
-//!   stay clipped; magnify/menu margins (outside the pill AABB) stay visible.
-//!   Never fully clear the region on hover/menu — that re-opens pale corners.
+//! - `SetWindowRgn`: RoundRect-only when HWND == pill (rest); at hover/menu
+//!   `RoundRect(pill) OR (client DIFF pill AABB)` on both top-level and
+//!   WebView2 child. Never fully clear the region — that re-opens pale corners.
+//! - Diag poller self-heals paperclip (`OUTER_TOO_NARROW` / axis flip) by
+//!   re-applying the formula rest frame once per unhealthy streak.
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -37,8 +39,9 @@ use windows::Win32::Graphics::Dwm::{
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ, HRGN,
-    RGN_DIFF, RGN_ERROR, RGN_OR,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, InvalidateRect, RedrawWindow,
+    SetWindowRgn, HGDIOBJ, HRGN, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
+    RDW_UPDATENOW, RGN_DIFF, RGN_ERROR, RGN_OR,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -57,6 +60,12 @@ use crate::platform::geometry::{
 };
 
 use super::input::start_dock_input;
+
+/// After subclass restores `WS_EX_LAYERED` without a `WebviewWindow` handle,
+/// the next refresh path re-asserts DefaultBackgroundColor + invalidates.
+static NEED_TRANSPARENT_BG_REASSERT: AtomicBool = AtomicBool::new(false);
+/// Avoid hammering formula re-apply every 2s while a paperclip condition persists.
+static PAPERCLIP_SELF_HEAL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 /// Last CSS-pill box from `sync_vibrancy_pill` (DIP, window-client coords).
 /// Used by `refresh_windows_backdrop` after resizes that don't re-measure.
@@ -236,6 +245,40 @@ fn flush_frame_changed(hwnd: HWND) {
     };
 }
 
+/// Force a paint after LAYERED/chrome repair so DWM does not keep an opaque
+/// white strip from the previous compositing mode.
+fn invalidate_dock_hwnd(hwnd: HWND) {
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, true) };
+    let _ = unsafe {
+        RedrawWindow(
+            Some(hwnd),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        )
+    };
+}
+
+fn invalidate_dock_window(window: &WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        invalidate_dock_hwnd(hwnd);
+    }
+}
+
+/// Re-assert WebView2 alpha=0 + invalidate after LAYERED was restored.
+fn reassert_transparent_after_layered(window: &WebviewWindow) {
+    assert_transparent_webview_bg(window, true);
+    invalidate_dock_window(window);
+    NEED_TRANSPARENT_BG_REASSERT.store(false, Ordering::SeqCst);
+}
+
+fn consume_pending_transparent_reassert(window: &WebviewWindow) {
+    if NEED_TRANSPARENT_BG_REASSERT.swap(false, Ordering::SeqCst) {
+        log::info!("[win-backdrop] consuming pending transparent bg reassert after LAYERED repair");
+        reassert_transparent_after_layered(window);
+    }
+}
+
 /// WebView2 paints into a child HWND — that is what must be region-clipped.
 /// Clipping the top-level layered window produces the rainbow AA artifact;
 /// we still clip both because DirectComposition often ignores child-only
@@ -357,6 +400,9 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) {
         let desired = exstyle | WS_EX_LAYERED.0;
         unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
         repaired = true;
+        // Subclass has no WebviewWindow — flag the next refresh to force
+        // DefaultBackgroundColor(alpha=0) + invalidate (pale white strip).
+        NEED_TRANSPARENT_BG_REASSERT.store(true, Ordering::SeqCst);
         log::warn!(
             "[win-backdrop] subclass repair LAYERED EXSTYLE 0x{exstyle:08x} → 0x{desired:08x} \
              (restore #{})",
@@ -367,6 +413,7 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) {
     if repaired {
         CHROME_REPAIR_COUNT.fetch_add(1, Ordering::Relaxed);
         flush_frame_changed(hwnd);
+        invalidate_dock_hwnd(hwnd);
     }
 }
 
@@ -574,6 +621,7 @@ fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
     if (exstyle & WS_EX_LAYERED.0) != 0 {
+        consume_pending_transparent_reassert(window);
         return Ok(false);
     }
     let desired = exstyle | WS_EX_LAYERED.0;
@@ -592,18 +640,23 @@ fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
          restore#={}",
         LAYERED_RESTORE_COUNT.fetch_add(1, Ordering::Relaxed) + 1
     );
+    // LAYERED alone is not enough — DWM can keep an opaque white fill until
+    // DefaultBackgroundColor is forced transparent and the HWND is invalidated.
+    reassert_transparent_after_layered(window);
     Ok(true)
 }
 
 fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(), String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    let had_layered = (exstyle & WS_EX_LAYERED.0) != 0;
     let desired = if ignore {
         exstyle | WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0
     } else {
         (exstyle | WS_EX_LAYERED.0) & !WS_EX_TRANSPARENT.0
     };
     if desired == exstyle {
+        consume_pending_transparent_reassert(window);
         return Ok(());
     }
     let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
@@ -617,6 +670,11 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
         }
     }
     flush_frame_changed(hwnd);
+    if !had_layered {
+        reassert_transparent_after_layered(window);
+    } else {
+        consume_pending_transparent_reassert(window);
+    }
     log::debug!(
         "[win-backdrop] click-through ignore={ignore}: EXSTYLE=0x{exstyle:08x} → 0x{desired:08x}"
     );
@@ -915,12 +973,17 @@ fn start_windows_diag_poller(window: WebviewWindow) {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(2000));
             tick = tick.wrapping_add(1);
+            // Subclass LAYERED repair only sets a flag — consume it here so
+            // DefaultBackgroundColor(alpha=0) is forced within ~2s, not only
+            // on the next hover/refresh.
+            consume_pending_transparent_reassert(&window);
             let snap = windows_backdrop_snapshot(&window);
             let overlay = windows_debug_overlay_enabled(&window);
             let issues_changed = snap.health_issues != last_issues;
             if issues_changed {
                 if snap.healthy {
                     log::info!("[win-diag] HEALTH RESTORED after {:?}", last_issues);
+                    PAPERCLIP_SELF_HEAL_ATTEMPTED.store(false, Ordering::SeqCst);
                 } else {
                     log::warn!(
                         "[win-diag] HEALTH BAD issues={:?} style={:?} ex={:?} delta={:?} \
@@ -938,6 +1001,11 @@ fn start_windows_diag_poller(window: WebviewWindow) {
                     );
                 }
                 last_issues = snap.health_issues.clone();
+            }
+            // Retry path: heal is rate-limited internally; on failure the flag
+            // clears so the next 2s tick can try again (not only on issue edges).
+            if !snap.healthy {
+                self_heal_paperclip_if_needed(&window, &snap.health_issues);
             }
             let dpi_changed = snap.dpi_mismatch != last_dpi_mismatch;
             if dpi_changed {
@@ -996,6 +1064,57 @@ fn start_windows_diag_poller(window: WebviewWindow) {
         }
     });
     log::info!("[win-diag] poller started (2s; emits dock-win-diag when overlay/unhealthy)");
+}
+
+/// True when health tags indicate the HWND collapsed into the classic
+/// ~40×91 paperclip (or axis-flipped) geometry.
+fn health_issues_look_like_paperclip(issues: &[String]) -> bool {
+    issues.iter().any(|issue| {
+        issue.starts_with("OUTER_TOO_NARROW")
+            || issue.starts_with("OUTER_TOO_SHORT")
+            || issue.starts_with("ORIENT_FLIP")
+    })
+}
+
+/// Re-apply formula rest frame + pill rect + region after a detected paperclip.
+/// Rate-limited to once per unhealthy streak (`PAPERCLIP_SELF_HEAL_ATTEMPTED`);
+/// the flag is cleared again if the attempt fails so the next diag tick can retry.
+fn self_heal_paperclip_if_needed(window: &WebviewWindow, issues: &[String]) {
+    if !health_issues_look_like_paperclip(issues) {
+        return;
+    }
+    if PAPERCLIP_SELF_HEAL_ATTEMPTED.swap(true, Ordering::SeqCst) {
+        log::debug!("[win-backdrop] self-heal paperclip skipped (already attempted this streak)");
+        return;
+    }
+
+    let icon_size_dip = current_icon_size_dip(window);
+    let position = current_dock_position(window);
+    let entries = window.state::<AppsState>().entries_snapshot();
+    let (pill_width, pill_height, window_width, window_height) =
+        formula_window_frame_rest(&entries, icon_size_dip, position);
+
+    log::warn!(
+        "[win-backdrop] self-heal paperclip issues={issues:?} → \
+         formula pill={pill_width:.1}x{pill_height:.1} window={window_width:.1}x{window_height:.1} \
+         pos={position:?} icon={icon_size_dip}"
+    );
+
+    let heal_result = (|| -> Result<(), String> {
+        reassert_frameless_chrome_keep_size(window);
+        apply_dock_window_frame(window, window_width, window_height, position)?;
+        store_pill_dims(window, pill_width, pill_height);
+        let rect = fallback_pill_client_rect(window, pill_width, pill_height)?;
+        store_pill_client_rect(rect.x, rect.y, rect.width, rect.height);
+        reassert_transparent_after_layered(window);
+        sync_pill_window_rgn(window)?;
+        Ok(())
+    })();
+
+    if let Err(err) = heal_result {
+        log::warn!("[win-backdrop] self-heal paperclip failed (will retry): {err}");
+        PAPERCLIP_SELF_HEAL_ATTEMPTED.store(false, Ordering::SeqCst);
+    }
 }
 
 fn menu_blocks_pill_clip(window: &WebviewWindow) -> bool {
@@ -1090,8 +1209,10 @@ pub fn clear_dock_menu_region_hold(window: &WebviewWindow) -> Result<(), String>
 }
 
 /// Re-applies region clip for the current mode after any native resize.
-/// Always pill∪margins (never a full clear — that reopens pale corners).
+/// Always pill∪margins when expanded; RoundRect-only at rest (see
+/// `create_dock_clip_hrgn`). Never a full clear — that reopens pale corners.
 pub fn refresh_windows_backdrop(window: &WebviewWindow) -> Result<(), String> {
+    consume_pending_transparent_reassert(window);
     log::info!("[win-backdrop] refresh: sync region for current mode (mica off)");
     sync_pill_window_rgn(window)
 }
@@ -1349,12 +1470,14 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
     guard.is_active()
 }
 
-/// Builds `RoundRect(pill) OR (client DIFF pill AABB)` in physical pixels.
+/// Builds the dock clip region in physical pixels.
 ///
-/// Corner crescents inside the pill's axis-aligned box but outside the CSS
-/// curve stay clipped; everything outside that box (magnify / tooltip / menu
-/// margins) stays visible. When the HWND equals the pill AABB the DIFF is
-/// empty and the result is just the round rect.
+/// - **Rest** (pill AABB covers the client within 2px): `RoundRect(pill)` only.
+///   Avoids the failure mode where a stale/small LAST_PILL RoundRect is OR'd
+///   with `client DIFF AABB` and leaves opaque pale WebView margins visible.
+/// - **Expanded** (hover/menu HWND larger than pill): `RoundRect(pill) OR
+///   (client DIFF pill AABB)` so magnify/tooltip/menu margins stay visible
+///   while corner crescents inside the pill box stay clipped.
 unsafe fn create_dock_clip_hrgn(
     pill_left: i32,
     pill_top: i32,
@@ -1377,6 +1500,16 @@ unsafe fn create_dock_clip_hrgn(
             "CreateRoundRectRgn failed gle={}",
             last_win32_error()
         ));
+    }
+
+    // Resting HWND == pill: skip DIFF entirely (epsilon covers AA inflate).
+    const CLIENT_COVER_EPS: i32 = 2;
+    let covers_client = pill_left <= CLIENT_COVER_EPS
+        && pill_top <= CLIENT_COVER_EPS
+        && pill_right >= client_w - CLIENT_COVER_EPS
+        && pill_bottom >= client_h - CLIENT_COVER_EPS;
+    if covers_client {
+        return Ok(pill_round);
     }
 
     let win = unsafe { CreateRectRgn(0, 0, client_w, client_h) };
@@ -1494,15 +1627,67 @@ fn set_window_rgn_to_pill(
         let client_h = inner.height as i32;
         let clip = webview_clip_hwnd(hwnd);
 
+        let rest = !REGION_RELAXED.load(Ordering::SeqCst) && !menu_blocks_pill_clip(window);
+        const CLIENT_COVER_EPS: i32 = 2;
+        let covers_client = left <= CLIENT_COVER_EPS
+            && top <= CLIENT_COVER_EPS
+            && right >= client_w - CLIENT_COVER_EPS
+            && bottom >= client_h - CLIENT_COVER_EPS;
+
+        // Only rewrite the clip when the pill looks like a paperclip *stub*
+        // (~half the client or less on the long axis). A mere !covers during
+        // hover/menu shrink races would otherwise flash a full-client RoundRect
+        // over still-expanded HWND margins (pale corners).
+        let pill_w = (right - left).max(0);
+        let pill_h = (bottom - top).max(0);
+        let stub_in_client = client_w > 2
+            && client_h > 2
+            && ((client_w >= client_h && pill_w * 2 < client_w)
+                || (client_h > client_w && pill_h * 2 < client_h));
+
+        let (clip_left, clip_top, clip_right, clip_bottom, clip_diameter) =
+            if rest && !covers_client && stub_in_client {
+                log::warn!(
+                    "[win-backdrop] rest clip: stub pill inside larger client — \
+                     using full-client RoundRect (avoid pale stub∪margins) \
+                     pill=({left},{top})-({right},{bottom}) client={client_w}x{client_h}"
+                );
+                let l = -RGN_AA_INFLATE_PX;
+                let t = -RGN_AA_INFLATE_PX;
+                let r = client_w + RGN_AA_INFLATE_PX;
+                let b = client_h + RGN_AA_INFLATE_PX;
+                let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
+                let max_fit = (r - l).min(b - t).max(2);
+                (l, t, r, b, nominal.min(max_fit))
+            } else {
+                (left, top, right, bottom, diameter)
+            };
+
         let hrgn_parent = unsafe {
-            create_dock_clip_hrgn(left, top, right, bottom, diameter, client_w, client_h)
+            create_dock_clip_hrgn(
+                clip_left,
+                clip_top,
+                clip_right,
+                clip_bottom,
+                clip_diameter,
+                client_w,
+                client_h,
+            )
         }?;
         // Parent first — DirectComposition respects the top-level region.
         apply_hrgn_to_hwnd(hwnd, hrgn_parent, "toplevel")?;
 
         if clip != hwnd {
             let hrgn_child = unsafe {
-                create_dock_clip_hrgn(left, top, right, bottom, diameter, client_w, client_h)
+                create_dock_clip_hrgn(
+                    clip_left,
+                    clip_top,
+                    clip_right,
+                    clip_bottom,
+                    clip_diameter,
+                    client_w,
+                    client_h,
+                )
             }?;
             apply_hrgn_to_hwnd(clip, hrgn_child, "webview child")?;
         }
@@ -1516,8 +1701,8 @@ fn set_window_rgn_to_pill(
             .unwrap_or_else(|| "?".into());
         log::info!(
             "[win-backdrop] SetWindowRgn(pill∪margins) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
-             px=({left},{top})-({right},{bottom}) diameter={diameter} client={client_w}x{client_h} \
-             scale={scale:.2} STYLE={style} chrome_delta={delta} ok#={}",
+             px=({clip_left},{clip_top})-({clip_right},{clip_bottom}) diameter={clip_diameter} \
+             client={client_w}x{client_h} scale={scale:.2} STYLE={style} chrome_delta={delta} ok#={}",
             SET_RGN_OK.load(Ordering::Relaxed)
         );
         Ok(())

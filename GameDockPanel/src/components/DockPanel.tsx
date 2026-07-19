@@ -19,6 +19,7 @@ import {
   getPanelEffectPreset,
   getSizeMetrics,
   clampBorderWidthPx,
+  pillLengthPx,
   PILL_CORNER_RADIUS_PX,
 } from "../lib/constants";
 import {
@@ -324,6 +325,13 @@ function HydratedDockPanel({
   const restMetrics = useMemo(
     () => getSizeMetrics(settings.iconSizePx, { ledAlongThickness }),
     [settings.iconSizePx, ledAlongThickness],
+  );
+  // Floor the length axis so Top/Bottom cannot collapse to a ~40px
+  // "paperclip" stub inside a still-wide HWND (Windows WebView2 then paints
+  // opaque pale margins around the stub). Mirrors Rust `pill_length_dip`.
+  const pillLengthFloorPx = useMemo(
+    () => pillLengthPx(items, settings.iconSizePx),
+    [items, settings.iconSizePx],
   );
 
   useEffect(() => {
@@ -1160,9 +1168,14 @@ function HydratedDockPanel({
           // which CSS side is swapped explicitly per orientation here.
           paddingInline: orientation.isVertical ? pillPaddingYPx : pillPaddingXPx,
           paddingBlock: orientation.isVertical ? pillPaddingXPx : pillPaddingYPx,
-          // Static fallback until Motion values commit on the first frame.
-          minWidth: orientation.isVertical ? restMetrics.pillThicknessPx : 0,
-          minHeight: orientation.isVertical ? 0 : restMetrics.pillThicknessPx,
+          // Floors both axes: thickness from metrics, length from the
+          // roster formula — never `0` on the growth axis (paperclip).
+          minWidth: orientation.isVertical
+            ? restMetrics.pillThicknessPx
+            : pillLengthFloorPx,
+          minHeight: orientation.isVertical
+            ? pillLengthFloorPx
+            : restMetrics.pillThicknessPx,
           borderWidth: showBorderRing ? 0 : `${borderWidthPx}px`,
         }}
         className={`pointer-events-auto relative m-0 flex w-fit shrink-0 overflow-visible border bg-transparent transition-colors ${orientation.pillClassName} ${

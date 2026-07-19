@@ -323,19 +323,14 @@ export function getSizeMetrics(
 
 /**
  * Pill size at rest along the length axis (grows/shrinks with item count —
- * padding + icons + gaps), for `appCount` icons at the given icon size.
+ * padding + icons + gaps), for the given roster at `iconSizePx`.
  * Maps onto CSS width for `dockPosition: "bottom"|"top"`, CSS height for
- * `"left"|"right"`. The CSS pill itself is content-driven on this axis (no
- * explicit size is ever set in JSX, flex sizes it from its children), so
- * nothing in the frontend actually calls this at runtime. It exists purely
- * as the documented formula that `pill_length_dip`/`window_length_dip` in
- * src-tauri/src/platform/macos.rs mirror for native window/vibrancy/
- * hit-test sizing — kept here, parametrized by count and icon size instead
- * of fixed constants, so the two sides stay provably in sync. The actual
- * on-screen pill's vibrancy blur mask is independently corrected from the
- * measured DOM rect at runtime (see `sync_vibrancy_pill` /
- * `commands/window.rs`) — this formula only has to get the *native window
- * frame* long enough to avoid clipping it.
+ * `"left"|"right"`. Mirrored by Rust `pill_length_dip`/`window_length_dip`.
+ * Also used as the DockPanel `minWidth`/`minHeight` floor on the growth axis
+ * so a transient empty/`max-content` layout cannot collapse the CSS pill to
+ * a ~40px paperclip stub inside a still-wide HWND. The vibrancy/region mask
+ * is still corrected from the measured DOM rect at runtime
+ * (`sync_vibrancy_pill`).
  */
 export function pillLengthPx(items: DockItem[], iconSizePx: number): number {
   const metrics = getSizeMetrics(iconSizePx);
@@ -350,7 +345,7 @@ export function pillLengthPx(items: DockItem[], iconSizePx: number): number {
   return metrics.dockPaddingXPx * 2 + rowLength;
 }
 
-/** See `pillLengthPx` — same "documented formula, not called at runtime" note. */
+/** See `pillLengthPx` — same formula, with magnify/glow bleed for macOS window length. */
 export function windowLengthDip(items: DockItem[], iconSizePx: number): number {
   return (
     pillLengthPx(items, iconSizePx) +
