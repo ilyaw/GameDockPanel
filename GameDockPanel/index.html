@@ -6,6 +6,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- Space title: empty lets WebView2 ghost-titlebar fall back to a visible string. -->
     <title> </title>
+    <script>
+      // Early paint: main dock webview must not flash opaque white before React.
+      // Settings window keeps the default #09090b from CSS (no .dock-root).
+      (function () {
+        try {
+          var label =
+            window.__TAURI_INTERNALS__ &&
+            window.__TAURI_INTERNALS__.metadata &&
+            window.__TAURI_INTERNALS__.metadata.currentWindow &&
+            window.__TAURI_INTERNALS__.metadata.currentWindow.label;
+          // Only main — never treat unknown/null as dock (settings shares this HTML
+          // and must keep the opaque #09090b CSS default until React mounts).
+          if (label === "main") {
+            document.documentElement.style.background = "transparent";
+            document.documentElement.style.backgroundColor = "transparent";
+          }
+        } catch (_) {}
+      })();
+    </script>
   </head>
 
   <body>

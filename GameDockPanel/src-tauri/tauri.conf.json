@@ -27,7 +27,8 @@
         "focus": false,
         "focusable": true,
         "dragDropEnabled": true,
-        "visible": false
+        "visible": false,
+        "backgroundColor": "#00000000"
       },
       {
         "label": "settings",

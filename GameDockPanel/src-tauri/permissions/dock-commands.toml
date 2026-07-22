@@ -19,7 +19,9 @@ commands.allow = [
   "set_dock_region_relaxed",
   "set_menu_overlay",
   "open_settings",
+  "show_main_window",
   "get_dock_settings",
   "update_dock_settings",
+  "log_frontend_error",
   "report_webview_render_metrics",
 ]

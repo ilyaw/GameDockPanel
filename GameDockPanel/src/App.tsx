@@ -43,7 +43,11 @@ function App() {
   return label === "settings" ? (
     <SettingsWindow />
   ) : (
-    <div className={`dock-root h-full${IS_WINDOWS ? " dock-root--windows" : ""}`}>
+    <div
+      className={`dock-root h-full bg-transparent select-none overflow-hidden${
+        IS_WINDOWS ? " dock-root--windows" : ""
+      }`}
+    >
       <DockPanel />
     </div>
   );

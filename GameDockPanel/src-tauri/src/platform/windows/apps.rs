@@ -3,19 +3,20 @@
 use std::path::Path;
 
 use tauri::{App, AppHandle, Emitter, Manager};
-use windows::core::{BOOL, PCWSTR};
+use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, ShowWindow,
-    SW_RESTORE, WM_CLOSE,
+    SetForegroundWindow, SW_RESTORE, WM_CLOSE,
 };
 
+use super::chrome::ChromeGuard;
+use super::diag_file;
 use super::icons::resolve_app_icon;
-use super::seed::canonicalize_app_path;
+use super::launch;
 use crate::commands::apps::{apply_icon_resolve, emit_apps_list_changed, AppsState, DockItem};
 use crate::commands::settings::SettingsState;
 use crate::platform::geometry::current_icon_size_dip;
@@ -35,85 +36,63 @@ pub fn resolve_bundle_id_from_path(path: &str) -> Result<String, String> {
         .map(|e| e.to_lowercase());
 
     match ext.as_deref() {
-        Some("exe") => canonicalize_app_path(path_obj),
-        Some("lnk") => resolve_lnk_target(path_obj),
+        Some("exe") => launch::normalize_launch_path(path),
+        Some("lnk") => launch::resolve_lnk_target(path_obj),
         _ => Err(format!("unsupported path type: {path}")),
     }
 }
 
-fn resolve_lnk_target(lnk: &Path) -> Result<String, String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::Interface;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
-        STGM_READ,
-    };
-    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    }
-
-    let shell_link: IShellLinkW = unsafe {
-        CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?
-    };
-    let persist: IPersistFile = shell_link.cast().map_err(|e| e.to_string())?;
-
-    let wide: Vec<u16> = lnk.as_os_str().encode_wide().chain([0]).collect();
-    unsafe {
-        persist
-            .Load(PCWSTR(wide.as_ptr()), STGM_READ)
-            .map_err(|e| e.to_string())?;
-    }
-
-    let mut target_buf = [0u16; 1024];
-    unsafe {
-        shell_link
-            .GetPath(&mut target_buf, std::ptr::null_mut(), 0)
-            .map_err(|e| e.to_string())?;
-    }
-
-    let len = target_buf.iter().position(|&c| c == 0).unwrap_or(0);
-    let target = String::from_utf16_lossy(&target_buf[..len]);
-    canonicalize_app_path(Path::new(&target))
-}
-
 pub fn activate_or_launch_app(app: AppHandle, app_id: String) -> Result<(), String> {
-    if live_app_running(&app_id) {
+    let resolved = launch::normalize_launch_path(&app_id).unwrap_or_else(|_| app_id.clone());
+    diag_file::status(
+        "LAUNCH",
+        "ACTIVATE_OR_LAUNCH",
+        format!("raw={app_id} resolved={resolved}"),
+    );
+
+    if launch::is_explorer_path(&resolved) || launch::is_explorer_path(&app_id) {
+        launch::launch_or_activate_explorer(&app)?;
+        // Roster key drives AppsState.running / LED for this dock entry.
+        start_launch_running_watch(app, app_id);
+        return Ok(());
+    }
+
+    if live_app_running(&resolved) {
+        if let Some(hwnd) = find_main_window_for_app(&resolved) {
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = SetForegroundWindow(hwnd);
+            }
+            sync_bundle_running_state(&app, &resolved);
+            if let Some(window) = app.get_webview_window("main") {
+                ChromeGuard::on_surface_changed(&window);
+            }
+            diag_file::ok("LAUNCH", format!("activated existing hwnd={hwnd:?}"));
+            return Ok(());
+        }
+    }
+
+    // Also try the raw id in case normalize changed casing/path form.
+    if resolved != app_id && live_app_running(&app_id) {
         if let Some(hwnd) = find_main_window_for_app(&app_id) {
             unsafe {
                 if IsIconic(hwnd).as_bool() {
                     let _ = ShowWindow(hwnd, SW_RESTORE);
                 }
-                windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+                let _ = SetForegroundWindow(hwnd);
             }
             sync_bundle_running_state(&app, &app_id);
+            if let Some(window) = app.get_webview_window("main") {
+                ChromeGuard::on_surface_changed(&window);
+            }
             return Ok(());
         }
     }
 
-    let path_wide: Vec<u16> = app_id.encode_utf16().chain([0]).collect();
-    let dir = Path::new(&app_id)
-        .parent()
-        .map(|p| p.to_string_lossy().encode_utf16().chain([0]).collect::<Vec<_>>())
-        .unwrap_or_else(|| vec![0]);
-
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR::null(),
-            PCWSTR(path_wide.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR(dir.as_ptr()),
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-        )
-    };
-
-    if result.0 as isize <= 32 {
-        return Err(format!("ShellExecuteW failed for {app_id}"));
-    }
-
-    start_launch_running_watch(app, app_id);
+    launch::launch_exe(&app, &resolved)?;
+    start_launch_running_watch(app, resolved);
     Ok(())
 }
 
@@ -128,28 +107,8 @@ pub fn quit_app(_app: AppHandle, app_id: String) -> Result<(), String> {
     Ok(())
 }
 
-pub fn reveal_app_in_finder(_app: AppHandle, app_id: String) -> Result<(), String> {
-    let path = Path::new(&app_id);
-    if !path.is_file() {
-        return Err(format!("path not found: {app_id}"));
-    }
-    let arg = format!("/select,\"{}\"", path.display());
-    let arg_wide: Vec<u16> = arg.encode_utf16().chain([0]).collect();
-    let explorer: Vec<u16> = "explorer".encode_utf16().chain([0]).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR::null(),
-            PCWSTR(explorer.as_ptr()),
-            PCWSTR(arg_wide.as_ptr()),
-            PCWSTR::null(),
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-        )
-    };
-    if result.0 as isize <= 32 {
-        return Err("failed to open Explorer".to_string());
-    }
-    Ok(())
+pub fn reveal_app_in_finder(app: AppHandle, app_id: String) -> Result<(), String> {
+    launch::reveal_in_explorer(&app, &app_id)
 }
 
 pub fn refresh_dock_icons(app: &AppHandle, state: &AppsState) {

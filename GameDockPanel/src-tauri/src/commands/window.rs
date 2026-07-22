@@ -155,3 +155,9 @@ pub fn open_settings_window(app: &AppHandle) -> Result<(), String> {
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
     open_settings_window(&app)
 }
+
+/// Frontend ready gate: show the dock only after React + geometry sync.
+#[tauri::command]
+pub fn show_main_window(app: AppHandle) -> Result<(), String> {
+    platform::show_main_window(&app)
+}

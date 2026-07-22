@@ -115,8 +115,9 @@ pub fn get_diagnostics(app: AppHandle) -> Result<DiagnosticsPayload, String> {
 
     let support_hint = format!(
         "Send: (1) this JSON from «Скопировать диагностику» (2) the latest gamedockpanel*.log \
-         from logDir (3) screenshot with Windows debug overlay ON if possible. \
-         Look for [win-diag] scale/dpr_js / dpiMismatch (advisory) / [win-backdrop]. \
+         from logDir (3) tauri_windows_diagnostic.log from the same logDir \
+         (4) screenshot with Windows debug overlay ON if possible. \
+         Look for [SHOW]/[CHROME]/[LAUNCH]/[PAPERCLIP] lines and [win-backdrop]. \
          Toggle overlay in Settings → System."
     );
 
@@ -173,6 +174,17 @@ pub fn log_windows_diag(app: AppHandle) -> Result<serde_json::Value, String> {
         let _ = app;
         Err("log_windows_diag is Windows-only".to_string())
     }
+}
+
+/// Bridge `window.onerror` / unhandledrejection into the Windows diagnostic file.
+#[tauri::command]
+pub fn log_frontend_error(
+    message: String,
+    source: Option<String>,
+    line: Option<u32>,
+) -> Result<(), String> {
+    crate::platform::log_frontend_error(message, source, line);
+    Ok(())
 }
 
 /// WebView reports `devicePixelRatio` + CSS viewport so logs can catch DPI

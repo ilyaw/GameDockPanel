@@ -228,10 +228,43 @@ pub fn seed_app_candidates() -> Vec<(String, String)> {
     out
 }
 
+/// Strip `\\?\` / `\\?\UNC\` so paths match `QueryFullProcessImageNameW`.
+pub fn strip_extended_path_prefix(path: &str) -> String {
+    let lower = path.to_lowercase();
+    if let Some(rest) = lower.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = lower.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        lower
+    }
+}
+
 /// Canonical lowercase absolute path used as the stable app ID on Windows.
 pub fn canonicalize_app_path(path: &Path) -> Result<String, String> {
     let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
-    Ok(canonical.to_string_lossy().to_lowercase())
+    Ok(strip_extended_path_prefix(&canonical.to_string_lossy()))
+}
+
+/// Normalize persisted dock app ids (strip `\\?\`) in place. Returns true if any changed.
+pub fn normalize_persisted_app_ids(entries: &mut [crate::commands::apps::DockItem]) -> bool {
+    use crate::commands::apps::DockItem;
+    let mut changed = false;
+    for item in entries.iter_mut() {
+        let DockItem::App(entry) = item else {
+            continue;
+        };
+        let new_id = strip_extended_path_prefix(&entry.bundle_id);
+        if new_id != entry.bundle_id {
+            entry.bundle_id = new_id.clone();
+            entry.id = new_id;
+            changed = true;
+        } else if entry.id != entry.bundle_id {
+            entry.id = entry.bundle_id.clone();
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Whether an app ID (canonical exe path) exists on disk.

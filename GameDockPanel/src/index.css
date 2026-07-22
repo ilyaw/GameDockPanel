@@ -24,6 +24,9 @@ html:has(.dock-root) body,
 html:has(.dock-root) #root,
 .dock-root {
   background: transparent !important;
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 img {

@@ -129,11 +129,13 @@ pub fn run() {
             commands::window::set_dock_region_relaxed,
             commands::window::set_menu_overlay,
             commands::window::open_settings,
+            commands::window::show_main_window,
             commands::settings::get_dock_settings,
             commands::settings::update_dock_settings,
             commands::diagnostics::get_diagnostics,
             commands::diagnostics::open_log_dir,
             commands::diagnostics::log_windows_diag,
+            commands::diagnostics::log_frontend_error,
             commands::diagnostics::report_webview_render_metrics,
             #[cfg(debug_assertions)]
             commands::settings::qa_set_border,

@@ -34,14 +34,36 @@ pub use macos::{
 pub(crate) use windows::seed::seed_app_candidates;
 
 #[cfg(target_os = "windows")]
+pub use windows::seed::normalize_persisted_app_ids;
+
+#[cfg(target_os = "windows")]
 pub use windows::{
     activate_or_launch_app, apply_dock_window_layer, clear_dock_menu_region_hold,
-    ensure_window_fits_menu_overlay, is_bundle_running, log_windows_diag_snapshot, quit_app,
-    refresh_dock_icons, resolve_bundle_id_from_path, resolve_app_icon, reveal_app_in_finder,
-    set_dock_region_relaxed, setup_dock_window, shrink_dock_window_to_stored_pill,
-    start_apps_monitoring, store_frontend_render_metrics, sync_vibrancy_pill_from_web,
-    windows_backdrop_snapshot, zoom_app_above_dock,
+    ensure_window_fits_menu_overlay, is_bundle_running, log_frontend_error,
+    log_windows_diag_snapshot, quit_app, refresh_dock_icons, resolve_bundle_id_from_path,
+    resolve_app_icon, reveal_app_in_finder, set_dock_region_relaxed, setup_dock_window,
+    show_main_window, shrink_dock_window_to_stored_pill, start_apps_monitoring,
+    store_frontend_render_metrics, sync_vibrancy_pill_from_web, windows_backdrop_snapshot,
+    zoom_app_above_dock,
 };
+
+/// macOS: window is already shown in setup — idempotent show for the shared frontend gate.
+#[cfg(target_os = "macos")]
+pub fn show_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn log_frontend_error(message: String, source: Option<String>, line: Option<u32>) {
+    log::error!(
+        "[frontend] {message} source={:?} line={line:?}",
+        source.unwrap_or_default()
+    );
+}
 
 #[cfg(target_os = "windows")]
 pub use geometry::resize_dock_window_for_pill;
@@ -63,6 +85,23 @@ pub fn setup_dock_window(app: &mut tauri::App) -> Result<(), String> {
         window.show().map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+pub fn show_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+pub fn log_frontend_error(message: String, source: Option<String>, line: Option<u32>) {
+    log::error!(
+        "[frontend] {message} source={:?} line={line:?}",
+        source.unwrap_or_default()
+    );
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]

@@ -586,6 +586,17 @@ fn load_or_seed_entries(app: &AppHandle) -> Result<Vec<DockItem>, String> {
                         }
                     }
                 }
+                #[cfg(target_os = "windows")]
+                let entries = {
+                    let mut entries = entries;
+                    if crate::platform::normalize_persisted_app_ids(&mut entries) {
+                        log::info!(
+                            "normalized extended-length (\\\\?\\) paths in dock-apps.json"
+                        );
+                        save_entries(app, &entries)?;
+                    }
+                    entries
+                };
                 log::info!("loaded {app_count} apps from {}", path.display());
                 return Ok(entries);
             }

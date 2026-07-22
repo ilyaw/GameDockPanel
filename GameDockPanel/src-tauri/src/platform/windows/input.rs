@@ -30,7 +30,7 @@ use crate::platform::geometry::{
     pill_thickness_hover_dip, PILL_CORNER_RADIUS_DIP,
 };
 
-use super::window::set_dock_click_through;
+use super::window::{consume_surface_reassert_if_needed, set_dock_click_through};
 
 const CLICK_POLL_MS: u64 = 50;
 
@@ -59,6 +59,10 @@ fn start_click_through_poller(window: WebviewWindow) {
 
         loop {
             std::thread::sleep(Duration::from_millis(CLICK_POLL_MS));
+
+            // Faster than the 2s diag poller — repair LAYERED/region after
+            // focus/size stomps from launch or DWM within one poll tick.
+            consume_surface_reassert_if_needed(&window);
 
             let Ok(cursor) = window.cursor_position() else {
                 continue;

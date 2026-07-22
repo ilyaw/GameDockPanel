@@ -8,5 +8,6 @@ commands.allow = [
   "get_diagnostics",
   "open_log_dir",
   "log_windows_diag",
+  "log_frontend_error",
   "report_webview_render_metrics",
 ]

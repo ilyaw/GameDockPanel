@@ -10,6 +10,7 @@ import { DockPillContextMenu } from "./DockPillContextMenu";
 import { useDockApps } from "../hooks/useDockApps";
 import { useDockOrientation } from "../hooks/useDockOrientation";
 import { useDockSettings } from "../hooks/useDockSettings";
+import { useDockWindowReady } from "../hooks/useDockWindowReady";
 import {
   MAX_SEPARATORS,
   BG_ANIMATION_CLASSES,
@@ -301,6 +302,8 @@ function HydratedDockPanel({
     setIndicatorColor,
   } = dockApps;
   const separatorsFull = countDockSeparators(items) >= MAX_SEPARATORS;
+  const [geometryReady, setGeometryReady] = useState(false);
+  useDockWindowReady(geometryReady);
 
   useEffect(() => {
     console.info(
@@ -921,6 +924,7 @@ function HydratedDockPanel({
                 width: aligned.width,
                 height: aligned.height,
               });
+              setGeometryReady(true);
             } catch (error: unknown) {
               console.error("[dock] sync_vibrancy_pill failed:", error);
             }

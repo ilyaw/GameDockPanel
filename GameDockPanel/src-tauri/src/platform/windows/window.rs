@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tauri::utils::config::Color;
-use tauri::{App, Emitter, Manager, WebviewWindow};
+use tauri::{Emitter, Manager, WebviewWindow};
 use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
@@ -48,9 +48,12 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetWindow, GetWindowLongPtrW, PostMessageW, SetWindowLongPtrW, SetWindowPos,
     GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, WM_APP, WM_NCCALCSIZE, WM_NCPAINT, WM_STYLECHANGED, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    SWP_NOZORDER, WM_ACTIVATE, WM_APP, WM_DPICHANGED, WM_NCCALCSIZE, WM_NCPAINT, WM_SIZE,
+    WM_STYLECHANGED, WM_WINDOWPOSCHANGED, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
+
+use super::diag_file;
 
 use crate::commands::apps::{AppsState, MenuOverlayState};
 use crate::commands::settings::{DockPosition, DockWindowLayer};
@@ -60,13 +63,17 @@ use crate::platform::geometry::{
     store_pill_dims, window_length_rest_dip, window_thickness_rest_dip, PILL_CORNER_RADIUS_DIP,
 };
 
-use super::input::start_dock_input;
-
 /// After subclass restores `WS_EX_LAYERED` without a `WebviewWindow` handle,
 /// the next refresh path re-asserts DefaultBackgroundColor + invalidates.
 static NEED_TRANSPARENT_BG_REASSERT: AtomicBool = AtomicBool::new(false);
 /// Avoid hammering formula re-apply every 2s while a paperclip condition persists.
 static PAPERCLIP_SELF_HEAL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+/// Subclass sets this on focus/size/DPI; diag poller / refresh consume with full reassert.
+static NEED_SURFACE_REASSERT: AtomicBool = AtomicBool::new(false);
+/// Coalesce fire-and-forget `run_on_main_thread` posts from the input poller.
+static SURFACE_REASSERT_SCHEDULED: AtomicBool = AtomicBool::new(false);
+/// Rate-limit surface reassert (ms since UNIX_EPOCH).
+static LAST_SURFACE_REASSERT_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Last CSS-pill box from `sync_vibrancy_pill` (DIP, window-client coords).
 /// Used by `refresh_windows_backdrop` after resizes that don't re-measure.
@@ -415,6 +422,16 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) {
         CHROME_REPAIR_COUNT.fetch_add(1, Ordering::Relaxed);
         flush_frame_changed(hwnd);
         invalidate_dock_hwnd(hwnd);
+        diag_file::status(
+            "CHROME",
+            "REPAIR",
+            format!(
+                "hwnd={hwnd:?} repairs={} layered_restore={} caption_creep={}",
+                CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
+                LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
+                CAPTION_CREEP_COUNT.load(Ordering::Relaxed)
+            ),
+        );
     }
 }
 
@@ -445,8 +462,21 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
         WM_STYLECHANGED => {
             let _ = PostMessageW(Some(hwnd), WM_DOCK_REPAIR_CHROME, WPARAM(0), LPARAM(0));
         }
+        WM_SIZE | WM_WINDOWPOSCHANGED | WM_ACTIVATE | WM_DPICHANGED => {
+            // Immediate HWND repair + flag full ChromeGuard path (needs WebviewWindow).
+            // Do not log every WINDOWPOSCHANGED — it floods the diagnostic file;
+            // on_surface_changed logs once when the flag is consumed.
+            repair_dock_hwnd_chrome(hwnd);
+            invalidate_dock_hwnd(hwnd);
+            NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+            if msg == WM_ACTIVATE || msg == WM_DPICHANGED || msg == WM_SIZE {
+                let ctx = if msg == WM_ACTIVATE { "FOCUS" } else { "SIZE" };
+                diag_file::status(ctx, "EVENT", format!("msg=0x{msg:04X} hwnd={hwnd:?}"));
+            }
+        }
         m if m == WM_DOCK_REPAIR_CHROME => {
             repair_dock_hwnd_chrome(hwnd);
+            NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
             return LRESULT(0);
         }
         _ => {}
@@ -963,7 +993,7 @@ pub fn log_windows_diag_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
     snap
 }
 
-fn start_windows_diag_poller(window: WebviewWindow) {
+pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
     if DIAG_POLLER_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -978,6 +1008,7 @@ fn start_windows_diag_poller(window: WebviewWindow) {
             // DefaultBackgroundColor(alpha=0) is forced within ~2s, not only
             // on the next hover/refresh.
             consume_pending_transparent_reassert(&window);
+            consume_surface_reassert_if_needed(&window);
             let snap = windows_backdrop_snapshot(&window);
             let overlay = windows_debug_overlay_enabled(&window);
             let issues_changed = snap.health_issues != last_issues;
@@ -1095,6 +1126,14 @@ fn self_heal_paperclip_if_needed(window: &WebviewWindow, issues: &[String]) {
     let (pill_width, pill_height, window_width, window_height) =
         formula_window_frame_rest(&entries, icon_size_dip, position);
 
+    diag_file::status(
+        "PAPERCLIP",
+        "HEAL",
+        format!(
+            "issues={issues:?} formula_pill={pill_width:.1}x{pill_height:.1} \
+             window={window_width:.1}x{window_height:.1} pos={position:?} icon={icon_size_dip}"
+        ),
+    );
     log::warn!(
         "[win-backdrop] self-heal paperclip issues={issues:?} → \
          formula pill={pill_width:.1}x{pill_height:.1} window={window_width:.1}x{window_height:.1} \
@@ -1817,106 +1856,104 @@ pub fn apply_dock_window_layer(
     Ok(())
 }
 
-/// Sizes the dock from the app roster, anchors it, enables click-through, and shows.
-pub fn setup_dock_window(app: &mut App) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
-
-    let icon_size_dip = current_icon_size_dip(&window);
-    let position = current_dock_position(&window);
-    let entries = app.state::<AppsState>().entries_snapshot();
-    let entry_count = entries
-        .iter()
-        .filter(|item| matches!(item, crate::commands::apps::DockItem::App(_)))
-        .count();
-
-    let (pill_width, pill_height, window_width, window_height) =
-        formula_window_frame_rest(&entries, icon_size_dip, position);
-
-    let scale = window.scale_factor().unwrap_or(1.0);
-    log::info!(
-        "[win-backdrop] setup_dock_window: position={position:?} icon_size={icon_size_dip} \
-         apps={entry_count} pill={pill_width:.1}x{pill_height:.1} \
-         window={window_width:.1}x{window_height:.1} scale={scale:.2} \
-         rest=pill_only_edge_inset_outer"
-    );
-
-    apply_dock_window_frame(&window, window_width, window_height, position)?;
-    if let (Ok(inner), Ok(outer), Ok(pos)) = (
-        window.inner_size(),
-        window.outer_size(),
-        window.outer_position(),
-    ) {
-        log::info!(
-            "[win-backdrop] after frame: inner={}x{} outer={}x{} pos=({},{})",
-            inner.width,
-            inner.height,
-            outer.width,
-            outer.height,
-            pos.x,
-            pos.y
-        );
-    }
-
-    let layer = {
-        let state = app.state::<crate::commands::settings::SettingsState>();
-        let guard = state
-            .settings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.dock_window_layer
-    };
-    // always_on_top goes through Tao and may restore caption / wipe exstyle —
-    // strip chrome and re-apply click-through afterward.
-    apply_dock_window_layer(&window, layer)?;
-
-    // Frameless + transparent before region/show — strips residual caption bits
-    // and logs WebView2 version for ghost-titlebar triage.
-    ensure_frameless_dock_chrome(&window, window_width, window_height, position)?;
-
-    // Permanent NC kill + style repair — stops the caption/LAYERED thrash that
-    // painted the pale blue bar above the RGB pill.
-    if let Err(err) = install_dock_chrome_subclass(&window) {
+/// Chrome prepare for [`super::lifecycle`] / [`super::chrome::ChromeGuard`].
+pub(crate) fn chrome_prepare(
+    window: &WebviewWindow,
+    window_width: f64,
+    window_height: f64,
+    position: DockPosition,
+) -> Result<(), String> {
+    ensure_frameless_dock_chrome(window, window_width, window_height, position)?;
+    if let Err(err) = install_dock_chrome_subclass(window) {
         log::warn!("[win-backdrop] chrome subclass failed (falling back to poll repair): {err}");
+        diag_file::status("CHROME", "SUBCLASS_WARN", &err);
     }
-
-    // After every Tao style rewrite path — native click-through only (no
-    // set_ignore_cursor_events), so TRANSPARENT|LAYERED stick.
-    set_dock_click_through(&window, true)?;
-
-    store_pill_dims(&window, pill_width, pill_height);
-    if let Ok(rect) = fallback_pill_client_rect(&window, pill_width, pill_height) {
-        store_pill_client_rect(rect.x, rect.y, rect.width, rect.height);
-        log::info!(
-            "[win-backdrop] fallback pill client=({:.1},{:.1} {:.1}x{:.1})",
-            rect.x,
-            rect.y,
-            rect.width,
-            rect.height
-        );
-    }
-
-    refresh_windows_backdrop(&window)?;
-
-    start_dock_input(window.clone());
-    start_windows_diag_poller(window.clone());
-
-    window.show().map_err(|e| e.to_string())?;
-    // Re-assert popup chrome after show — caption bits can return.
-    reassert_dock_chrome_after_show(&window, window_width, window_height, position);
-    // show()/reassert may touch styles via Tao — restore click-through + pill clip.
-    if let Err(err) = set_dock_click_through(&window, true) {
-        log::warn!("[win-backdrop] click-through after show failed: {err}");
-    }
-    if let Err(err) = refresh_windows_backdrop(&window) {
-        log::warn!("[win-backdrop] pill region after show failed: {err}");
-    }
-    log::info!(
-        "[win-backdrop] setup_dock_window: window shown snapshot={:?}",
-        windows_backdrop_snapshot(&window)
-    );
     Ok(())
+}
+
+pub(crate) fn chrome_invalidate(window: &WebviewWindow) {
+    invalidate_dock_window(window);
+}
+
+pub(crate) fn chrome_reassert_after_show(
+    window: &WebviewWindow,
+    window_width: f64,
+    window_height: f64,
+    position: DockPosition,
+) {
+    reassert_dock_chrome_after_show(window, window_width, window_height, position);
+    invalidate_dock_window(window);
+}
+
+/// Consume subclass/focus surface flag (input poller ~50ms + diag backup).
+///
+/// Fire-and-forget onto the UI thread (does not block click-through). At most
+/// one main-thread task is queued at a time (`SURFACE_REASSERT_SCHEDULED`).
+pub(crate) fn consume_surface_reassert_if_needed(window: &WebviewWindow) {
+    if !NEED_SURFACE_REASSERT.load(Ordering::SeqCst) {
+        return;
+    }
+    if SURFACE_REASSERT_SCHEDULED.swap(true, Ordering::SeqCst) {
+        return; // already posted
+    }
+    let window = window.clone();
+    if let Err(err) = window.clone().run_on_main_thread(move || {
+        SURFACE_REASSERT_SCHEDULED.store(false, Ordering::SeqCst);
+        if NEED_SURFACE_REASSERT.swap(false, Ordering::SeqCst) {
+            on_surface_changed(&window);
+        }
+    }) {
+        SURFACE_REASSERT_SCHEDULED.store(false, Ordering::SeqCst);
+        log::warn!("[win-backdrop] schedule on_surface_changed failed: {err}");
+    }
+}
+
+/// One path after focus / size / DPI / launch: layered + transparent bg + region + redraw.
+pub(crate) fn on_surface_changed(window: &WebviewWindow) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_SURFACE_REASSERT_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 50 {
+        NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+        return;
+    }
+    LAST_SURFACE_REASSERT_MS.store(now_ms, Ordering::Relaxed);
+    NEED_SURFACE_REASSERT.store(false, Ordering::SeqCst);
+
+    diag_file::status("CHROME", "SURFACE_RUN", "reassert+rgn+invalidate");
+    reassert_frameless_chrome_keep_size(window);
+    assert_transparent_webview_bg(window, true);
+    if let Err(err) = with_dock_main_thread(window, ensure_layered_exstyle) {
+        diag_file::status("LAYERED", "ERR", &err);
+        log::warn!("[win-backdrop] on_surface_changed LAYERED: {err}");
+    }
+    let accept_hits = REGION_RELAXED.load(Ordering::SeqCst)
+        || MENU_REGION_HOLD.load(Ordering::SeqCst)
+        || menu_overlay_active(window);
+    if let Err(err) = set_dock_click_through(window, !accept_hits) {
+        log::warn!("[win-backdrop] on_surface_changed click-through: {err}");
+    }
+    if let Err(err) = refresh_windows_backdrop(window) {
+        diag_file::status("RGN", "ERR", &err);
+        log::warn!("[win-backdrop] on_surface_changed region: {err}");
+    }
+    invalidate_dock_window(window);
+    diag_file::ok("CHROME", "on_surface_changed complete");
+}
+
+pub(crate) fn fallback_pill_for_setup(
+    window: &WebviewWindow,
+    width: f64,
+    height: f64,
+) -> Result<(f64, f64, f64, f64), String> {
+    let rect = fallback_pill_client_rect(window, width, height)?;
+    Ok((rect.x, rect.y, rect.width, rect.height))
+}
+
+pub(crate) fn store_pill_client_rect_for_setup(x: f64, y: f64, width: f64, height: f64) {
+    store_pill_client_rect(x, y, width, height);
 }
 
 pub fn ensure_window_fits_menu_overlay(
