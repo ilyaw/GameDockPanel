@@ -27,6 +27,9 @@
 //!   WebView2 child. Never fully clear the region — that re-opens pale corners.
 //! - Diag poller self-heals paperclip (`OUTER_TOO_NARROW` / axis flip) by
 //!   re-applying the formula rest frame once per unhealthy streak.
+//! - **No `WM_WINDOWPOSCHANGED` → `on_surface_changed` feedback loop:** our own
+//!   `SetWindowRgn`/`SWP_FRAMECHANGED` must not re-arm full surface reassert;
+//!   debounce must not re-arm when chrome is already healthy (was a 20 Hz storm).
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -68,12 +71,20 @@ use crate::platform::geometry::{
 static NEED_TRANSPARENT_BG_REASSERT: AtomicBool = AtomicBool::new(false);
 /// Avoid hammering formula re-apply every 2s while a paperclip condition persists.
 static PAPERCLIP_SELF_HEAL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
-/// Subclass sets this on focus/size/DPI; diag poller / refresh consume with full reassert.
+/// Subclass sets this on focus/size/DPI/repair; input poller consumes with full reassert.
 static NEED_SURFACE_REASSERT: AtomicBool = AtomicBool::new(false);
 /// Coalesce fire-and-forget `run_on_main_thread` posts from the input poller.
 static SURFACE_REASSERT_SCHEDULED: AtomicBool = AtomicBool::new(false);
 /// Rate-limit surface reassert (ms since UNIX_EPOCH).
 static LAST_SURFACE_REASSERT_MS: AtomicU64 = AtomicU64::new(0);
+/// True while *our* chrome/region code runs (`SetWindowRgn` / `FRAMECHANGED`).
+/// Subclass must not treat the resulting `WM_WINDOWPOSCHANGED` as an external
+/// stomper — that was the 20 Hz `SURFACE_RUN` feedback loop.
+static SURFACE_OWN_OP: AtomicBool = AtomicBool::new(false);
+/// Min gap between full `on_surface_changed` runs (was 50 ms → permanent storm).
+const SURFACE_REASSERT_DEBOUNCE_MS: u64 = 400;
+/// Rate-limit `[CHROME] [SURFACE_SKIP]` diag lines.
+static LAST_SURFACE_SKIP_LOG_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Last CSS-pill box from `sync_vibrancy_pill` (DIP, window-client coords).
 /// Used by `refresh_windows_backdrop` after resizes that don't re-measure.
@@ -382,9 +393,9 @@ fn hwnd_needs_frameless_rewrite(hwnd: HWND) -> bool {
     has_caption || !is_popup
 }
 
-fn repair_dock_hwnd_chrome(hwnd: HWND) {
+fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
     if DOCK_CHROME_REPAIRING.swap(true, Ordering::SeqCst) {
-        return;
+        return false;
     }
     let _guard = scopeguard_reset_repairing();
 
@@ -433,6 +444,7 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) {
             ),
         );
     }
+    repaired
 }
 
 /// Tiny RAII so repair flag clears on all paths without try/finally noise.
@@ -444,6 +456,56 @@ fn scopeguard_reset_repairing() -> impl Drop {
         }
     }
     Reset
+}
+
+/// Nest-safe: only the outermost enter clears `SURFACE_OWN_OP` on drop.
+fn surface_own_op_guard() -> impl Drop {
+    struct Guard {
+        acquired: bool,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if self.acquired {
+                SURFACE_OWN_OP.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+    let was_set = SURFACE_OWN_OP.swap(true, Ordering::SeqCst);
+    Guard {
+        acquired: !was_set,
+    }
+}
+
+fn surface_reassert_suppressed() -> bool {
+    SURFACE_OWN_OP.load(Ordering::SeqCst) || DOCK_CHROME_REPAIRING.load(Ordering::SeqCst)
+}
+
+/// Caption / missing LAYERED / pending transparent-bg — worth re-arming debounce.
+fn surface_chrome_needs_reassert(window: &WebviewWindow) -> bool {
+    if NEED_TRANSPARENT_BG_REASSERT.load(Ordering::SeqCst) {
+        return true;
+    }
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    if hwnd_needs_frameless_rewrite(hwnd) {
+        return true;
+    }
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    (exstyle & WS_EX_LAYERED.0) == 0
+}
+
+fn log_surface_skip(reason: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_SURFACE_SKIP_LOG_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < 1000 {
+        return;
+    }
+    LAST_SURFACE_SKIP_LOG_MS.store(now_ms, Ordering::Relaxed);
+    diag_file::status("CHROME", "SURFACE_SKIP", reason);
 }
 
 unsafe extern "system" fn dock_chrome_subclass_proc(
@@ -460,22 +522,45 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
         WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
         WM_NCPAINT => return LRESULT(0),
         WM_STYLECHANGED => {
-            let _ = PostMessageW(Some(hwnd), WM_DOCK_REPAIR_CHROME, WPARAM(0), LPARAM(0));
+            // During our own chrome/region ops, repair inline — do not post a
+            // full surface reassert (click-through EXSTYLE toggles would re-arm
+            // the feedback loop via WM_DOCK_REPAIR_CHROME).
+            if surface_reassert_suppressed() {
+                let _ = repair_dock_hwnd_chrome(hwnd);
+            } else {
+                let _ = PostMessageW(Some(hwnd), WM_DOCK_REPAIR_CHROME, WPARAM(0), LPARAM(0));
+            }
         }
         WM_SIZE | WM_WINDOWPOSCHANGED | WM_ACTIVATE | WM_DPICHANGED => {
-            // Immediate HWND repair + flag full ChromeGuard path (needs WebviewWindow).
-            // Do not log every WINDOWPOSCHANGED — it floods the diagnostic file;
-            // on_surface_changed logs once when the flag is consumed.
-            repair_dock_hwnd_chrome(hwnd);
-            invalidate_dock_hwnd(hwnd);
-            NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
-            if msg == WM_ACTIVATE || msg == WM_DPICHANGED || msg == WM_SIZE {
-                let ctx = if msg == WM_ACTIVATE { "FOCUS" } else { "SIZE" };
-                diag_file::status(ctx, "EVENT", format!("msg=0x{msg:04X} hwnd={hwnd:?}"));
+            // Cheap HWND repair always. Full ChromeGuard path only for real
+            // external events — not for our own SetWindowRgn/FRAMECHANGED echo
+            // (that feedback loop ran SURFACE_RUN at ~20 Hz forever).
+            let suppress = surface_reassert_suppressed();
+            let repaired = repair_dock_hwnd_chrome(hwnd);
+            let want_full = match msg {
+                WM_ACTIVATE | WM_DPICHANGED => true,
+                WM_SIZE => !suppress,
+                _ => {
+                    // WM_WINDOWPOSCHANGED: only if we actually repaired, or
+                    // transparent bg still needs a WebviewWindow pass.
+                    !suppress
+                        && (repaired
+                            || NEED_TRANSPARENT_BG_REASSERT.load(Ordering::SeqCst))
+                }
+            };
+            if want_full {
+                invalidate_dock_hwnd(hwnd);
+                NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+                if msg == WM_ACTIVATE || msg == WM_DPICHANGED || msg == WM_SIZE {
+                    let ctx = if msg == WM_ACTIVATE { "FOCUS" } else { "SIZE" };
+                    diag_file::status(ctx, "EVENT", format!("msg=0x{msg:04X} hwnd={hwnd:?}"));
+                }
+            } else if repaired {
+                invalidate_dock_hwnd(hwnd);
             }
         }
         m if m == WM_DOCK_REPAIR_CHROME => {
-            repair_dock_hwnd_chrome(hwnd);
+            let _ = repair_dock_hwnd_chrome(hwnd);
             NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
             return LRESULT(0);
         }
@@ -1252,6 +1337,7 @@ pub fn clear_dock_menu_region_hold(window: &WebviewWindow) -> Result<(), String>
 /// Always pill∪margins when expanded; RoundRect-only at rest (see
 /// `create_dock_clip_hrgn`). Never a full clear — that reopens pale corners.
 pub fn refresh_windows_backdrop(window: &WebviewWindow) -> Result<(), String> {
+    let _own = surface_own_op_guard();
     consume_pending_transparent_reassert(window);
     log::info!("[win-backdrop] refresh: sync region for current mode (mica off)");
     sync_pill_window_rgn(window)
@@ -1915,13 +2001,22 @@ pub(crate) fn on_surface_changed(window: &WebviewWindow) {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     let last = LAST_SURFACE_REASSERT_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < 50 {
-        NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+    if now_ms.saturating_sub(last) < SURFACE_REASSERT_DEBOUNCE_MS {
+        // Do not re-arm when chrome is healthy — that locked a 20 Hz loop with
+        // WM_WINDOWPOSCHANGED from SetWindowRgn echoing forever.
+        if surface_chrome_needs_reassert(window) {
+            NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+            log_surface_skip("debounce+unhealthy");
+        } else {
+            NEED_SURFACE_REASSERT.store(false, Ordering::SeqCst);
+            log_surface_skip("debounce+healthy");
+        }
         return;
     }
     LAST_SURFACE_REASSERT_MS.store(now_ms, Ordering::Relaxed);
     NEED_SURFACE_REASSERT.store(false, Ordering::SeqCst);
 
+    let _own = surface_own_op_guard();
     diag_file::status("CHROME", "SURFACE_RUN", "reassert+rgn+invalidate");
     reassert_frameless_chrome_keep_size(window);
     assert_transparent_webview_bg(window, true);
