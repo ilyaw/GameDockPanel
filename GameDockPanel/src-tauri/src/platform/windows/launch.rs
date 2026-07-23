@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tauri::{AppHandle, Manager};
-use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM, BOOL};
+use windows::core::{Interface, BOOL, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HWND, LPARAM};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
     STGM_READ,

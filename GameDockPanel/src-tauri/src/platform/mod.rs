@@ -39,7 +39,7 @@ pub use windows::seed::normalize_persisted_app_ids;
 #[cfg(target_os = "windows")]
 pub use windows::{
     activate_or_launch_app, apply_dock_window_layer, clear_dock_menu_region_hold,
-    ensure_window_fits_menu_overlay, is_bundle_running, log_frontend_error,
+    ensure_window_fits_menu_overlay, is_app_installed, is_bundle_running, log_frontend_error,
     log_windows_diag_snapshot, quit_app, refresh_dock_icons, resolve_bundle_id_from_path,
     resolve_app_icon, reveal_app_in_finder, set_dock_region_relaxed, setup_dock_window,
     show_main_window, shrink_dock_window_to_stored_pill, start_apps_monitoring,

@@ -12,6 +12,7 @@ pub mod seed;
 mod window;
 
 pub use seed::is_app_installed;
+pub use icons::resolve_app_icon;
 pub use apps::{
     activate_or_launch_app, is_bundle_running, quit_app, refresh_dock_icons,
     reveal_app_in_finder, resolve_bundle_id_from_path, start_apps_monitoring,
