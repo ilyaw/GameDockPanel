@@ -49,10 +49,11 @@
 //!   an opaque white redirection surface (the "white pill backdrop").
 //! - Never Mica (`DONOTROUND` only).
 //! - `SetWindowRgn` **always**: RoundRect-only when HWND == pill (rest); at
-//!   hover/menu `RoundRect(pill) OR (client DIFF pill AABB)` on both
-//!   top-level and WebView2 child. Frontend `--dock-win-edge-inset` softens
-//!   the GDI knife edge in CSS only — do not shrink the hit-test to match
-//!   (that oscillated expand/shrink with DOM mouseleave).
+//!   hover/menu `RoundRect(paint-inset pill) OR (client DIFF pill AABB)` on
+//!   both top-level and WebView2 child. RoundRect is inset by the same
+//!   `--dock-win-edge-inset` (2 DIP) as the CSS fill so the WebView annulus
+//!   outside paint cannot show pale. Hit-test stays on the **full** CSS pill
+//!   — shrinking it caused expand↔shrink oscillation with DOM mouseleave.
 //! - Hover/`WM_SIZE`: apply region **before** invalidate (log: `INVALIDATE
 //!   surface_event` landed before `SetWindowRgn` on expand → white flash).
 //!   Own hover resize under `surface_own_op_guard`.
@@ -65,6 +66,10 @@
 //! - **No `WM_WINDOWPOSCHANGED` → `on_surface_changed` feedback loop:** our own
 //!   `SetWindowRgn`/`SWP_FRAMECHANGED` must not re-arm full surface reassert;
 //!   debounce must not re-arm when chrome is already healthy (was a 20 Hz storm).
+
+/// Matches frontend `--dock-win-edge-inset` under `.dock-win-hardclip` (DIP).
+/// Applied to GDI RoundRect only — click-through hit-test uses the full pill.
+pub(crate) const WIN_PAINT_INSET_DIP: f64 = 2.0;
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2088,15 +2093,21 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
 
 /// Builds the dock clip region in physical pixels.
 ///
-/// - **Rest** (`round_only`): `RoundRect(pill)` only.
-/// - **Expanded**: `RoundRect(pill) OR (client DIFF pill AABB)` so magnify /
+/// - **Rest** (`round_only`): `RoundRect(round_*)` only — paint-inset pill.
+/// - **Expanded**: `RoundRect(round_*) OR (client DIFF aabb_*)` so magnify /
 ///   tooltip/menu margins stay visible while pill crescents stay clipped.
+///   `aabb_*` is the pre-inset pill box; `round_*` is paint-inset so the 2px
+///   annulus is not part of the HWND (no white ring when alpha flickers).
 unsafe fn create_dock_clip_hrgn(
-    pill_left: i32,
-    pill_top: i32,
-    pill_right: i32,
-    pill_bottom: i32,
+    round_left: i32,
+    round_top: i32,
+    round_right: i32,
+    round_bottom: i32,
     diameter: i32,
+    aabb_left: i32,
+    aabb_top: i32,
+    aabb_right: i32,
+    aabb_bottom: i32,
     client_w: i32,
     client_h: i32,
     round_only: bool,
@@ -2108,7 +2119,14 @@ unsafe fn create_dock_clip_hrgn(
     }
 
     let pill_round = unsafe {
-        CreateRoundRectRgn(pill_left, pill_top, pill_right, pill_bottom, diameter, diameter)
+        CreateRoundRectRgn(
+            round_left,
+            round_top,
+            round_right,
+            round_bottom,
+            diameter,
+            diameter,
+        )
     };
     if pill_round.is_invalid() {
         return Err(format!(
@@ -2122,7 +2140,7 @@ unsafe fn create_dock_clip_hrgn(
     }
 
     let win = unsafe { CreateRectRgn(0, 0, client_w, client_h) };
-    let aabb = unsafe { CreateRectRgn(pill_left, pill_top, pill_right, pill_bottom) };
+    let aabb = unsafe { CreateRectRgn(aabb_left, aabb_top, aabb_right, aabb_bottom) };
     let outside = unsafe { CreateRectRgn(0, 0, 0, 0) };
     let result = unsafe { CreateRectRgn(0, 0, 0, 0) };
 
@@ -2195,16 +2213,13 @@ fn set_window_rgn_to_pill(
     height_dip: f64,
 ) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    // Pill AABB in physical px. CreateRoundRectRgn right/bottom are exclusive.
+    // Pill AABB in physical px (pre-inset). CreateRoundRectRgn right/bottom
+    // are exclusive. Paint inset matches CSS `--dock-win-edge-inset`.
     let left = (x_dip * scale).round() as i32;
     let top = (y_dip * scale).round() as i32;
     let right = ((x_dip + width_dip) * scale).round() as i32;
     let bottom = ((y_dip + height_dip) * scale).round() as i32;
-    let diameter = {
-        let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
-        let max_fit = (right - left).min(bottom - top).max(2);
-        nominal.min(max_fit)
-    };
+    let paint_inset_px = (WIN_PAINT_INSET_DIP * scale).round().max(0.0) as i32;
 
     if right <= left || bottom <= top {
         log::warn!(
@@ -2248,29 +2263,57 @@ fn set_window_rgn_to_pill(
             && ((client_w >= client_h && pill_w * 2 < client_w)
                 || (client_h > client_w && pill_h * 2 < client_h));
 
-        let (clip_left, clip_top, clip_right, clip_bottom, clip_diameter, round_only) =
+        let (aabb_left, aabb_top, aabb_right, aabb_bottom, round_only) =
             if rest && !covers_client && stub_in_client {
                 log::warn!(
                     "[win-backdrop] rest clip: stub pill inside larger client — \
                      using full-client RoundRect (avoid pale stub∪margins) \
                      pill=({left},{top})-({right},{bottom}) client={client_w}x{client_h}"
                 );
-                let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
-                let max_fit = client_w.min(client_h).max(2);
-                (0, 0, client_w, client_h, nominal.min(max_fit), true)
+                (0, 0, client_w, client_h, true)
             } else if covers_client || rest {
-                (left, top, right, bottom, diameter, true)
+                (left, top, right, bottom, true)
             } else {
-                (left, top, right, bottom, diameter, false)
+                (left, top, right, bottom, false)
             };
+
+        // Shrink RoundRect to the CSS paint footprint; keep AABB pre-inset so
+        // hover margins OR'd via DIFF do not re-open the white annulus.
+        let inset = paint_inset_px
+            .min((aabb_right - aabb_left).max(0) / 2)
+            .min((aabb_bottom - aabb_top).max(0) / 2);
+        let round_left = aabb_left + inset;
+        let round_top = aabb_top + inset;
+        let round_right = aabb_right - inset;
+        let round_bottom = aabb_bottom - inset;
+        let paint_radius_dip = (PILL_CORNER_RADIUS_DIP - WIN_PAINT_INSET_DIP).max(1.0);
+        let clip_diameter = {
+            let nominal = ((paint_radius_dip * 2.0) * scale).round().max(2.0) as i32;
+            let max_fit = (round_right - round_left)
+                .min(round_bottom - round_top)
+                .max(2);
+            nominal.min(max_fit)
+        };
+
+        if round_right <= round_left || round_bottom <= round_top {
+            log::warn!(
+                "[win-backdrop] SetWindowRgn skipped empty paint-inset rect \
+                 aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) inset={inset}"
+            );
+            return Ok(());
+        }
 
         let hrgn_parent = unsafe {
             create_dock_clip_hrgn(
-                clip_left,
-                clip_top,
-                clip_right,
-                clip_bottom,
+                round_left,
+                round_top,
+                round_right,
+                round_bottom,
                 clip_diameter,
+                aabb_left,
+                aabb_top,
+                aabb_right,
+                aabb_bottom,
                 client_w,
                 client_h,
                 round_only,
@@ -2282,11 +2325,15 @@ fn set_window_rgn_to_pill(
         if clip != hwnd {
             let hrgn_child = unsafe {
                 create_dock_clip_hrgn(
-                    clip_left,
-                    clip_top,
-                    clip_right,
-                    clip_bottom,
+                    round_left,
+                    round_top,
+                    round_right,
+                    round_bottom,
                     clip_diameter,
+                    aabb_left,
+                    aabb_top,
+                    aabb_right,
+                    aabb_bottom,
                     client_w,
                     client_h,
                     round_only,
@@ -2305,15 +2352,19 @@ fn set_window_rgn_to_pill(
             .unwrap_or_else(|| "?".into());
         log::info!(
             "[win-backdrop] SetWindowRgn(pill∪margins) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
-             px=({clip_left},{clip_top})-({clip_right},{clip_bottom}) diameter={clip_diameter} \
-             client={client_w}x{client_h} scale={scale:.2} STYLE={style} chrome_delta={delta} ok#={}",
+             px=({round_left},{round_top})-({round_right},{round_bottom}) inset={inset} \
+             aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) diameter={clip_diameter} \
+             round_only={round_only} client={client_w}x{client_h} scale={scale:.2} \
+             STYLE={style} chrome_delta={delta} ok#={}",
             SET_RGN_OK.load(Ordering::Relaxed)
         );
         log_pale(
             "RGN",
             format!(
-                "apply pill∪margins px=({clip_left},{clip_top})-({clip_right},{clip_bottom}) \
-                 diameter={clip_diameter} client={client_w}x{client_h} ok#={} {}",
+                "apply paint-inset RoundRect px=({round_left},{round_top})-({round_right},{round_bottom}) \
+                 inset={inset} aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) \
+                 diameter={clip_diameter} round_only={round_only} client={client_w}x{client_h} \
+                 ok#={} {}",
                 SET_RGN_OK.load(Ordering::Relaxed),
                 hwnd_style_snap(hwnd)
             ),

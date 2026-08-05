@@ -89,6 +89,10 @@ fn start_click_through_poller(window: WebviewWindow) {
                 let _ = window.emit("dock-hover", dock_hovered);
                 // Magnify + tooltip paint outside the CSS pill — expand the
                 // HWND while hovered, shrink when idle.
+                log::info!(
+                    "[win-pale] [HOVER] hit_test in_pill={dock_hovered} (full pill; \
+                     GDI paint-inset separate)"
+                );
                 if let Err(err) =
                     crate::platform::set_dock_region_relaxed(&window, dock_hovered, None)
                 {
@@ -154,9 +158,10 @@ fn pill_cursor_at_screen(
     let pill_h = (pill_h_dip * scale).round() as i32;
     // Near-edge inset is outside the HWND (see geometry.rs) — pill is flush
     // to the near client edge; do not offset hit-test by DOCK_EDGE_INSET.
-    // Use the full CSS pill (not the 2px GDI paint inset): shrinking the
-    // hit-box caused expand↔shrink oscillation with DOM mouseleave/enter
-    // (dock appeared on hover and vanished on leave).
+    // Full CSS pill — intentionally NOT the 2 DIP GDI paint inset. Shrinking
+    // hit-test to match SetWindowRgn caused expand↔shrink oscillation (DOM
+    // mouseleave + poller). GDI clips the pale annulus; poller hover uses
+    // the visual pill so the rim still counts as dock-hovered.
     let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
 
     let (pill_left, pill_top, pill_right, pill_bottom) =
