@@ -21,10 +21,16 @@
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
 //!   re-assert popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`, then force
 //!   transparent WebView2 bg + invalidate (LAYERED alone can leave a white fill).
+//! - Per-pixel alpha lives on DWM's blur-behind trick, which Tao applies only
+//!   once at window creation — `reassert_dwm_alpha` re-pins it after every
+//!   chrome repair / FRAMECHANGED, otherwise transparent HTML composites over
+//!   an opaque white redirection surface (the "white pill backdrop").
 //! - Never Mica (`DONOTROUND` only).
-//! - `SetWindowRgn`: RoundRect-only when HWND == pill (rest); at hover/menu
-//!   `RoundRect(pill) OR (client DIFF pill AABB)` on both top-level and
-//!   WebView2 child. Never fully clear the region — that re-opens pale corners.
+//! - `SetWindowRgn` (only when `windowsHardClip` setting is on; default off —
+//!   alpha handles the corners): RoundRect-only when HWND == pill (rest); at
+//!   hover/menu `RoundRect(pill) OR (client DIFF pill AABB)` on both top-level
+//!   and WebView2 child. In hard-clip mode never fully clear the region —
+//!   that re-opens pale corners when transparency itself is broken.
 //! - Diag poller self-heals paperclip (`OUTER_TOO_NARROW` / axis flip) by
 //!   re-applying the formula rest frame once per unhealthy streak.
 //! - **No `WM_WINDOWPOSCHANGED` → `on_surface_changed` feedback loop:** our own
@@ -37,23 +43,31 @@ use std::sync::Mutex;
 
 use tauri::utils::config::Color;
 use tauri::{Emitter, Manager, WebviewWindow};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND,
     DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, InvalidateRect, RedrawWindow,
-    SetWindowRgn, HGDIOBJ, HRGN, RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE,
-    RDW_UPDATENOW, RGN_DIFF, RGN_ERROR, RGN_OR,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EnumDisplaySettingsW,
+    InvalidateRect, RedrawWindow, SetWindowRgn, DEVMODEW, ENUM_CURRENT_SETTINGS, HGDIOBJ, HRGN,
+    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RGN_DIFF, RGN_ERROR,
+    RGN_OR,
+};
+use windows::Win32::UI::HiDpi::{
+    GetAwarenessFromDpiAwarenessContext, GetDpiForWindow, GetWindowDpiAwarenessContext,
+    DPI_AWARENESS_PER_MONITOR_AWARE, DPI_AWARENESS_SYSTEM_AWARE, DPI_AWARENESS_UNAWARE,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetWindow, GetWindowLongPtrW, PostMessageW, SetWindowLongPtrW, SetWindowPos,
-    GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, WM_ACTIVATE, WM_APP, WM_DPICHANGED, WM_NCCALCSIZE, WM_NCPAINT, WM_SIZE,
-    WM_STYLECHANGED, WM_WINDOWPOSCHANGED, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, PostMessageW,
+    SetWindowLongPtrW, SetWindowPos, GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_APP,
+    WM_DPICHANGED, WM_NCCALCSIZE, WM_NCPAINT, WM_SIZE, WM_STYLECHANGED, WM_WINDOWPOSCHANGED,
+    WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_SYSMENU, WS_VISIBLE,
 };
 
 use super::diag_file;
@@ -134,6 +148,11 @@ pub struct WindowsBackdropSnapshot {
     pub chrome_repair_count: u64,
     pub layered_restore_count: u64,
     pub caption_creep_count: u64,
+    /// Successful `DwmEnableBlurBehindWindow` re-assertions (per-pixel alpha).
+    pub dwm_alpha_reasserts: u64,
+    /// `DwmEnableBlurBehindWindow` currently failing — hard-clip fallback is
+    /// active regardless of the `windowsHardClip` setting.
+    pub dwm_alpha_broken: bool,
     /// Empty when healthy; otherwise human-readable chrome issue tags.
     /// Advisory DPI signals live in `dpi_mismatch` — never here (would flood
     /// the unhealthy poller path and paint a false chrome-failure HUD).
@@ -142,6 +161,18 @@ pub struct WindowsBackdropSnapshot {
     /// Advisory only: `|tauri_scale − devicePixelRatio| > 0.08`. Does **not**
     /// affect `healthy` / chrome repair.
     pub dpi_mismatch: Option<String>,
+    /// `GetDpiForWindow` on the dock HWND (96 = 100%) — ground truth next to
+    /// the Tauri `scale_factor`.
+    pub window_dpi: Option<u32>,
+    /// DPI awareness of the dock window's context. `UNAWARE` means DWM
+    /// bitmap-stretches the whole window — the classic full-window blur.
+    pub dpi_awareness: Option<String>,
+    /// Physical panel resolution straight from the display driver
+    /// (`EnumDisplaySettingsW`) — never DPI-virtualized.
+    pub physical_screen_px: Option<(u32, u32)>,
+    /// Primary screen size as this process sees it (`GetSystemMetrics`) —
+    /// smaller than `physical_screen_px` when the process is DPI-virtualized.
+    pub virtual_screen_px: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -223,6 +254,16 @@ static FRONTEND_RENDER: Mutex<Option<FrontendRenderMetrics>> = Mutex::new(None);
 static SYNC_VIBRANCY_CALLS: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_OK: AtomicU64 = AtomicU64::new(0);
 static SET_RGN_ERR: AtomicU64 = AtomicU64::new(0);
+/// Successful `DwmEnableBlurBehindWindow` re-assertions (see
+/// `reassert_dwm_alpha`) — surfaced in the snapshot so tester logs show
+/// whether the per-pixel-alpha trick had to be restored.
+static DWM_ALPHA_REASSERTS: AtomicU64 = AtomicU64::new(0);
+/// `DwmEnableBlurBehindWindow` is currently failing — per-pixel alpha cannot
+/// be pinned, so region clipping falls back on as if `windowsHardClip` were
+/// enabled (white stays confined to the pill instead of flooding the full
+/// HWND rect). Edge-triggered: transitions request one surface reassert and
+/// log once; steady failure stays quiet (no repair-storm re-arm).
+static DWM_ALPHA_BROKEN: AtomicBool = AtomicBool::new(false);
 static CHROME_REPAIR_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAYERED_RESTORE_COUNT: AtomicU64 = AtomicU64::new(0);
 static CAPTION_CREEP_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -240,6 +281,9 @@ static MENU_REGION_HOLD: AtomicBool = AtomicBool::new(false);
 static TRANSPARENT_BG_APPLIED: AtomicBool = AtomicBool::new(false);
 /// Dock HWND subclass installed (WM_NCCALCSIZE / chrome repair).
 static DOCK_SUBCLASS_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// A GDI pill region is currently applied (only in `windows_hard_clip` mode) —
+/// lets the soft path clear it exactly once instead of logging every sync.
+static HARD_CLIP_REGION_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Guard against re-entrant style repair from WM_STYLECHANGED.
 static DOCK_CHROME_REPAIRING: AtomicBool = AtomicBool::new(false);
 
@@ -284,8 +328,75 @@ fn invalidate_dock_window(window: &WebviewWindow) {
     }
 }
 
+/// Re-apply the DWM "blur behind" trick that makes the top-level redirection
+/// surface honor per-pixel alpha.
+///
+/// Tao only calls `DwmEnableBlurBehindWindow` once at window creation (with an
+/// empty `CreateRectRgn(0,0,-1,-1)` blur region) and never re-applies it (its
+/// own FIXME acknowledges `WM_DWMCOMPOSITIONCHANGED` is unhandled). Caption
+/// creep, `SWP_FRAMECHANGED` chrome repairs and DWM composition resets can
+/// silently drop the effect — after that every transparent HTML pixel
+/// composites over an opaque white surface (the "white pill backdrop").
+/// Idempotent and cheap; call wherever chrome is repaired or styles flushed.
+fn reassert_dwm_alpha(hwnd: HWND) {
+    let region = unsafe { CreateRectRgn(0, 0, -1, -1) };
+    if region.is_invalid() {
+        log::warn!(
+            "[win-backdrop] reassert_dwm_alpha: CreateRectRgn failed gle={}",
+            last_win32_error()
+        );
+        return;
+    }
+    let bb = DWM_BLURBEHIND {
+        dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
+        fEnable: true.into(),
+        hRgnBlur: region,
+        fTransitionOnMaximized: false.into(),
+    };
+    let result = unsafe { DwmEnableBlurBehindWindow(hwnd, &bb) };
+    let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
+    match result {
+        Ok(()) => {
+            let n = DWM_ALPHA_REASSERTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if DWM_ALPHA_BROKEN.swap(false, Ordering::SeqCst) {
+                log::info!(
+                    "[win-backdrop] DwmEnableBlurBehindWindow recovered (#{n}) — \
+                     releasing hard-clip fallback"
+                );
+                NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+            } else {
+                log::debug!("[win-backdrop] DwmEnableBlurBehindWindow reasserted (#{n})");
+            }
+        }
+        Err(err) => {
+            let first_failure = !DWM_ALPHA_BROKEN.swap(true, Ordering::SeqCst);
+            if first_failure {
+                log::warn!(
+                    "[win-backdrop] DwmEnableBlurBehindWindow failed: {err} gle={} — \
+                     falling back to GDI pill clip (as if windowsHardClip were on)",
+                    last_win32_error()
+                );
+                // One surface pass re-applies the region promptly; steady
+                // failure must NOT re-arm (that class of feedback loop ran
+                // SURFACE_RUN at 20 Hz before — see module docs).
+                NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+            } else {
+                log::debug!("[win-backdrop] DwmEnableBlurBehindWindow still failing: {err}");
+            }
+        }
+    }
+}
+
+/// `reassert_dwm_alpha` for callers outside this module (lifecycle show path).
+pub(crate) fn reassert_dwm_alpha_for_window(window: &WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        reassert_dwm_alpha(hwnd);
+    }
+}
+
 /// Re-assert WebView2 alpha=0 + invalidate after LAYERED was restored.
 fn reassert_transparent_after_layered(window: &WebviewWindow) {
+    reassert_dwm_alpha_for_window(window);
     assert_transparent_webview_bg(window, true);
     invalidate_dock_window(window);
     NEED_TRANSPARENT_BG_REASSERT.store(false, Ordering::SeqCst);
@@ -432,6 +543,9 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
     if repaired {
         CHROME_REPAIR_COUNT.fetch_add(1, Ordering::Relaxed);
         flush_frame_changed(hwnd);
+        // FRAMECHANGED after a style stomp is exactly when DWM can drop the
+        // blur-behind alpha trick — restore it before repainting.
+        reassert_dwm_alpha(hwnd);
         invalidate_dock_hwnd(hwnd);
         diag_file::status(
             "CHROME",
@@ -735,6 +849,9 @@ where
 /// the old compositing mode and LAYERED appears set but still paints opaque.
 fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    // Unconditional: LAYERED can be intact while the DWM blur-behind alpha
+    // was still dropped by an earlier FRAMECHANGED — keep both in lockstep.
+    reassert_dwm_alpha(hwnd);
     let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
     if (exstyle & WS_EX_LAYERED.0) != 0 {
         consume_pending_transparent_reassert(window);
@@ -786,6 +903,9 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
         }
     }
     flush_frame_changed(hwnd);
+    // Every hover enter/leave lands here with a FRAMECHANGED — the highest
+    // frequency path that can shed the DWM alpha trick. Keep it pinned.
+    reassert_dwm_alpha(hwnd);
     if !had_layered {
         reassert_transparent_after_layered(window);
     } else {
@@ -962,6 +1082,53 @@ fn reapply_dock_frame_after_chrome(
     Ok(())
 }
 
+/// DPI ground truth for blur triage. `scale_factor` and JS
+/// `devicePixelRatio` both read 1.0 inside a DPI-virtualized process, so
+/// they cannot expose the classic "unaware window bitmap-stretched by DWM"
+/// blur. The display-driver mode (`EnumDisplaySettingsW`) is never
+/// virtualized — `physical_screen_px != virtual_screen_px` together with
+/// awareness `UNAWARE` is the smoking gun.
+fn dpi_ground_truth(
+    window: &WebviewWindow,
+) -> (
+    Option<u32>,
+    Option<String>,
+    Option<(u32, u32)>,
+    Option<(i32, i32)>,
+) {
+    let (window_dpi, dpi_awareness) = match window.hwnd() {
+        Ok(hwnd) => {
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            let awareness = unsafe {
+                GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(hwnd))
+            };
+            let label = if awareness == DPI_AWARENESS_UNAWARE {
+                "UNAWARE"
+            } else if awareness == DPI_AWARENESS_SYSTEM_AWARE {
+                "SYSTEM_AWARE"
+            } else if awareness == DPI_AWARENESS_PER_MONITOR_AWARE {
+                "PER_MONITOR_AWARE"
+            } else {
+                "INVALID"
+            };
+            ((dpi > 0).then_some(dpi), Some(label.to_string()))
+        }
+        Err(_) => (None, None),
+    };
+    let physical_screen_px = unsafe {
+        let mut devmode = DEVMODEW {
+            dmSize: size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        EnumDisplaySettingsW(PCWSTR::null(), ENUM_CURRENT_SETTINGS, &mut devmode)
+            .as_bool()
+            .then_some((devmode.dmPelsWidth, devmode.dmPelsHeight))
+    };
+    let virtual_screen_px =
+        Some(unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) });
+    (window_dpi, dpi_awareness, physical_screen_px, virtual_screen_px)
+}
+
 /// Support snapshot for diagnostics clipboard / log correlation.
 pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnapshot {
     let scale = window.scale_factor().ok();
@@ -1025,6 +1192,8 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         _ => None,
     };
     let healthy = health_issues.is_empty();
+    let (window_dpi, dpi_awareness, physical_screen_px, virtual_screen_px) =
+        dpi_ground_truth(window);
 
     WindowsBackdropSnapshot {
         last_pill_client: last_pill,
@@ -1055,9 +1224,15 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         chrome_repair_count: CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
         layered_restore_count: LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
         caption_creep_count: CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
+        dwm_alpha_reasserts: DWM_ALPHA_REASSERTS.load(Ordering::Relaxed),
+        dwm_alpha_broken: DWM_ALPHA_BROKEN.load(Ordering::SeqCst),
         health_issues,
         healthy,
         dpi_mismatch,
+        window_dpi,
+        dpi_awareness,
+        physical_screen_px,
+        virtual_screen_px,
     }
 }
 
@@ -1068,6 +1243,27 @@ fn windows_debug_overlay_enabled(window: &WebviewWindow) -> bool {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.windows_debug_overlay
+}
+
+/// `windowsHardClip` setting: `false` (default) leaves both HWNDs unclipped —
+/// per-pixel alpha renders the rounded corners like macOS and WebView2 stays
+/// on its normal composition path. `true` restores the legacy GDI RoundRect
+/// clip for machines where transparency itself misbehaves (pale corners).
+fn windows_hard_clip_enabled(window: &WebviewWindow) -> bool {
+    let state = window.state::<crate::commands::settings::SettingsState>();
+    let guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.windows_hard_clip
+}
+
+/// Effective clip mode: the user setting, plus an automatic fallback while
+/// `DwmEnableBlurBehindWindow` is failing (per-pixel alpha unavailable —
+/// without a region the whole HWND rect would flood white, which is strictly
+/// worse than the legacy stair-stepped clip).
+fn hard_clip_active(window: &WebviewWindow) -> bool {
+    windows_hard_clip_enabled(window) || DWM_ALPHA_BROKEN.load(Ordering::SeqCst)
 }
 
 /// Force one snapshot into the log + `dock-win-diag` event (settings button).
@@ -1164,7 +1360,9 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                 } else {
                     log::info!(
                         "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?} \
-                         scale={:?} dpr_js={:?} viewport_css={:?} inner={:?} dpi_mismatch={:?}",
+                         scale={:?} dpr_js={:?} viewport_css={:?} inner={:?} dpi_mismatch={:?} \
+                         dpi={:?} awareness={:?} screen_phys={:?} screen_virt={:?} \
+                         dwm_alpha_reasserts={}",
                         snap.outer_size_px,
                         snap.stored_pill_dip,
                         snap.scale_factor,
@@ -1172,6 +1370,11 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         snap.frontend_viewport_css,
                         snap.inner_size_px,
                         snap.dpi_mismatch,
+                        snap.window_dpi,
+                        snap.dpi_awareness,
+                        snap.physical_screen_px,
+                        snap.virtual_screen_px,
+                        snap.dwm_alpha_reasserts,
                     );
                 }
             }
@@ -1412,6 +1615,7 @@ fn ensure_frameless_dock_chrome(
         log::warn!("[win-backdrop] set_shadow(false) failed: {err}");
     }
     clear_dock_window_title(window);
+    reassert_dwm_alpha_for_window(window);
     assert_transparent_webview_bg(window, true);
     // Drop any system backdrop before first paint — Mica leaves dark corners
     // outside the CSS/RGB pill (and ignores GDI region clips).
@@ -1820,6 +2024,7 @@ fn set_window_rgn_to_pill(
         }
 
         SET_RGN_OK.fetch_add(1, Ordering::Relaxed);
+        HARD_CLIP_REGION_ACTIVE.store(true, Ordering::SeqCst);
         let style = read_gwl_styles(window)
             .map(|(s, _)| format!("0x{s:08x}"))
             .unwrap_or_else(|| "?".into());
@@ -1897,8 +2102,44 @@ fn stored_pill_size(window: &WebviewWindow) -> Result<(f64, f64), String> {
     Ok((width, height))
 }
 
+/// Removes the GDI clip from the dock HWND and the WebView2 child (soft
+/// mode, `windows_hard_clip = false`). Idempotent — `SetWindowRgn(None)` on
+/// every sync is cheap; the transition is logged once via
+/// `HARD_CLIP_REGION_ACTIVE`. DWM corner preference / Mica-off are kept
+/// identical to the hard-clip path so the two modes differ only in the clip.
+fn clear_dock_window_rgn(window: &WebviewWindow) -> Result<(), String> {
+    set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
+    if let Err(err) = clear_dock_mica(window) {
+        log::warn!("[win-backdrop] clear_mica before region clear: {err}");
+    }
+    let was_active = HARD_CLIP_REGION_ACTIVE.swap(false, Ordering::SeqCst);
+    with_dock_main_thread(window, move |window| {
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        let clip = webview_clip_hwnd(hwnd);
+        let parent_ok = unsafe { SetWindowRgn(hwnd, None, true) };
+        let mut child_ok = 1;
+        if clip != hwnd {
+            child_ok = unsafe { SetWindowRgn(clip, None, true) };
+        }
+        if was_active {
+            log::info!(
+                "[win-backdrop] SetWindowRgn cleared (hard clip off) parent_ok={} child_ok={}",
+                parent_ok != 0,
+                child_ok != 0
+            );
+        }
+        Ok(())
+    })
+}
+
 /// Re-applies the combined pill∪margins clip from the latest measured pill.
+/// With `windows_hard_clip` off (default) and DWM alpha healthy, removes the
+/// clip instead — the rounded corners come from CSS + per-pixel alpha, not
+/// from GDI.
 fn sync_pill_window_rgn(window: &WebviewWindow) -> Result<(), String> {
+    if !hard_clip_active(window) {
+        return clear_dock_window_rgn(window);
+    }
     let rect = match resolve_pill_client_rect(window) {
         Ok(rect) => rect,
         Err(err) => {
@@ -2019,6 +2260,7 @@ pub(crate) fn on_surface_changed(window: &WebviewWindow) {
     let _own = surface_own_op_guard();
     diag_file::status("CHROME", "SURFACE_RUN", "reassert+rgn+invalidate");
     reassert_frameless_chrome_keep_size(window);
+    reassert_dwm_alpha_for_window(window);
     assert_transparent_webview_bg(window, true);
     if let Err(err) = with_dock_main_thread(window, ensure_layered_exstyle) {
         diag_file::status("LAYERED", "ERR", &err);

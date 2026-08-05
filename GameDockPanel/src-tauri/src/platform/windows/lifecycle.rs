@@ -16,8 +16,9 @@ use super::diag_file;
 use super::input::start_dock_input;
 use super::region;
 use super::window::{
-    apply_dock_window_layer, fallback_pill_for_setup, set_dock_click_through,
-    start_windows_diag_poller, store_pill_client_rect_for_setup, windows_backdrop_snapshot,
+    apply_dock_window_layer, fallback_pill_for_setup, reassert_dwm_alpha_for_window,
+    set_dock_click_through, start_windows_diag_poller, store_pill_client_rect_for_setup,
+    windows_backdrop_snapshot,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -225,6 +226,8 @@ fn perform_show(app: &AppHandle) -> Result<(), String> {
 
     window.show().map_err(|e| e.to_string())?;
     diag_file::ok("SHOW", "window.show() ok");
+    // First map can reset DWM state — pin per-pixel alpha before repaint.
+    reassert_dwm_alpha_for_window(&window);
 
     ChromeGuard::reassert_after_show(&window, window_width, window_height, position);
     if let Err(err) = set_dock_click_through(&window, true) {

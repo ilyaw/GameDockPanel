@@ -280,12 +280,18 @@ export function getSizeMetrics(
 ): SizeMetrics {
   const ledAlongThickness = options?.ledAlongThickness ?? true;
   const scale = iconSizePx / BASE_ICON_SIZE_PX;
-  const dockGapPx = BASE_DOCK_GAP_PX * scale;
-  const dockPaddingXPx = BASE_DOCK_PADDING_X_PX * scale;
-  const dockPaddingYPx = BASE_DOCK_PADDING_Y_PX * scale;
-  const iconLedGapPx = BASE_ICON_LED_GAP_PX * scale;
+  // Whole-pixel metrics, mirroring Rust `geometry.rs::size_metrics` exactly
+  // (`.round()` on gaps/paddings, `.ceil()` on magnify overflow). Fractional
+  // values here (e.g. 8 × 44/56 = 6.2857px) put every icon/LED/border on a
+  // fractional coordinate — at dpr=1 (Windows) that bilinear-smears 1-3px
+  // elements into the "low-res" look, and it also drifts the measured DOM
+  // pill away from the Rust formula (252.84 vs 253).
+  const dockGapPx = Math.round(BASE_DOCK_GAP_PX * scale);
+  const dockPaddingXPx = Math.round(BASE_DOCK_PADDING_X_PX * scale);
+  const dockPaddingYPx = Math.round(BASE_DOCK_PADDING_Y_PX * scale);
+  const iconLedGapPx = Math.round(BASE_ICON_LED_GAP_PX * scale);
 
-  const magnifyHeightOverflowPx = iconSizePx * (MAGNIFY_MAX_SCALE - 1);
+  const magnifyHeightOverflowPx = Math.ceil(iconSizePx * (MAGNIFY_MAX_SCALE - 1));
   const magnifyInfluenceRadiusPx = (iconSizePx + dockGapPx) * 2;
   const launchBounceAmplitudePx =
     magnifyHeightOverflowPx * LAUNCH_BOUNCE_AMPLITUDE_RATIO;
@@ -796,6 +802,7 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   dockPosition: "bottom",
   dockWindowLayer: "above_windows",
   windowsDebugOverlay: false,
+  windowsHardClip: false,
 };
 
 export type LedColorMode = DockSettings["ledColorMode"];

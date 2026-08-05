@@ -276,14 +276,31 @@ img {
 }
 
 /*
-  Windows + SetWindowRgn: GDI round-rects have no AA, so paint flush to the
-  HWND edge gets stair-stepped. Pull BOTH the dark fill and the RGB ring
-  inside the hard clip by the same inset (never border-only — that left a
-  dark fringe outside the rainbow). Soft edge masks fade ~1.5px so residual
-  GDI knife edges hit low-alpha pixels. DockPanel omits Tailwind `inset-0`
-  on these layers on Windows so these rules win cleanly.
+  Windows paint clip. Default ("soft") mode: no GDI region on the HWND —
+  per-pixel alpha rounds the corners exactly like macOS, so the paint inset
+  is 0 and no edge masks are needed. DockPanel omits Tailwind `inset-0` on
+  these layers on Windows so these rules win cleanly.
+
+  Legacy hard-clip mode (`windowsHardClip` setting → `.dock-win-hardclip` on
+  the pill): SetWindowRgn round-rects have no AA, so paint flush to the HWND
+  edge gets stair-stepped. Pull BOTH the dark fill and the RGB ring inside
+  the hard clip by the same inset (never border-only — that left a dark
+  fringe outside the rainbow) and fade the edge masks ~1.5px so residual GDI
+  knife edges hit low-alpha pixels.
 */
 .dock-root--windows {
+  --dock-win-edge-inset: 0px;
+  --dock-win-paint-radius: calc(
+    var(--dock-pill-radius, 28px) - var(--dock-win-edge-inset)
+  );
+}
+
+/*
+  Both custom properties re-declared here: `--dock-win-paint-radius` resolves
+  its var() where the property is DECLARED, not where it is used — overriding
+  only the inset on the pill would leave the radius computed with 0px.
+*/
+.dock-root--windows .dock-win-hardclip {
   --dock-win-edge-inset: 2px;
   --dock-win-paint-radius: calc(
     var(--dock-pill-radius, 28px) - var(--dock-win-edge-inset)
@@ -295,6 +312,11 @@ img {
   inset: var(--dock-win-edge-inset);
   border-radius: var(--dock-win-paint-radius);
   clip-path: inset(0 round var(--dock-win-paint-radius));
+}
+
+/* Soft edge masks only where a GDI knife edge actually exists. */
+.dock-root--windows .dock-win-hardclip .dock-pill-decor-clip,
+.dock-root--windows .dock-win-hardclip .dock-border-clip {
   -webkit-mask-image:
     linear-gradient(
       to top,
@@ -332,8 +354,12 @@ img {
 /*
   Nested decor clip (bg-flow wrapper) is already inside the outer inset —
   keep it flush to its parent so blur children fill the paint footprint.
+  The `.dock-win-hardclip` variant is listed explicitly: it is (0,4,0) vs the
+  mask rule's (0,3,0), so the inner mask reset keeps winning even if these
+  blocks are ever reordered.
 */
-.dock-root--windows .dock-pill-decor-clip .dock-pill-decor-clip {
+.dock-root--windows .dock-pill-decor-clip .dock-pill-decor-clip,
+.dock-root--windows .dock-win-hardclip .dock-pill-decor-clip .dock-pill-decor-clip {
   inset: 0;
   border-radius: inherit;
   clip-path: inset(0 round var(--dock-win-paint-radius));

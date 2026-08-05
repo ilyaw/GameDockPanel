@@ -1,6 +1,8 @@
 //! Pill-shaped `SetWindowRgn` ownership.
 //!
-//! Never fully clear the region on the dock HWND — that re-opens pale WebView2
+//! Applies only when the `windowsHardClip` setting is on (default off — CSS
+//! per-pixel alpha rounds the corners without GDI). In hard-clip mode, never
+//! fully clear the region on the dock HWND — that re-opens pale WebView2
 //! corners outside the CSS pill. All clip updates go through
 //! [`refresh`] / [`super::window`] region helpers.
 

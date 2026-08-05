@@ -983,6 +983,21 @@ export function SettingsWindow() {
           />
         </SettingsRow>
       )}
+
+      {IS_WINDOWS && (
+        <SettingsRow
+          title="Жёсткая обрезка окна (совместимость)"
+          descriptionClassName="max-w-sm"
+          description="Старый режим: углы дока вырезаются системной GDI-маской (грубее край, зато прячет непрозрачные углы, если прозрачность на этой машине сломана). По умолчанию выключено — углы скругляет сам рендер, картинка чётче."
+        >
+          <ToggleSwitch
+            checked={Boolean(settings.windowsHardClip)}
+            onChange={(value) => {
+              update({ windowsHardClip: value });
+            }}
+          />
+        </SettingsRow>
+      )}
     </SettingsSectionCard>
   );
 

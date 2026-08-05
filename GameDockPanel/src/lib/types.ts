@@ -136,4 +136,12 @@ export interface DockSettings {
   dockWindowLayer: DockWindowLayer;
   /** Windows-only: chrome HUD on the dock + denser `[win-diag]` logs. */
   windowsDebugOverlay: boolean;
+  /**
+   * Windows-only compatibility switch: restores the legacy GDI
+   * `SetWindowRgn` pill clip plus the 2px paint inset / soft edge masks in
+   * `index.css`. Default `false` — rounded corners come from CSS per-pixel
+   * alpha (crisper, no stair-stepped GDI edge). Enable only if a machine
+   * shows opaque/pale corners outside the pill.
+   */
+  windowsHardClip: boolean;
 }

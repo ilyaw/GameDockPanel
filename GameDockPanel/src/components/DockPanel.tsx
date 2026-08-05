@@ -1185,6 +1185,10 @@ function HydratedDockPanel({
           borderWidth: showBorderRing ? 0 : `${borderWidthPx}px`,
         }}
         className={`pointer-events-auto relative m-0 flex w-fit shrink-0 overflow-visible border bg-transparent transition-colors ${orientation.pillClassName} ${
+          // Legacy GDI clip compat mode: re-enables the 2px paint inset +
+          // soft edge masks in index.css (see `windowsHardClip` in types.ts).
+          IS_WINDOWS && settings.windowsHardClip ? "dock-win-hardclip" : ""
+        } ${
           isRejecting ? "animate-reject-pulse" : ""
         } ${
           fileDragOver ? "border-zinc-400" : "border-transparent"

@@ -161,6 +161,15 @@ pub struct DockSettings {
     /// Harmless on macOS (ignored by UI). `#[serde(default)]` for old configs.
     #[serde(default)]
     pub windows_debug_overlay: bool,
+    /// Windows-only compatibility switch: `true` restores the legacy GDI
+    /// `SetWindowRgn` pill clip (+ the frontend's 2px paint inset and soft
+    /// edge masks). Default `false` — per-pixel alpha handles the rounded
+    /// corners like on macOS, which keeps WebView2 on its normal composition
+    /// path (no stair-stepped GDI edge, no offscreen re-rasterization).
+    /// Flip on only if a machine shows opaque/pale corners outside the pill.
+    /// `#[serde(default)]` for configs written before this field existed.
+    #[serde(default)]
+    pub windows_hard_clip: bool,
 }
 
 fn default_led_color_mode() -> String {
@@ -239,6 +248,7 @@ impl Default for DockSettings {
             dock_position: DockPosition::default(),
             dock_window_layer: DockWindowLayer::default(),
             windows_debug_overlay: false,
+            windows_hard_clip: false,
         }
     }
 }
@@ -364,9 +374,17 @@ fn apply_dock_settings(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.dock_window_layer
     };
+    let previous_windows_hard_clip = {
+        let guard = state
+            .settings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.windows_hard_clip
+    };
     let icon_size_changed =
         (previous_icon_size_px - settings.icon_size_px).abs() >= 0.5;
     let dock_window_layer_changed = previous_dock_window_layer != settings.dock_window_layer;
+    let windows_hard_clip_changed = previous_windows_hard_clip != settings.windows_hard_clip;
 
     let path = config_file_path(app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;
@@ -409,6 +427,16 @@ fn apply_dock_settings(
     if dock_window_layer_changed {
         if let Some(window) = app.get_webview_window("main") {
             crate::platform::apply_dock_window_layer(&window, settings.dock_window_layer)?;
+        }
+    }
+
+    // Live-apply the GDI clip mode without restart: re-sync (or clear) the
+    // pill region on the dock HWND. No-op on macOS.
+    if windows_hard_clip_changed {
+        if let Some(window) = app.get_webview_window("main") {
+            if let Err(err) = crate::platform::refresh_dock_backdrop_clip(&window) {
+                log::warn!("windows_hard_clip toggle: backdrop clip refresh failed: {err}");
+            }
         }
     }
 
