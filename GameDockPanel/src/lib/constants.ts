@@ -802,7 +802,7 @@ export const DEFAULT_DOCK_SETTINGS: DockSettings = {
   dockPosition: "bottom",
   dockWindowLayer: "above_windows",
   windowsDebugOverlay: false,
-  windowsHardClip: false,
+  windowsHardClip: true,
 };
 
 export type LedColorMode = DockSettings["ledColorMode"];

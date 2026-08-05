@@ -161,15 +161,18 @@ pub struct DockSettings {
     /// Harmless on macOS (ignored by UI). `#[serde(default)]` for old configs.
     #[serde(default)]
     pub windows_debug_overlay: bool,
-    /// Windows-only compatibility switch: `true` restores the legacy GDI
-    /// `SetWindowRgn` pill clip (+ the frontend's 2px paint inset and soft
-    /// edge masks). Default `false` — per-pixel alpha handles the rounded
-    /// corners like on macOS, which keeps WebView2 on its normal composition
-    /// path (no stair-stepped GDI edge, no offscreen re-rasterization).
-    /// Flip on only if a machine shows opaque/pale corners outside the pill.
-    /// `#[serde(default)]` for configs written before this field existed.
-    #[serde(default)]
+    /// Windows-only: GDI `SetWindowRgn` pill clip (+ frontend 2px paint inset /
+    /// soft edge masks). Default `true` — confines pale WebView2 crescents
+    /// after focus/click even if per-pixel alpha flickers. Set `false` for
+    /// soft CSS-only corners (crisper RGB AA on machines where alpha is stable).
+    /// `#[serde(default = "default_windows_hard_clip")]` for old configs that
+    /// omit the field (missing → on). Explicit `false` in JSON is respected.
+    #[serde(default = "default_windows_hard_clip")]
     pub windows_hard_clip: bool,
+}
+
+fn default_windows_hard_clip() -> bool {
+    true
 }
 
 fn default_led_color_mode() -> String {
@@ -248,7 +251,7 @@ impl Default for DockSettings {
             dock_position: DockPosition::default(),
             dock_window_layer: DockWindowLayer::default(),
             windows_debug_overlay: false,
-            windows_hard_clip: false,
+            windows_hard_clip: true,
         }
     }
 }

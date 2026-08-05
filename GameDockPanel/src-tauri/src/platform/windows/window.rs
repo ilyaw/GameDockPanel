@@ -44,11 +44,15 @@
 //!   chrome repair / FRAMECHANGED, otherwise transparent HTML composites over
 //!   an opaque white redirection surface (the "white pill backdrop").
 //! - Never Mica (`DONOTROUND` only).
-//! - `SetWindowRgn` (only when `windowsHardClip` setting is on; default off —
-//!   alpha handles the corners): RoundRect-only when HWND == pill (rest); at
-//!   hover/menu `RoundRect(pill) OR (client DIFF pill AABB)` on both top-level
-//!   and WebView2 child. In hard-clip mode never fully clear the region —
-//!   that re-opens pale corners when transparency itself is broken.
+//! - `SetWindowRgn` (when `windowsHardClip` is on — **default on** so pale
+//!   crescents cannot outlive a per-pixel-alpha flicker after focus/click):
+//!   RoundRect-only when HWND == pill (rest); at hover/menu
+//!   `RoundRect(pill) OR (client DIFF pill AABB)` on both top-level and
+//!   WebView2 child. Soft mode (setting off) leaves clipping to CSS alpha.
+//!   In hard-clip mode never fully clear the region — that re-opens pale
+//!   corners when transparency itself is broken.
+//! - Healthy `WM_ACTIVATE`: re-pin DWM alpha only — do **not** invalidate or
+//!   run full `on_surface_changed` (that was the post-click white-strip path).
 //! - Diag poller self-heals paperclip (`OUTER_TOO_NARROW` / axis flip) by
 //!   re-applying the formula rest frame once per unhealthy streak.
 //! - **No `WM_WINDOWPOSCHANGED` → `on_surface_changed` feedback loop:** our own
@@ -81,10 +85,10 @@ use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, SetWindowLongPtrW,
     SetWindowPos, GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_NCCALCSIZE, WM_NCPAINT, WM_SHOWWINDOW, WM_SIZE, WM_STYLECHANGED,
-    WM_WINDOWPOSCHANGED, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED,
-    WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WA_ACTIVE, WA_CLICKACTIVE,
+    WA_INACTIVE, WM_ACTIVATE, WM_DPICHANGED, WM_ERASEBKGND, WM_NCCALCSIZE, WM_NCPAINT,
+    WM_SHOWWINDOW, WM_SIZE, WM_STYLECHANGED, WM_WINDOWPOSCHANGED, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 use super::diag_file;
@@ -116,6 +120,15 @@ static SURFACE_OWN_OP: AtomicBool = AtomicBool::new(false);
 const SURFACE_REASSERT_DEBOUNCE_MS: u64 = 400;
 /// Rate-limit `[CHROME] [SURFACE_SKIP]` diag lines.
 static LAST_SURFACE_SKIP_LOG_MS: AtomicU64 = AtomicU64::new(0);
+/// Rate-limit noisy `PALE` diag lines (invalidate / DWM ok).
+static LAST_PALE_NOISY_LOG_MS: AtomicU64 = AtomicU64::new(0);
+/// Last pale-triage path tag for HUD / support paste (`FOCUS/skip`, …).
+static LAST_PALE_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// Last `WM_ACTIVATE` took the healthy skip (no invalidate / no SURFACE_RUN).
+static FOCUS_SURFACE_SKIPPED: AtomicBool = AtomicBool::new(false);
+/// Emit one full snapshot after the next focus/click interaction.
+static NEED_PALE_FOCUS_SNAP: AtomicBool = AtomicBool::new(false);
+const PALE_NOISY_LOG_MS: u64 = 400;
 
 /// Last CSS-pill box from `sync_vibrancy_pill` (DIP, window-client coords).
 /// Used by `refresh_windows_backdrop` after resizes that don't re-measure.
@@ -190,6 +203,14 @@ pub struct WindowsBackdropSnapshot {
     /// Primary screen size as this process sees it (`GetSystemMetrics`) —
     /// smaller than `physical_screen_px` when the process is DPI-virtualized.
     pub virtual_screen_px: Option<(i32, i32)>,
+    /// User setting `windowsHardClip` (default on).
+    pub hard_clip_enabled: bool,
+    /// Effective GDI clip (setting on, or DWM alpha broken fallback).
+    pub hard_clip_active: bool,
+    /// Last pale-triage path (`FOCUS/skip=healthy`, `HITTEST/clear`, …).
+    pub last_pale_path: Option<String>,
+    /// Last `WM_ACTIVATE` skipped full surface reassert (healthy chrome).
+    pub focus_surface_skipped: bool,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -308,6 +329,106 @@ fn last_win32_error() -> u32 {
     unsafe { GetLastError().0 }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn hwnd_style_snap(hwnd: HWND) -> String {
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    let caption = (style & WS_CAPTION.0) == WS_CAPTION.0 || (style & WS_SYSMENU.0) != 0;
+    let popup = (style & WS_POPUP.0) != 0;
+    let layered = (exstyle & WS_EX_LAYERED.0) != 0;
+    let transparent = (exstyle & WS_EX_TRANSPARENT.0) != 0;
+    format!(
+        "STYLE=0x{style:08x} EXSTYLE=0x{exstyle:08x} CAPTION={} POPUP={} LAYERED={} TRANSPARENT={} \
+         hard_rgn={} relaxed={} rgn_ok={} rgn_err={} dwm_reasserts={} dwm_broken={} repairs={}",
+        u8::from(caption),
+        u8::from(popup),
+        u8::from(layered),
+        u8::from(transparent),
+        u8::from(HARD_CLIP_REGION_ACTIVE.load(Ordering::Relaxed)),
+        u8::from(REGION_RELAXED.load(Ordering::Relaxed)),
+        SET_RGN_OK.load(Ordering::Relaxed),
+        SET_RGN_ERR.load(Ordering::Relaxed),
+        DWM_ALPHA_REASSERTS.load(Ordering::Relaxed),
+        u8::from(DWM_ALPHA_BROKEN.load(Ordering::Relaxed)),
+        CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+fn remember_pale_path(status: &str, detail: &str) {
+    // Keep HUD short: `FOCUS/skip=healthy`, not the full STYLE dump.
+    let brief = detail.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+    let path = format!("{status}/{brief}");
+    if let Ok(mut guard) = LAST_PALE_PATH.lock() {
+        *guard = Some(path);
+    }
+}
+
+/// Pale-strip triage line → session log + `tauri_windows_diagnostic.log` (`PALE`).
+fn log_pale(status: &str, detail: impl AsRef<str>, noisy: bool) {
+    let detail = detail.as_ref();
+    if noisy {
+        let now = now_ms();
+        let last = LAST_PALE_NOISY_LOG_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < PALE_NOISY_LOG_MS {
+            return;
+        }
+        LAST_PALE_NOISY_LOG_MS.store(now, Ordering::Relaxed);
+        log::debug!("[win-pale] [{status}] {detail}");
+    } else {
+        log::info!("[win-pale] [{status}] {detail}");
+    }
+    remember_pale_path(status, detail);
+    diag_file::status("PALE", status, detail);
+}
+
+fn wa_activate_name(wparam: WPARAM) -> &'static str {
+    match (wparam.0 as u32) & 0xffff {
+        x if x == WA_ACTIVE => "WA_ACTIVE",
+        x if x == WA_CLICKACTIVE => "WA_CLICKACTIVE",
+        x if x == WA_INACTIVE => "WA_INACTIVE",
+        _ => "WA_OTHER",
+    }
+}
+
+/// Caption / missing LAYERED / pending transparent-bg — HWND-only (subclass).
+fn hwnd_chrome_needs_reassert(hwnd: HWND) -> bool {
+    if NEED_TRANSPARENT_BG_REASSERT.load(Ordering::SeqCst) {
+        return true;
+    }
+    if hwnd_needs_frameless_rewrite(hwnd) {
+        return true;
+    }
+    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+    (exstyle & WS_EX_LAYERED.0) == 0
+}
+
+fn emit_pale_focus_snap_if_needed(window: &WebviewWindow) {
+    if !NEED_PALE_FOCUS_SNAP.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let snap = windows_backdrop_snapshot(window);
+    let style = window
+        .hwnd()
+        .map(hwnd_style_snap)
+        .unwrap_or_else(|_| "hwnd=?".into());
+    log_pale(
+        "SNAP",
+        format!(
+            "post-focus snapshot healthy={} hard_clip={} rgn_ok={} last={:?} {style}",
+            snap.healthy, snap.hard_clip_active, snap.set_rgn_ok_count, snap.last_pale_path,
+        ),
+        false,
+    );
+    log::info!("[win-pale] post-focus snapshot={snap:?}");
+    let _ = window.emit("dock-win-diag", &snap);
+}
+
 /// DWM must never render NC frame visuals for the dock. Even the few
 /// milliseconds while Tao's `apply_diff` restores `WS_CAPTION` at `show()` /
 /// layer changes would otherwise compose a DWM caption behind the transparent
@@ -351,7 +472,12 @@ fn flush_frame_changed(hwnd: HWND) {
 /// Never erase: the window class brush is white, and erasing the transparent
 /// CSS crescents permanently burns them into the redirection surface (first
 /// paint OK → pale corners after the first focus/`on_surface_changed` pass).
-fn invalidate_dock_hwnd(hwnd: HWND) {
+fn invalidate_dock_hwnd(hwnd: HWND, reason: &'static str) {
+    log_pale(
+        "INVALIDATE",
+        format!("reason={reason} erase=0 {}", hwnd_style_snap(hwnd)),
+        true,
+    );
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
     let _ = unsafe {
         RedrawWindow(
@@ -363,9 +489,9 @@ fn invalidate_dock_hwnd(hwnd: HWND) {
     };
 }
 
-fn invalidate_dock_window(window: &WebviewWindow) {
+fn invalidate_dock_window(window: &WebviewWindow, reason: &'static str) {
     if let Ok(hwnd) = window.hwnd() {
-        invalidate_dock_hwnd(hwnd);
+        invalidate_dock_hwnd(hwnd, reason);
     }
 }
 
@@ -417,6 +543,15 @@ fn reassert_dwm_alpha(hwnd: HWND) {
                      falling back to GDI pill clip (as if windowsHardClip were on)",
                     last_win32_error()
                 );
+                log_pale(
+                    "DWM",
+                    format!(
+                        "fail gle={} — hard-clip fallback {}",
+                        last_win32_error(),
+                        hwnd_style_snap(hwnd)
+                    ),
+                    false,
+                );
                 // One surface pass re-applies the region promptly; steady
                 // failure must NOT re-arm (that class of feedback loop ran
                 // SURFACE_RUN at 20 Hz before — see module docs).
@@ -439,7 +574,7 @@ pub(crate) fn reassert_dwm_alpha_for_window(window: &WebviewWindow) {
 fn reassert_transparent_after_layered(window: &WebviewWindow) {
     reassert_dwm_alpha_for_window(window);
     assert_transparent_webview_bg(window, true);
-    invalidate_dock_window(window);
+    invalidate_dock_window(window, "after_layered");
     NEED_TRANSPARENT_BG_REASSERT.store(false, Ordering::SeqCst);
 }
 
@@ -592,7 +727,18 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
         // FRAMECHANGED after a style stomp is exactly when DWM can drop the
         // blur-behind alpha trick — restore it before repainting.
         reassert_dwm_alpha(hwnd);
-        invalidate_dock_hwnd(hwnd);
+        invalidate_dock_hwnd(hwnd, "chrome_repair");
+        log_pale(
+            "REPAIR",
+            format!(
+                "hwnd={hwnd:?} repairs={} layered_restore={} caption_creep={} {}",
+                CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
+                LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
+                CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
+                hwnd_style_snap(hwnd),
+            ),
+            false,
+        );
         diag_file::status(
             "CHROME",
             "REPAIR",
@@ -642,17 +788,10 @@ fn surface_reassert_suppressed() -> bool {
 
 /// Caption / missing LAYERED / pending transparent-bg — worth re-arming debounce.
 fn surface_chrome_needs_reassert(window: &WebviewWindow) -> bool {
-    if NEED_TRANSPARENT_BG_REASSERT.load(Ordering::SeqCst) {
-        return true;
-    }
     let Ok(hwnd) = window.hwnd() else {
-        return false;
+        return NEED_TRANSPARENT_BG_REASSERT.load(Ordering::SeqCst);
     };
-    if hwnd_needs_frameless_rewrite(hwnd) {
-        return true;
-    }
-    let exstyle = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
-    (exstyle & WS_EX_LAYERED.0) == 0
+    hwnd_chrome_needs_reassert(hwnd)
 }
 
 fn log_surface_skip(reason: &str) {
@@ -701,14 +840,57 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
                 NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
             }
         }
-        WM_SIZE | WM_WINDOWPOSCHANGED | WM_ACTIVATE | WM_DPICHANGED | WM_SHOWWINDOW => {
+        WM_ACTIVATE => {
+            // Always repair + re-pin DWM alpha. Full invalidate/SURFACE_RUN only
+            // when chrome is unhealthy — healthy focus was burning white into
+            // soft-mode crescents via erase-less invalidate + region churn.
+            let wa = wa_activate_name(wparam);
+            let repaired = repair_dock_hwnd_chrome(hwnd);
+            reassert_dwm_alpha(hwnd);
+            let unhealthy = repaired
+                || hwnd_chrome_needs_reassert(hwnd)
+                || DWM_ALPHA_BROKEN.load(Ordering::SeqCst);
+            NEED_PALE_FOCUS_SNAP.store(true, Ordering::SeqCst);
+            if unhealthy {
+                FOCUS_SURFACE_SKIPPED.store(false, Ordering::SeqCst);
+                invalidate_dock_hwnd(hwnd, "focus_unhealthy");
+                NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+                log_pale(
+                    "FOCUS",
+                    format!(
+                        "{wa} run=full repaired={} {}",
+                        u8::from(repaired),
+                        hwnd_style_snap(hwnd)
+                    ),
+                    false,
+                );
+                diag_file::status(
+                    "FOCUS",
+                    "EVENT",
+                    format!("msg=0x{msg:04X} {wa} run=full hwnd={hwnd:?}"),
+                );
+            } else {
+                FOCUS_SURFACE_SKIPPED.store(true, Ordering::SeqCst);
+                log_pale(
+                    "FOCUS",
+                    format!("{wa} skip=healthy {}", hwnd_style_snap(hwnd)),
+                    false,
+                );
+                diag_file::status(
+                    "FOCUS",
+                    "SKIP",
+                    format!("msg=0x{msg:04X} {wa} skip=healthy hwnd={hwnd:?}"),
+                );
+            }
+        }
+        WM_SIZE | WM_WINDOWPOSCHANGED | WM_DPICHANGED | WM_SHOWWINDOW => {
             // Cheap HWND repair always. Full ChromeGuard path only for real
             // external events — not for our own SetWindowRgn/FRAMECHANGED echo
             // (that feedback loop ran SURFACE_RUN at ~20 Hz forever).
             let suppress = surface_reassert_suppressed();
             let repaired = repair_dock_hwnd_chrome(hwnd);
             let want_full = match msg {
-                WM_ACTIVATE | WM_DPICHANGED | WM_SHOWWINDOW => true,
+                WM_DPICHANGED | WM_SHOWWINDOW => true,
                 WM_SIZE => !suppress,
                 _ => {
                     // WM_WINDOWPOSCHANGED: only if we actually repaired, or
@@ -719,18 +901,14 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
                 }
             };
             if want_full {
-                invalidate_dock_hwnd(hwnd);
+                invalidate_dock_hwnd(hwnd, "surface_event");
                 NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
                 if msg != WM_WINDOWPOSCHANGED {
-                    let ctx = match msg {
-                        WM_ACTIVATE => "FOCUS",
-                        WM_SHOWWINDOW => "SHOW",
-                        _ => "SIZE",
-                    };
+                    let ctx = if msg == WM_SHOWWINDOW { "SHOW" } else { "SIZE" };
                     diag_file::status(ctx, "EVENT", format!("msg=0x{msg:04X} hwnd={hwnd:?}"));
                 }
             } else if repaired {
-                invalidate_dock_hwnd(hwnd);
+                invalidate_dock_hwnd(hwnd, "surface_repaired");
             }
         }
         _ => {}
@@ -951,6 +1129,8 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
         consume_pending_transparent_reassert(window);
         return Ok(());
     }
+    // Own the FRAMECHANGED echo so subclass does not schedule SURFACE_RUN.
+    let _own = surface_own_op_guard();
     let previous = unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
     if previous == 0 && exstyle != 0 {
         let gle = last_win32_error();
@@ -970,6 +1150,15 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
     } else {
         consume_pending_transparent_reassert(window);
     }
+    let action = if ignore { "set" } else { "clear" };
+    log_pale(
+        "HITTEST",
+        format!(
+            "{action} TRANSPARENT ignore={ignore}: EXSTYLE=0x{exstyle:08x} → 0x{desired:08x} {}",
+            hwnd_style_snap(hwnd)
+        ),
+        false,
+    );
     log::debug!(
         "[win-backdrop] click-through ignore={ignore}: EXSTYLE=0x{exstyle:08x} → 0x{desired:08x}"
     );
@@ -1253,6 +1442,12 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
     let healthy = health_issues.is_empty();
     let (window_dpi, dpi_awareness, physical_screen_px, virtual_screen_px) =
         dpi_ground_truth(window);
+    let hard_clip_enabled = windows_hard_clip_enabled(window);
+    let hard_clip_active_flag = hard_clip_enabled || DWM_ALPHA_BROKEN.load(Ordering::SeqCst);
+    let last_pale_path = LAST_PALE_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
 
     WindowsBackdropSnapshot {
         last_pill_client: last_pill,
@@ -1292,6 +1487,10 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         dpi_awareness,
         physical_screen_px,
         virtual_screen_px,
+        hard_clip_enabled,
+        hard_clip_active: hard_clip_active_flag,
+        last_pale_path,
+        focus_surface_skipped: FOCUS_SURFACE_SKIPPED.load(Ordering::Relaxed),
     }
 }
 
@@ -1304,10 +1503,10 @@ fn windows_debug_overlay_enabled(window: &WebviewWindow) -> bool {
     guard.windows_debug_overlay
 }
 
-/// `windowsHardClip` setting: `false` (default) leaves both HWNDs unclipped —
-/// per-pixel alpha renders the rounded corners like macOS and WebView2 stays
-/// on its normal composition path. `true` restores the legacy GDI RoundRect
-/// clip for machines where transparency itself misbehaves (pale corners).
+/// `windowsHardClip` setting: `true` (default) applies GDI RoundRect clip so
+/// pale crescents cannot outlive a per-pixel-alpha flicker. `false` leaves
+/// both HWNDs unclipped (CSS alpha only — crisper RGB, but corners can burn
+/// white after focus on some machines).
 fn windows_hard_clip_enabled(window: &WebviewWindow) -> bool {
     let state = window.state::<crate::commands::settings::SettingsState>();
     let guard = state
@@ -1551,6 +1750,14 @@ pub fn set_dock_region_relaxed(
         return sync_pill_window_rgn(window);
     }
     log::info!("[win-backdrop] region_relaxed {prev} → {relaxed}");
+    log_pale(
+        "HOVER",
+        format!(
+            "region_relaxed {prev} → {relaxed} hard_clip={}",
+            u8::from(hard_clip_active(window))
+        ),
+        false,
+    );
 
     // Rest HWND == pill; grow for magnify/tooltip while hovered, shrink on leave
     // (menu overlay path uses ensure_window_fits / shrink_to_pill separately).
@@ -1573,6 +1780,19 @@ pub fn set_dock_region_relaxed(
                             "[win-backdrop] hover_frame resized={} expand={}",
                             changed,
                             relaxed
+                        );
+                        let outer = window
+                            .outer_size()
+                            .ok()
+                            .map(|s| format!("{}x{}", s.width, s.height))
+                            .unwrap_or_else(|| "?".into());
+                        log_pale(
+                            "HOVER",
+                            format!(
+                                "frame expand={} resized=1 outer={outer} pill={pill_width:.0}x{pill_height:.0}",
+                                u8::from(relaxed)
+                            ),
+                            false,
                         );
                     }
                 }
@@ -2096,6 +2316,16 @@ fn set_window_rgn_to_pill(
              client={client_w}x{client_h} scale={scale:.2} STYLE={style} chrome_delta={delta} ok#={}",
             SET_RGN_OK.load(Ordering::Relaxed)
         );
+        log_pale(
+            "RGN",
+            format!(
+                "apply pill∪margins px=({clip_left},{clip_top})-({clip_right},{clip_bottom}) \
+                 diameter={clip_diameter} client={client_w}x{client_h} ok#={} {}",
+                SET_RGN_OK.load(Ordering::Relaxed),
+                hwnd_style_snap(hwnd)
+            ),
+            false,
+        );
         Ok(())
     })
 }
@@ -2165,9 +2395,8 @@ fn stored_pill_size(window: &WebviewWindow) -> Result<(f64, f64), String> {
 /// mode, `windows_hard_clip = false`).
 ///
 /// Only touches HWND when a hard clip was actually applied — calling
-/// `SetWindowRgn(None, true)` on every soft-mode refresh forces a redraw that
-/// can erase transparent crescents to the white class brush (pale corners
-/// after the first focus/`on_surface_changed`). DWM corner preference /
+/// `SetWindowRgn(None)` on every soft-mode refresh forces a redraw that
+/// can reintroduce pale crescents after focus. DWM corner preference /
 /// Mica-off stay identical to the hard-clip path.
 fn clear_dock_window_rgn(window: &WebviewWindow) -> Result<(), String> {
     set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
@@ -2191,15 +2420,24 @@ fn clear_dock_window_rgn(window: &WebviewWindow) -> Result<(), String> {
             parent_ok != 0,
             child_ok != 0
         );
-        invalidate_dock_hwnd(hwnd);
+        log_pale(
+            "RGN",
+            format!(
+                "cleared hard_clip_off parent_ok={} child_ok={} {}",
+                parent_ok != 0,
+                child_ok != 0,
+                hwnd_style_snap(hwnd)
+            ),
+            false,
+        );
+        invalidate_dock_hwnd(hwnd, "rgn_clear");
         Ok(())
     })
 }
 
 /// Re-applies the combined pill∪margins clip from the latest measured pill.
-/// With `windows_hard_clip` off (default) and DWM alpha healthy, removes the
-/// clip instead — the rounded corners come from CSS + per-pixel alpha, not
-/// from GDI.
+/// With `windows_hard_clip` on (default) applies RoundRect; with it off and
+/// DWM alpha healthy, removes the clip (CSS + per-pixel alpha only).
 fn sync_pill_window_rgn(window: &WebviewWindow) -> Result<(), String> {
     if !hard_clip_active(window) {
         return clear_dock_window_rgn(window);
@@ -2263,7 +2501,7 @@ pub(crate) fn chrome_prepare(
 }
 
 pub(crate) fn chrome_invalidate(window: &WebviewWindow) {
-    invalidate_dock_window(window);
+    invalidate_dock_window(window, "chrome_invalidate");
 }
 
 pub(crate) fn chrome_reassert_after_show(
@@ -2273,7 +2511,7 @@ pub(crate) fn chrome_reassert_after_show(
     position: DockPosition,
 ) {
     reassert_dock_chrome_after_show(window, window_width, window_height, position);
-    invalidate_dock_window(window);
+    invalidate_dock_window(window, "after_show");
 }
 
 /// Consume subclass/focus surface flag (input poller ~50ms + diag backup).
@@ -2281,6 +2519,7 @@ pub(crate) fn chrome_reassert_after_show(
 /// Fire-and-forget onto the UI thread (does not block click-through). At most
 /// one main-thread task is queued at a time (`SURFACE_REASSERT_SCHEDULED`).
 pub(crate) fn consume_surface_reassert_if_needed(window: &WebviewWindow) {
+    emit_pale_focus_snap_if_needed(window);
     if !NEED_SURFACE_REASSERT.load(Ordering::SeqCst) {
         return;
     }
@@ -2293,6 +2532,7 @@ pub(crate) fn consume_surface_reassert_if_needed(window: &WebviewWindow) {
         if NEED_SURFACE_REASSERT.swap(false, Ordering::SeqCst) {
             on_surface_changed(&window);
         }
+        emit_pale_focus_snap_if_needed(&window);
     }) {
         SURFACE_REASSERT_SCHEDULED.store(false, Ordering::SeqCst);
         log::warn!("[win-backdrop] schedule on_surface_changed failed: {err}");
@@ -2301,27 +2541,31 @@ pub(crate) fn consume_surface_reassert_if_needed(window: &WebviewWindow) {
 
 /// One path after focus / size / DPI / launch: layered + transparent bg + region + redraw.
 pub(crate) fn on_surface_changed(window: &WebviewWindow) {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let t = now_ms();
     let last = LAST_SURFACE_REASSERT_MS.load(Ordering::Relaxed);
-    if now_ms.saturating_sub(last) < SURFACE_REASSERT_DEBOUNCE_MS {
+    if t.saturating_sub(last) < SURFACE_REASSERT_DEBOUNCE_MS {
         // Do not re-arm when chrome is healthy — that locked a 20 Hz loop with
         // WM_WINDOWPOSCHANGED from SetWindowRgn echoing forever.
         if surface_chrome_needs_reassert(window) {
             NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
             log_surface_skip("debounce+unhealthy");
+            log_pale("SURFACE", "debounce+unhealthy re-arm", true);
         } else {
             NEED_SURFACE_REASSERT.store(false, Ordering::SeqCst);
             log_surface_skip("debounce+healthy");
+            log_pale("SURFACE", "debounce+healthy skip", true);
         }
         return;
     }
-    LAST_SURFACE_REASSERT_MS.store(now_ms, Ordering::Relaxed);
+    LAST_SURFACE_REASSERT_MS.store(t, Ordering::Relaxed);
     NEED_SURFACE_REASSERT.store(false, Ordering::SeqCst);
 
     let _own = surface_own_op_guard();
+    let style = window
+        .hwnd()
+        .map(hwnd_style_snap)
+        .unwrap_or_else(|_| "hwnd=?".into());
+    log_pale("SURFACE", format!("run reassert+rgn+invalidate {style}"), false);
     diag_file::status("CHROME", "SURFACE_RUN", "reassert+rgn+invalidate");
     reassert_frameless_chrome_keep_size(window);
     reassert_dwm_alpha_for_window(window);
@@ -2340,7 +2584,7 @@ pub(crate) fn on_surface_changed(window: &WebviewWindow) {
         diag_file::status("RGN", "ERR", &err);
         log::warn!("[win-backdrop] on_surface_changed region: {err}");
     }
-    invalidate_dock_window(window);
+    invalidate_dock_window(window, "on_surface_changed");
     diag_file::ok("CHROME", "on_surface_changed complete");
 }
 

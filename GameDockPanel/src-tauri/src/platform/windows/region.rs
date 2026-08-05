@@ -1,10 +1,11 @@
 //! Pill-shaped `SetWindowRgn` ownership.
 //!
-//! Applies only when the `windowsHardClip` setting is on (default off — CSS
-//! per-pixel alpha rounds the corners without GDI). In hard-clip mode, never
-//! fully clear the region on the dock HWND — that re-opens pale WebView2
-//! corners outside the CSS pill. All clip updates go through
-//! [`refresh`] / [`super::window`] region helpers.
+//! Applies when the `windowsHardClip` setting is on (default on — GDI
+//! RoundRect confines pale crescents if per-pixel alpha flickers after
+//! focus). Soft mode (`false`) leaves corners to CSS alpha only. In
+//! hard-clip mode, never fully clear the region on the dock HWND — that
+//! re-opens pale WebView2 corners outside the CSS pill. All clip updates
+//! go through [`refresh`] / [`super::window`] region helpers.
 
 use tauri::WebviewWindow;
 

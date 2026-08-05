@@ -40,6 +40,10 @@ export type WindowsDiagSnapshot = {
   healthy: boolean;
   /** Advisory — Tauri scale vs JS DPR; does not mean chrome is broken. */
   dpiMismatch: string | null;
+  hardClipEnabled: boolean;
+  hardClipActive: boolean;
+  lastPalePath: string | null;
+  focusSurfaceSkipped: boolean;
 };
 
 function hexStyle(n: number | null): string {
@@ -152,6 +156,14 @@ export function WindowsDebugHud({ enabled }: { enabled: boolean }) {
             <p>
               rgn ok/err={snap.setRgnOkCount}/{snap.setRgnErrCount} sync={snap.syncVibrancyCalls}{" "}
               relax={snap.regionRelaxed ? "1" : "0"} hold={snap.menuRegionHold ? "1" : "0"}
+            </p>
+            <p>
+              hardClip={snap.hardClipEnabled ? "1" : "0"}/
+              {snap.hardClipActive ? "on" : "off"} focusSkip=
+              {snap.focusSurfaceSkipped ? "1" : "0"}
+            </p>
+            <p className="text-amber-200/90">
+              pale={snap.lastPalePath ?? "—"}
             </p>
             <p>
               repairs={snap.chromeRepairCount} layered↑={snap.layeredRestoreCount} caption↑=

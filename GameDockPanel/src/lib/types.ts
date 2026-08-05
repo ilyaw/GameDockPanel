@@ -137,11 +137,10 @@ export interface DockSettings {
   /** Windows-only: chrome HUD on the dock + denser `[win-diag]` logs. */
   windowsDebugOverlay: boolean;
   /**
-   * Windows-only compatibility switch: restores the legacy GDI
-   * `SetWindowRgn` pill clip plus the 2px paint inset / soft edge masks in
-   * `index.css`. Default `false` — rounded corners come from CSS per-pixel
-   * alpha (crisper, no stair-stepped GDI edge). Enable only if a machine
-   * shows opaque/pale corners outside the pill.
+   * Windows-only: GDI `SetWindowRgn` pill clip plus the 2px paint inset /
+   * soft edge masks in `index.css`. Default `true` — hides pale crescents
+   * after focus when per-pixel alpha flickers. Set `false` for CSS-only
+   * soft corners (crisper RGB AA when alpha is stable on that machine).
    */
   windowsHardClip: boolean;
 }
