@@ -30,9 +30,7 @@ use crate::platform::geometry::{
     pill_thickness_hover_dip, PILL_CORNER_RADIUS_DIP,
 };
 
-use super::window::{
-    consume_surface_reassert_if_needed, set_dock_click_through, WIN_PAINT_INSET_DIP,
-};
+use super::window::{consume_surface_reassert_if_needed, set_dock_click_through};
 
 const CLICK_POLL_MS: u64 = 50;
 
@@ -156,21 +154,13 @@ fn pill_cursor_at_screen(
     let pill_h = (pill_h_dip * scale).round() as i32;
     // Near-edge inset is outside the HWND (see geometry.rs) — pill is flush
     // to the near client edge; do not offset hit-test by DOCK_EDGE_INSET.
-    // Match GDI RoundRect paint inset so poller and SetWindowRgn agree
-    // (2 DIP rim is outside the OS hit region).
-    let paint_inset = (WIN_PAINT_INSET_DIP * scale).round().max(0.0) as i32;
-    let paint_radius_dip = (PILL_CORNER_RADIUS_DIP - WIN_PAINT_INSET_DIP).max(1.0);
-    let radius = (paint_radius_dip * scale).round().max(1.0) as i32;
+    // Use the full CSS pill (not the 2px GDI paint inset): shrinking the
+    // hit-box caused expand↔shrink oscillation with DOM mouseleave/enter
+    // (dock appeared on hover and vanished on leave).
+    let radius = (PILL_CORNER_RADIUS_DIP * scale).round() as i32;
 
-    let (raw_left, raw_top, raw_right, raw_bottom) =
+    let (pill_left, pill_top, pill_right, pill_bottom) =
         pill_rect_for_position(position, outer_pos, outer_size, pill_w, pill_h, 0);
-    let inset = paint_inset
-        .min((raw_right - raw_left).max(0) / 2)
-        .min((raw_bottom - raw_top).max(0) / 2);
-    let pill_left = raw_left + inset;
-    let pill_top = raw_top + inset;
-    let pill_right = raw_right - inset;
-    let pill_bottom = raw_bottom - inset;
 
     if !in_rounded_rect(
         screen_x,

@@ -601,9 +601,11 @@ function HydratedDockPanel({
     mouseX.set(Infinity);
     mouseY.set(Infinity);
     setHoveredIconId(null);
-    // Keep region relaxed while a context menu is open (menu lives outside
-    // the pill hit-box after overlay grow).
-    if (contextMenuOpenCountRef.current === 0) {
+    setTooltip(null);
+    // Windows: click-through poller owns HWND expand/shrink. DOM mouseleave
+    // during hover resize was fighting the poller (appear on hover / vanish
+    // on leave). Menu hold still uses setDockRegionRelaxed explicitly.
+    if (!IS_WINDOWS && contextMenuOpenCountRef.current === 0) {
       void setDockRegionRelaxed(false);
     }
   }, [mouseX, mouseY]);
@@ -611,9 +613,11 @@ function HydratedDockPanel({
   const enterDock = useCallback(() => {
     dockHoveredRef.current = true;
     setHoverSessionId((id) => id + 1);
-    // Relax before magnify/tooltip paint — faster than waiting for the
-    // 50ms click-through poller hover transition.
-    void setDockRegionRelaxed(true);
+    // Windows: poller owns region_relaxed — calling it here from dock-hover
+    // + mouseenter re-entered expand/shrink against the native resize.
+    if (!IS_WINDOWS) {
+      void setDockRegionRelaxed(true);
+    }
   }, []);
 
   /**
@@ -702,10 +706,9 @@ function HydratedDockPanel({
           if (event.payload) {
             enterDock();
           } else {
-            dockHoveredRef.current = false;
-            mouseX.set(Infinity);
-            mouseY.set(Infinity);
-            setHoveredIconId(null);
+            // Same leave path as macOS DOM mouseleave — on Windows this is
+            // the *only* trusted leave (see pill onMouseLeave).
+            leaveDock();
           }
         }),
       );
@@ -791,7 +794,17 @@ function HydratedDockPanel({
         unlisten();
       }
     };
-  }, [activateApp, zoomApp, itemsRef, mouseX, mouseY, applyCursor, enterDock, shouldSuppressDockClickAt]);
+  }, [
+    activateApp,
+    zoomApp,
+    itemsRef,
+    mouseX,
+    mouseY,
+    applyCursor,
+    enterDock,
+    leaveDock,
+    shouldSuppressDockClickAt,
+  ]);
 
   useEffect(() => {
     if (rejectPulseKey === 0) return;
@@ -1150,7 +1163,12 @@ function HydratedDockPanel({
         }}
         onMouseLeave={() => {
           lastNativeMoveAt.current = 0;
-          leaveDock();
+          // Windows: hover-region resize briefly detaches the pointer from
+          // the webview; DOM leave would clear magnify while the cursor is
+          // still over the pill. Trust `dock-hover` from the poller only.
+          if (!IS_WINDOWS) {
+            leaveDock();
+          }
         }}
         style={{
           ...pillStyle,
