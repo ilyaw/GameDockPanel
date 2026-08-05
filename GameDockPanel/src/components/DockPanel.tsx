@@ -1202,7 +1202,7 @@ function HydratedDockPanel({
           borderWidth: showBorderRing ? 0 : `${borderWidthPx}px`,
         }}
         className={`pointer-events-auto relative m-0 flex w-fit shrink-0 overflow-visible border bg-transparent transition-colors ${orientation.pillClassName} ${
-          // Windows: always paint-inset + soft edge masks to match GDI RoundRect.
+          // Windows: paint-inset fill + soft-masked RGB ring (fill stays sealed).
           IS_WINDOWS ? "dock-win-hardclip" : ""
         } ${
           isRejecting ? "animate-reject-pulse" : ""

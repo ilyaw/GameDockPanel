@@ -55,11 +55,16 @@
 //!   outside paint cannot show pale; expanded margins notch out corner tabs
 //!   beside the RoundRect (pale vertical sticks on Top dock). Hit-test stays
 //!   on the **full** CSS pill — shrinking it oscillated with DOM mouseleave.
+//! - Frontend soft-mask (~3px) is **border-only** under `.dock-win-hardclip`.
+//!   Masking the dark fill faded its top edge onto the WebView redirection
+//!   surface → thin white strip under the RGB ring (Top dock, healthy STYLE).
 //! - Hover/`WM_SIZE`: apply region **before** invalidate (log: `INVALIDATE
 //!   surface_event` landed before `SetWindowRgn` on expand → white flash).
 //!   Own hover resize under `surface_own_op_guard`.
-//! - Healthy `WM_ACTIVATE`: re-pin DWM alpha only — do **not** invalidate or
-//!   run full `on_surface_changed` (that was the post-click white-strip path).
+//! - Healthy `WM_ACTIVATE`: re-pin DWM alpha; if this session already saw
+//!   caption/LAYERED repair, also arm transparent-bg + surface reassert so
+//!   burn-in is cleared (STYLE-only health cannot see a white surface).
+//!   Otherwise skip full invalidate (that was the post-click white-strip path).
 //! - `NEED_TRANSPARENT_BG_REASSERT` bypasses the 400ms SURFACE debounce so a
 //!   LAYERED restore heals `DefaultBackgroundColor=0` on the next poll tick.
 //! - Diag poller self-heals paperclip (`OUTER_TOO_NARROW` / axis flip) by
@@ -70,9 +75,14 @@
 
 /// Matches frontend `--dock-win-edge-inset` under `.dock-win-hardclip` (DIP).
 /// Applied to GDI RoundRect only — click-through hit-test uses the full pill.
-/// 5 DIP: room for the ~3px CSS soft-mask so GDI knife-edge stair-steps
-/// land on low-alpha paint (4 DIP + 1.5px fade still looked jagged).
+/// 5 DIP: room for the ~3px CSS border soft-mask so GDI knife-edge stair-steps
+/// land on low-alpha rainbow pixels (fill stays unmasked / sealed).
 pub(crate) const WIN_PAINT_INSET_DIP: f64 = 5.0;
+
+/// Matches frontend border soft-mask fade under `.dock-win-hardclip` (CSS px).
+/// Logged next to RoundRect top so pale-triage can separate "strip above RGB"
+/// (caption/annulus) from "strip inside top fade band" (mask × opaque surface).
+const WIN_BORDER_SOFT_MASK_PX: i32 = 3;
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -133,6 +143,10 @@ static LAST_SURFACE_REASSERT_MS: AtomicU64 = AtomicU64::new(0);
 static SURFACE_OWN_OP: AtomicBool = AtomicBool::new(false);
 /// Min gap between full `on_surface_changed` runs (was 50 ms → permanent storm).
 const SURFACE_REASSERT_DEBOUNCE_MS: u64 = 400;
+/// Min gap between healthy-focus burn-in seals (alt-tab must not storm SURFACE_RUN).
+const FOCUS_BURN_SEAL_DEBOUNCE_MS: u64 = 2000;
+/// Last healthy-focus seal arm (ms since UNIX_EPOCH).
+static LAST_FOCUS_BURN_SEAL_MS: AtomicU64 = AtomicU64::new(0);
 /// Rate-limit `[CHROME] [SURFACE_SKIP]` diag lines.
 static LAST_SURFACE_SKIP_LOG_MS: AtomicU64 = AtomicU64::new(0);
 /// Rate-limit noisy `PALE` diag lines (invalidate / DWM ok).
@@ -433,11 +447,33 @@ fn emit_pale_focus_snap_if_needed(window: &WebviewWindow) {
     log_pale(
         "SNAP",
         format!(
-            "post-focus snapshot healthy={} hard_clip={} rgn_ok={} last={:?} {style}",
-            snap.healthy, snap.hard_clip_active, snap.set_rgn_ok_count, snap.last_pale_path,
+            "post-focus snapshot healthy={} hard_clip={} rgn_ok={} \
+             dwm_broken={} caption_creep={} layered_restore={} \
+             focus_skip={} last={:?} {style}",
+            snap.healthy,
+            snap.hard_clip_active,
+            snap.set_rgn_ok_count,
+            u8::from(snap.dwm_alpha_broken),
+            snap.caption_creep_count,
+            snap.layered_restore_count,
+            u8::from(snap.focus_surface_skipped),
+            snap.last_pale_path,
         ),
         false,
     );
+    if !snap.health_issues.is_empty() {
+        log::warn!(
+            "[win-pale] post-focus HEALTH issues={:?} — white strip may be chrome/alpha",
+            snap.health_issues
+        );
+    } else if snap.caption_creep_count > 0 || snap.layered_restore_count > 0 {
+        log::info!(
+            "[win-pale] post-focus STYLE healthy but session repairs \
+             caption_creep={} layered_restore={} — if white strip remains after \
+             fill_sealed=1, suspect burn-in / DWM alpha (not CSS mask)",
+            snap.caption_creep_count, snap.layered_restore_count
+        );
+    }
     log::info!("[win-pale] post-focus snapshot={snap:?}");
     let _ = window.emit("dock-win-diag", &snap);
 }
@@ -683,6 +719,11 @@ fn assess_chrome_health(
     if !DOCK_SUBCLASS_INSTALLED.load(Ordering::Relaxed) {
         issues.push("NO_SUBCLASS".into());
     }
+    // STYLE can look fine while DWM per-pixel alpha is dead — transparent HTML
+    // then composites over a white redirection surface (thin pale strip).
+    if DWM_ALPHA_BROKEN.load(Ordering::SeqCst) {
+        issues.push("DWM_ALPHA_BROKEN".into());
+    }
     issues
 }
 
@@ -861,15 +902,23 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
             }
         }
         WM_ACTIVATE => {
-            // Always repair + re-pin DWM alpha. Full invalidate/SURFACE_RUN only
-            // when chrome is unhealthy — healthy focus was burning white into
-            // soft-mode crescents via erase-less invalidate + region churn.
+            // Always repair + re-pin DWM alpha. Full invalidate/SURFACE_RUN when
+            // chrome is unhealthy. Healthy STYLE can still hide burn-in from an
+            // earlier caption/LAYERED repair — arm transparent-bg + surface so
+            // the ~50ms poller clears the white surface without subclass
+            // invalidate (no WebviewWindow here for DefaultBackgroundColor).
             let wa = wa_activate_name(wparam);
             let repaired = repair_dock_hwnd_chrome(hwnd);
             reassert_dwm_alpha(hwnd);
             let unhealthy = repaired
                 || hwnd_chrome_needs_reassert(hwnd)
                 || DWM_ALPHA_BROKEN.load(Ordering::SeqCst);
+            let session_burn_risk = CAPTION_CREEP_COUNT.load(Ordering::Relaxed) > 0
+                || LAYERED_RESTORE_COUNT.load(Ordering::Relaxed) > 0;
+            let now = now_ms();
+            let seal_due = session_burn_risk
+                && now.saturating_sub(LAST_FOCUS_BURN_SEAL_MS.load(Ordering::Relaxed))
+                    >= FOCUS_BURN_SEAL_DEBOUNCE_MS;
             NEED_PALE_FOCUS_SNAP.store(true, Ordering::SeqCst);
             if unhealthy {
                 FOCUS_SURFACE_SKIPPED.store(false, Ordering::SeqCst);
@@ -889,17 +938,47 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
                     "EVENT",
                     format!("msg=0x{msg:04X} {wa} run=full hwnd={hwnd:?}"),
                 );
-            } else {
-                FOCUS_SURFACE_SKIPPED.store(true, Ordering::SeqCst);
+            } else if seal_due {
+                FOCUS_SURFACE_SKIPPED.store(false, Ordering::SeqCst);
+                LAST_FOCUS_BURN_SEAL_MS.store(now, Ordering::Relaxed);
+                NEED_TRANSPARENT_BG_REASSERT.store(true, Ordering::SeqCst);
+                NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
                 log_pale(
                     "FOCUS",
-                    format!("{wa} skip=healthy {}", hwnd_style_snap(hwnd)),
+                    format!(
+                        "{wa} seal_pending=1 caption_creep={} layered_restore={} {}",
+                        CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
+                        LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
+                        hwnd_style_snap(hwnd)
+                    ),
+                    false,
+                );
+                diag_file::status(
+                    "FOCUS",
+                    "SEAL",
+                    format!(
+                        "msg=0x{msg:04X} {wa} seal_pending hwnd={hwnd:?} \
+                         caption_creep={} layered_restore={}",
+                        CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
+                        LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
+                    ),
+                );
+            } else {
+                FOCUS_SURFACE_SKIPPED.store(true, Ordering::SeqCst);
+                let seal_note = if session_burn_risk {
+                    " seal_deferred=1"
+                } else {
+                    ""
+                };
+                log_pale(
+                    "FOCUS",
+                    format!("{wa} skip=healthy{seal_note} {}", hwnd_style_snap(hwnd)),
                     false,
                 );
                 diag_file::status(
                     "FOCUS",
                     "SKIP",
-                    format!("msg=0x{msg:04X} {wa} skip=healthy hwnd={hwnd:?}"),
+                    format!("msg=0x{msg:04X} {wa} skip=healthy hwnd={hwnd:?}{seal_note}"),
                 );
             }
         }
@@ -2404,15 +2483,24 @@ fn set_window_rgn_to_pill(
             u8::from(!round_only),
             SET_RGN_OK.load(Ordering::Relaxed)
         );
+        // Pale triage bands (client px):
+        //   [0, round_top)              — outside paint / caption-or-annulus zone
+        //   [round_top, round_top+mask) — border soft-mask fade (should land on fill)
+        //   above round_bottom similarly at the bottom edge
+        let mask = WIN_BORDER_SOFT_MASK_PX;
+        let fade_bottom = (round_top + mask).min(round_bottom);
         log_pale(
             "RGN",
             format!(
                 "apply paint-inset RoundRect px=({round_left},{round_top})-({round_right},{round_bottom}) \
                  inset={inset} aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) \
                  diameter={clip_diameter} round_only={round_only} notch_tabs={} \
-                 client={client_w}x{client_h} ok#={} {}",
+                 pale_bands above_rgb=0..{round_top} fade_top={round_top}..{fade_bottom} \
+                 border_mask={mask} fill_sealed=1 \
+                 client={client_w}x{client_h} ok#={} dwm_broken={} {}",
                 u8::from(!round_only),
                 SET_RGN_OK.load(Ordering::Relaxed),
+                u8::from(DWM_ALPHA_BROKEN.load(Ordering::SeqCst)),
                 hwnd_style_snap(hwnd)
             ),
             false,

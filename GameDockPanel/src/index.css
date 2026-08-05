@@ -279,8 +279,10 @@ img {
   Windows paint clip. GDI SetWindowRgn RoundRect is always on (soft CSS-only
   mode removed after white-corner regressions). `.dock-win-hardclip` pulls
   BOTH the dark fill and the RGB ring inside the RoundRect by the same
-  `--dock-win-edge-inset` (Rust region uses the same 5 DIP inset) and fades
-  edge masks ~3px so residual GDI knife edges hit low-alpha pixels.
+  `--dock-win-edge-inset` (Rust region uses the same 5 DIP inset). Soft-mask
+  ~3px applies ONLY to the RGB ring — never the fill. Masking the fill faded
+  its top edge onto the WebView redirection surface and read as a thin white
+  strip under the border (especially Top dock) whenever DWM alpha was stale.
   DockPanel omits Tailwind `inset-0` on these layers on Windows so these
   rules win cleanly.
 */
@@ -310,8 +312,11 @@ img {
   clip-path: inset(0 round var(--dock-win-paint-radius));
 }
 
-/* Soft edge masks only where a GDI knife edge actually exists. */
-.dock-root--windows .dock-win-hardclip .dock-pill-decor-clip,
+/*
+  Soft-mask the RGB ring only: stair-steps from GDI RoundRect land on
+  low-alpha rainbow pixels. Fill stays unmasked so the fade composites over
+  the sealed dark underlay, not over a white redirection surface.
+*/
 .dock-root--windows .dock-win-hardclip .dock-border-clip {
   -webkit-mask-image:
     linear-gradient(
@@ -347,12 +352,16 @@ img {
   mask-composite: intersect;
 }
 
+/* Outer fill: never soft-mask (seals against white redirection surface). */
+.dock-root--windows .dock-win-hardclip .dock-pill-decor-clip {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
 /*
   Nested decor clip (bg-flow wrapper) is already inside the outer inset —
   keep it flush to its parent so blur children fill the paint footprint.
-  The `.dock-win-hardclip` variant is listed explicitly: it is (0,4,0) vs the
-  mask rule's (0,3,0), so the inner mask reset keeps winning even if these
-  blocks are ever reordered.
+  Explicitly clear any mask so it cannot inherit the border soft-mask.
 */
 .dock-root--windows .dock-pill-decor-clip .dock-pill-decor-clip,
 .dock-root--windows .dock-win-hardclip .dock-pill-decor-clip .dock-pill-decor-clip {
