@@ -51,7 +51,7 @@
 //! - `SetWindowRgn` **always**: RoundRect-only when HWND == pill (rest); at
 //!   hover/menu `RoundRect(paint-inset pill) OR (client DIFF pill AABB)` on
 //!   both top-level and WebView2 child. RoundRect is inset by the same
-//!   `--dock-win-edge-inset` (4 DIP) as the CSS fill so the WebView annulus
+//!   `--dock-win-edge-inset` (5 DIP) as the CSS fill so the WebView annulus
 //!   outside paint cannot show pale; expanded margins notch out corner tabs
 //!   beside the RoundRect (pale vertical sticks on Top dock). Hit-test stays
 //!   on the **full** CSS pill — shrinking it oscillated with DOM mouseleave.
@@ -70,8 +70,9 @@
 
 /// Matches frontend `--dock-win-edge-inset` under `.dock-win-hardclip` (DIP).
 /// Applied to GDI RoundRect only — click-through hit-test uses the full pill.
-/// 4 DIP (was 2): logs showed inset=2 still left pale top-corner tabs.
-pub(crate) const WIN_PAINT_INSET_DIP: f64 = 4.0;
+/// 5 DIP: room for the ~3px CSS soft-mask so GDI knife-edge stair-steps
+/// land on low-alpha paint (4 DIP + 1.5px fade still looked jagged).
+pub(crate) const WIN_PAINT_INSET_DIP: f64 = 5.0;
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
