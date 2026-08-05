@@ -601,7 +601,6 @@ function HydratedDockPanel({
     mouseX.set(Infinity);
     mouseY.set(Infinity);
     setHoveredIconId(null);
-    setTooltip(null);
     // Windows: click-through poller owns HWND expand/shrink. DOM mouseleave
     // during hover resize was fighting the poller (appear on hover / vanish
     // on leave). Menu hold still uses setDockRegionRelaxed explicitly.
