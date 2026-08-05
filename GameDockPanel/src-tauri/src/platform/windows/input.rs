@@ -33,6 +33,9 @@ use crate::platform::geometry::{
 use super::window::{consume_surface_reassert_if_needed, set_dock_click_through};
 
 const CLICK_POLL_MS: u64 = 50;
+/// Hover leave must survive the expand resize (log: in_pill true→false in
+/// ~64ms while the cursor never left the visual pill). ~150ms = 3 ticks.
+const HOVER_LEAVE_DEBOUNCE_TICKS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 struct DockCursorPayload {
@@ -48,6 +51,7 @@ fn start_click_through_poller(window: WebviewWindow) {
     std::thread::spawn(move || {
         let mut ignoring = true;
         let mut dock_hovered = false;
+        let mut leave_debounce_ticks: u32 = 0;
         let mut last_cursor: Option<DockCursorPayload> = None;
 
         // Force initial TRANSPARENT|LAYERED on the UI thread — setup may have
@@ -84,14 +88,27 @@ fn start_click_through_poller(window: WebviewWindow) {
             };
             let drag_over_window = lbutton_down && in_window;
 
-            if in_pill != dock_hovered {
-                dock_hovered = in_pill;
+            // Enter immediately; leave only after debounce so HWND expand
+            // resize does not flash region_relaxed false (pale margin tabs).
+            let mut want_hovered = dock_hovered;
+            if in_pill {
+                leave_debounce_ticks = 0;
+                want_hovered = true;
+            } else if dock_hovered {
+                leave_debounce_ticks = leave_debounce_ticks.saturating_add(1);
+                if leave_debounce_ticks >= HOVER_LEAVE_DEBOUNCE_TICKS {
+                    want_hovered = false;
+                    leave_debounce_ticks = 0;
+                }
+            }
+
+            if want_hovered != dock_hovered {
+                dock_hovered = want_hovered;
                 let _ = window.emit("dock-hover", dock_hovered);
-                // Magnify + tooltip paint outside the CSS pill — expand the
-                // HWND while hovered, shrink when idle.
                 log::info!(
-                    "[win-pale] [HOVER] hit_test in_pill={dock_hovered} (full pill; \
-                     GDI paint-inset separate)"
+                    "[win-pale] [HOVER] hit_test apply hovered={dock_hovered} \
+                     in_pill={in_pill} leave_debounce={leave_debounce_ticks} \
+                     (full pill; GDI paint-inset separate)"
                 );
                 if let Err(err) =
                     crate::platform::set_dock_region_relaxed(&window, dock_hovered, None)
@@ -158,7 +175,7 @@ fn pill_cursor_at_screen(
     let pill_h = (pill_h_dip * scale).round() as i32;
     // Near-edge inset is outside the HWND (see geometry.rs) — pill is flush
     // to the near client edge; do not offset hit-test by DOCK_EDGE_INSET.
-    // Full CSS pill — intentionally NOT the 2 DIP GDI paint inset. Shrinking
+    // Full CSS pill — intentionally NOT the GDI paint inset. Shrinking
     // hit-test to match SetWindowRgn caused expand↔shrink oscillation (DOM
     // mouseleave + poller). GDI clips the pale annulus; poller hover uses
     // the visual pill so the rim still counts as dock-hovered.

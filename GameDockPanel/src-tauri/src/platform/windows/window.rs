@@ -51,9 +51,10 @@
 //! - `SetWindowRgn` **always**: RoundRect-only when HWND == pill (rest); at
 //!   hover/menu `RoundRect(paint-inset pill) OR (client DIFF pill AABB)` on
 //!   both top-level and WebView2 child. RoundRect is inset by the same
-//!   `--dock-win-edge-inset` (2 DIP) as the CSS fill so the WebView annulus
-//!   outside paint cannot show pale. Hit-test stays on the **full** CSS pill
-//!   — shrinking it caused expand↔shrink oscillation with DOM mouseleave.
+//!   `--dock-win-edge-inset` (4 DIP) as the CSS fill so the WebView annulus
+//!   outside paint cannot show pale; expanded margins notch out corner tabs
+//!   beside the RoundRect (pale vertical sticks on Top dock). Hit-test stays
+//!   on the **full** CSS pill — shrinking it oscillated with DOM mouseleave.
 //! - Hover/`WM_SIZE`: apply region **before** invalidate (log: `INVALIDATE
 //!   surface_event` landed before `SetWindowRgn` on expand → white flash).
 //!   Own hover resize under `surface_own_op_guard`.
@@ -69,7 +70,8 @@
 
 /// Matches frontend `--dock-win-edge-inset` under `.dock-win-hardclip` (DIP).
 /// Applied to GDI RoundRect only — click-through hit-test uses the full pill.
-pub(crate) const WIN_PAINT_INSET_DIP: f64 = 2.0;
+/// 4 DIP (was 2): logs showed inset=2 still left pale top-corner tabs.
+pub(crate) const WIN_PAINT_INSET_DIP: f64 = 4.0;
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2094,10 +2096,11 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
 /// Builds the dock clip region in physical pixels.
 ///
 /// - **Rest** (`round_only`): `RoundRect(round_*)` only — paint-inset pill.
-/// - **Expanded**: `RoundRect(round_*) OR (client DIFF aabb_*)` so magnify /
-///   tooltip/menu margins stay visible while pill crescents stay clipped.
-///   `aabb_*` is the pre-inset pill box; `round_*` is paint-inset so the 2px
-///   annulus is not part of the HWND (no white ring when alpha flickers).
+/// - **Expanded**: `RoundRect(round_*) OR (client DIFF aabb_* minus corner
+///   margin tabs)` so magnify/tooltip margins stay visible while (1) the
+///   paint-inset annulus and (2) the rectangular side-margin tabs beside
+///   the rounded pill corners stay clipped (those tabs were the pale
+///   vertical bars in Top-dock screenshots).
 unsafe fn create_dock_clip_hrgn(
     round_left: i32,
     round_top: i32,
@@ -2169,6 +2172,47 @@ unsafe fn create_dock_clip_hrgn(
         }
         return Err(format!("CombineRgn(DIFF) failed gle={}", last_win32_error()));
     }
+
+    // Notch rectangular margin tabs beside each rounded pill corner. Full
+    // `client DIFF aabb` left those as opaque pale bars (Top dock: short
+    // vertical sticks above the rainbow at both ends).
+    let corner = (diameter / 2)
+        .max(1)
+        .min((aabb_right - aabb_left).max(0) / 2)
+        .min((aabb_bottom - aabb_top).max(0) / 2);
+    let tabs = [
+        (0, aabb_top, aabb_left, aabb_top + corner),
+        (aabb_right, aabb_top, client_w, aabb_top + corner),
+        (0, aabb_bottom - corner, aabb_left, aabb_bottom),
+        (aabb_right, aabb_bottom - corner, client_w, aabb_bottom),
+    ];
+    for (l, t, r, b) in tabs {
+        if r <= l || b <= t {
+            continue;
+        }
+        let tab = unsafe { CreateRectRgn(l, t, r, b) };
+        if tab.is_invalid() {
+            continue;
+        }
+        let cut = unsafe { CombineRgn(Some(outside), Some(outside), Some(tab), RGN_DIFF) };
+        unsafe {
+            delete_hrgn(tab);
+        }
+        if cut == RGN_ERROR {
+            unsafe {
+                delete_hrgn(pill_round);
+                delete_hrgn(win);
+                delete_hrgn(aabb);
+                delete_hrgn(outside);
+                delete_hrgn(result);
+            }
+            return Err(format!(
+                "CombineRgn(DIFF tab) failed gle={}",
+                last_win32_error()
+            ));
+        }
+    }
+
     let combined = unsafe { CombineRgn(Some(result), Some(pill_round), Some(outside), RGN_OR) };
     if combined == RGN_ERROR {
         unsafe {
@@ -2354,8 +2398,9 @@ fn set_window_rgn_to_pill(
             "[win-backdrop] SetWindowRgn(pill∪margins) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
              px=({round_left},{round_top})-({round_right},{round_bottom}) inset={inset} \
              aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) diameter={clip_diameter} \
-             round_only={round_only} client={client_w}x{client_h} scale={scale:.2} \
+             round_only={round_only} notch_tabs={} client={client_w}x{client_h} scale={scale:.2} \
              STYLE={style} chrome_delta={delta} ok#={}",
+            u8::from(!round_only),
             SET_RGN_OK.load(Ordering::Relaxed)
         );
         log_pale(
@@ -2363,8 +2408,9 @@ fn set_window_rgn_to_pill(
             format!(
                 "apply paint-inset RoundRect px=({round_left},{round_top})-({round_right},{round_bottom}) \
                  inset={inset} aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) \
-                 diameter={clip_diameter} round_only={round_only} client={client_w}x{client_h} \
-                 ok#={} {}",
+                 diameter={clip_diameter} round_only={round_only} notch_tabs={} \
+                 client={client_w}x{client_h} ok#={} {}",
+                u8::from(!round_only),
                 SET_RGN_OK.load(Ordering::Relaxed),
                 hwnd_style_snap(hwnd)
             ),

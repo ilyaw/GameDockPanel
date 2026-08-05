@@ -279,7 +279,7 @@ img {
   Windows paint clip. GDI SetWindowRgn RoundRect is always on (soft CSS-only
   mode removed after white-corner regressions). `.dock-win-hardclip` pulls
   BOTH the dark fill and the RGB ring inside the RoundRect by the same
-  `--dock-win-edge-inset` (Rust region uses the same 2 DIP inset) and fades
+  `--dock-win-edge-inset` (Rust region uses the same 4 DIP inset) and fades
   edge masks ~1.5px so residual GDI knife edges hit low-alpha pixels.
   DockPanel omits Tailwind `inset-0` on these layers on Windows so these
   rules win cleanly.
@@ -297,7 +297,7 @@ img {
   only the inset on the pill would leave the radius computed with 0px.
 */
 .dock-root--windows .dock-win-hardclip {
-  --dock-win-edge-inset: 2px;
+  --dock-win-edge-inset: 4px;
   --dock-win-paint-radius: calc(
     var(--dock-pill-radius, 28px) - var(--dock-win-edge-inset)
   );
