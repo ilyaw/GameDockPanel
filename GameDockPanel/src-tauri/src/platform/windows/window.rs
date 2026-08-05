@@ -18,9 +18,22 @@
 //!    low-alpha pixels. Skip `filter: drop-shadow` on Windows borders.
 //!
 //! Durable approach:
-//! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; style changes
-//!   re-assert popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`, then force
-//!   transparent WebView2 bg + invalidate (LAYERED alone can leave a white fill).
+//! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; Tao style stomps
+//!   are repaired **inline from `WM_STYLECHANGED`** — a posted repair let DWM
+//!   compose frames with `WS_CAPTION` / without `WS_EX_LAYERED` at `show()`,
+//!   and the white backdrop of those frames outlived every later style fix
+//!   (the pale strip / corner crescents above the CSS pill). Repairs re-assert
+//!   popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`, then force transparent
+//!   WebView2 bg + invalidate (LAYERED alone can leave a white fill).
+//! - Every manual `WS_EX_LAYERED` set is followed by
+//!   `SetLayeredWindowAttributes(alpha=255)`: per MSDN a layered window is in
+//!   an undefined ("not displayed") state until SLWA/ULW initializes it, and
+//!   neither Tao nor we ever called it — on some machines DWM then composes
+//!   the redirection surface as opaque, so HTML-transparent pixels render the
+//!   white backdrop instead of the desktop. Alpha 255 is identity; per-pixel
+//!   alpha still comes from the DWM blur-behind trick.
+//! - `DWMWA_NCRENDERING_POLICY = DISABLED` — DWM never draws caption/frame
+//!   visuals even while a Tao stomp briefly restores `WS_CAPTION`.
 //! - Per-pixel alpha lives on DWM's blur-behind trick, which Tao applies only
 //!   once at window creation — `reassert_dwm_alpha` re-pins it after every
 //!   chrome repair / FRAMECHANGED, otherwise transparent HTML composites over
@@ -44,11 +57,11 @@ use std::sync::Mutex;
 use tauri::utils::config::Color;
 use tauri::{Emitter, Manager, WebviewWindow};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{GetLastError, COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_DONOTROUND, DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND,
-    DWM_WINDOW_CORNER_PREFERENCE,
+    DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED,
+    DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EnumDisplaySettingsW,
@@ -62,12 +75,13 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, PostMessageW,
-    SetWindowLongPtrW, SetWindowPos, GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_APP,
-    WM_DPICHANGED, WM_NCCALCSIZE, WM_NCPAINT, WM_SIZE, WM_STYLECHANGED, WM_WINDOWPOSCHANGED,
-    WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
-    WS_SYSMENU, WS_VISIBLE,
+    GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GW_CHILD, GWL_EXSTYLE,
+    GWL_STYLE, LWA_ALPHA, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_DPICHANGED, WM_NCCALCSIZE,
+    WM_NCPAINT, WM_SHOWWINDOW, WM_SIZE, WM_STYLECHANGED, WM_WINDOWPOSCHANGED, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU,
+    WS_VISIBLE,
 };
 
 use super::diag_file;
@@ -148,6 +162,10 @@ pub struct WindowsBackdropSnapshot {
     pub chrome_repair_count: u64,
     pub layered_restore_count: u64,
     pub caption_creep_count: u64,
+    /// `SetLayeredWindowAttributes(alpha=255)` calls after manual
+    /// `WS_EX_LAYERED` restores — 0 with healthy `is_layered=true` means the
+    /// layered surface may be composing in the undefined (opaque) state.
+    pub layered_attr_inits: u64,
     /// Successful `DwmEnableBlurBehindWindow` re-assertions (per-pixel alpha).
     pub dwm_alpha_reasserts: u64,
     /// `DwmEnableBlurBehindWindow` currently failing — hard-clip fallback is
@@ -267,6 +285,9 @@ static DWM_ALPHA_BROKEN: AtomicBool = AtomicBool::new(false);
 static CHROME_REPAIR_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAYERED_RESTORE_COUNT: AtomicU64 = AtomicU64::new(0);
 static CAPTION_CREEP_COUNT: AtomicU64 = AtomicU64::new(0);
+/// `SetLayeredWindowAttributes(alpha=255)` initializations after manual
+/// `WS_EX_LAYERED` sets — see `init_layered_attributes`.
+static LAYERED_ATTR_INITS: AtomicU64 = AtomicU64::new(0);
 static LAST_CHILD_CLASS: Mutex<Option<String>> = Mutex::new(None);
 static DIAG_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
 /// When true, HWND region is cleared so magnify / tooltip / pending menu
@@ -287,11 +308,58 @@ static HARD_CLIP_REGION_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Guard against re-entrant style repair from WM_STYLECHANGED.
 static DOCK_CHROME_REPAIRING: AtomicBool = AtomicBool::new(false);
 
-/// Posted by the subclass when Tao restores caption / drops LAYERED.
-const WM_DOCK_REPAIR_CHROME: u32 = WM_APP + 0x44D;
-
 fn last_win32_error() -> u32 {
     unsafe { GetLastError().0 }
+}
+
+/// Initialize the layered-window state right after `WS_EX_LAYERED` was set
+/// through `SetWindowLongPtrW`.
+///
+/// Per MSDN the window "will not be displayed" until
+/// `SetLayeredWindowAttributes`/`UpdateLayeredWindow` runs — in practice the
+/// WebView2 D3D child still renders, but the *top-level* redirection surface
+/// is left in an undefined composition state, and on some machines DWM then
+/// treats it as opaque: every HTML-transparent pixel (corner crescents at
+/// rest, hover margins) shows the white backdrop instead of the desktop —
+/// the pale strip above the RGB pill. Neither Tao nor this module ever
+/// initialized it (Tao only ORs the bit for ignore-cursor-events).
+///
+/// Constant alpha 255 is identity; per-pixel alpha still comes from the DWM
+/// blur-behind trick (`reassert_dwm_alpha`), which SLWA does not disturb.
+fn init_layered_attributes(hwnd: HWND) {
+    match unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) } {
+        Ok(()) => {
+            let n = LAYERED_ATTR_INITS.fetch_add(1, Ordering::Relaxed) + 1;
+            log::debug!("[win-backdrop] SetLayeredWindowAttributes(255) initialized (#{n})");
+        }
+        Err(err) => log::warn!(
+            "[win-backdrop] SetLayeredWindowAttributes(255) failed: {err} gle={}",
+            last_win32_error()
+        ),
+    }
+}
+
+/// DWM must never render NC frame visuals for the dock. Even the few
+/// milliseconds while Tao's `apply_diff` restores `WS_CAPTION` at `show()` /
+/// layer changes would otherwise compose a DWM caption behind the transparent
+/// client — the classic pale "ghost titlebar" band. The policy is per-window
+/// and cheap to re-pin after every caption repair.
+fn disable_dwm_nc_rendering(hwnd: HWND) {
+    let policy = DWMNCRP_DISABLED;
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const DWMNCRENDERINGPOLICY as *const _,
+            size_of::<DWMNCRENDERINGPOLICY>() as u32,
+        )
+    };
+    if let Err(err) = result {
+        log::warn!(
+            "[win-backdrop] DWMWA_NCRENDERING_POLICY(DISABLED) failed: {err} gle={}",
+            last_win32_error()
+        );
+    }
 }
 
 fn flush_frame_changed(hwnd: HWND) {
@@ -516,6 +584,8 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
         let desired = WS_POPUP.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0 | (style & WS_VISIBLE.0);
         unsafe { SetWindowLongPtrW(hwnd, GWL_STYLE, desired as isize) };
+        // Tao touched the frame — re-pin "no DWM caption visuals, ever".
+        disable_dwm_nc_rendering(hwnd);
         repaired = true;
         log::warn!(
             "[win-backdrop] subclass repair STYLE 0x{style:08x} → 0x{desired:08x} \
@@ -529,6 +599,7 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
         LAYERED_RESTORE_COUNT.fetch_add(1, Ordering::Relaxed);
         let desired = exstyle | WS_EX_LAYERED.0;
         unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
+        init_layered_attributes(hwnd);
         repaired = true;
         // Subclass has no WebviewWindow — flag the next refresh to force
         // DefaultBackgroundColor(alpha=0) + invalidate (pale white strip).
@@ -636,23 +707,30 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
         WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
         WM_NCPAINT => return LRESULT(0),
         WM_STYLECHANGED => {
-            // During our own chrome/region ops, repair inline — do not post a
-            // full surface reassert (click-through EXSTYLE toggles would re-arm
-            // the feedback loop via WM_DOCK_REPAIR_CHROME).
-            if surface_reassert_suppressed() {
-                let _ = repair_dock_hwnd_chrome(hwnd);
-            } else {
-                let _ = PostMessageW(Some(hwnd), WM_DOCK_REPAIR_CHROME, WPARAM(0), LPARAM(0));
+            // Always repair inline, never via a posted message: this message
+            // is delivered from *inside* the SetWindowLong call that stomped
+            // the styles (Tao `apply_diff` at show / always-on-top / layer
+            // changes). A posted repair let DWM compose frames with
+            // WS_CAPTION and without WS_EX_LAYERED — the white backdrop
+            // painted during those frames outlived the late repair (pale
+            // strip / corner crescents above the pill). Repairing here means
+            // the stomped style never survives to a composed frame.
+            let repaired = repair_dock_hwnd_chrome(hwnd);
+            // Full surface pass only for real external stomps — our own
+            // chrome/region ops repair inline without re-arming the reassert
+            // loop (click-through EXSTYLE toggles fired it at 20 Hz once).
+            if repaired && !surface_reassert_suppressed() {
+                NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
             }
         }
-        WM_SIZE | WM_WINDOWPOSCHANGED | WM_ACTIVATE | WM_DPICHANGED => {
+        WM_SIZE | WM_WINDOWPOSCHANGED | WM_ACTIVATE | WM_DPICHANGED | WM_SHOWWINDOW => {
             // Cheap HWND repair always. Full ChromeGuard path only for real
             // external events — not for our own SetWindowRgn/FRAMECHANGED echo
             // (that feedback loop ran SURFACE_RUN at ~20 Hz forever).
             let suppress = surface_reassert_suppressed();
             let repaired = repair_dock_hwnd_chrome(hwnd);
             let want_full = match msg {
-                WM_ACTIVATE | WM_DPICHANGED => true,
+                WM_ACTIVATE | WM_DPICHANGED | WM_SHOWWINDOW => true,
                 WM_SIZE => !suppress,
                 _ => {
                     // WM_WINDOWPOSCHANGED: only if we actually repaired, or
@@ -665,18 +743,17 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
             if want_full {
                 invalidate_dock_hwnd(hwnd);
                 NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
-                if msg == WM_ACTIVATE || msg == WM_DPICHANGED || msg == WM_SIZE {
-                    let ctx = if msg == WM_ACTIVATE { "FOCUS" } else { "SIZE" };
+                if msg != WM_WINDOWPOSCHANGED {
+                    let ctx = match msg {
+                        WM_ACTIVATE => "FOCUS",
+                        WM_SHOWWINDOW => "SHOW",
+                        _ => "SIZE",
+                    };
                     diag_file::status(ctx, "EVENT", format!("msg=0x{msg:04X} hwnd={hwnd:?}"));
                 }
             } else if repaired {
                 invalidate_dock_hwnd(hwnd);
             }
-        }
-        m if m == WM_DOCK_REPAIR_CHROME => {
-            let _ = repair_dock_hwnd_chrome(hwnd);
-            NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
-            return LRESULT(0);
         }
         _ => {}
     }
@@ -701,6 +778,9 @@ fn install_dock_chrome_subclass(window: &WebviewWindow) -> Result<(), String> {
         return Err(format!("SetWindowSubclass failed gle={gle}"));
     }
     DOCK_SUBCLASS_INSTALLED.store(true, Ordering::SeqCst);
+    // DWM NC visuals off for the lifetime of the window — even a transient
+    // caption stomp must not compose a ghost titlebar behind the client.
+    disable_dwm_nc_rendering(hwnd);
     // Force an immediate NC recalc so the ghost bar never paints once.
     flush_frame_changed(hwnd);
     repair_dock_hwnd_chrome(hwnd);
@@ -867,6 +947,8 @@ fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
             ));
         }
     }
+    // Define the layered state before FRAMECHANGED recomposes the window.
+    init_layered_attributes(hwnd);
     flush_frame_changed(hwnd);
     log::warn!(
         "[win-backdrop] WS_EX_LAYERED missing — restored EXSTYLE=0x{desired:08x} (was 0x{exstyle:08x}) \
@@ -901,6 +983,9 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
                  was=0x{exstyle:08x} desired=0x{desired:08x}"
             ));
         }
+    }
+    if !had_layered {
+        init_layered_attributes(hwnd);
     }
     flush_frame_changed(hwnd);
     // Every hover enter/leave lands here with a FRAMECHANGED — the highest
@@ -1224,6 +1309,7 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         chrome_repair_count: CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
         layered_restore_count: LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
         caption_creep_count: CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
+        layered_attr_inits: LAYERED_ATTR_INITS.load(Ordering::Relaxed),
         dwm_alpha_reasserts: DWM_ALPHA_REASSERTS.load(Ordering::Relaxed),
         dwm_alpha_broken: DWM_ALPHA_BROKEN.load(Ordering::SeqCst),
         health_issues,
@@ -1362,7 +1448,7 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?} \
                          scale={:?} dpr_js={:?} viewport_css={:?} inner={:?} dpi_mismatch={:?} \
                          dpi={:?} awareness={:?} screen_phys={:?} screen_virt={:?} \
-                         dwm_alpha_reasserts={}",
+                         dwm_alpha_reasserts={} layered_attr_inits={}",
                         snap.outer_size_px,
                         snap.stored_pill_dip,
                         snap.scale_factor,
@@ -1375,6 +1461,7 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         snap.physical_screen_px,
                         snap.virtual_screen_px,
                         snap.dwm_alpha_reasserts,
+                        snap.layered_attr_inits,
                     );
                 }
             }

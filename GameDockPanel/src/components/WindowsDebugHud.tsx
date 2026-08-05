@@ -36,6 +36,8 @@ export type WindowsDiagSnapshot = {
   chromeRepairCount: number;
   layeredRestoreCount: number;
   captionCreepCount: number;
+  /** SLWA(255) inits after manual WS_EX_LAYERED restores (see window.rs). */
+  layeredAttrInits: number;
   healthIssues: string[];
   healthy: boolean;
   /** Advisory — Tauri scale vs JS DPR; does not mean chrome is broken. */
@@ -155,7 +157,8 @@ export function WindowsDebugHud({ enabled }: { enabled: boolean }) {
             </p>
             <p>
               repairs={snap.chromeRepairCount} layered↑={snap.layeredRestoreCount} caption↑=
-              {snap.captionCreepCount} child={snap.webviewChildClass ?? "none"}
+              {snap.captionCreepCount} slwa={snap.layeredAttrInits} child=
+              {snap.webviewChildClass ?? "none"}
             </p>
             <p className="text-fuchsia-300/90">magenta=HWND · cyan=pill</p>
           </>
