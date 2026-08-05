@@ -25,13 +25,18 @@
 //!   (the pale strip / corner crescents above the CSS pill). Repairs re-assert
 //!   popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`, then force transparent
 //!   WebView2 bg + invalidate (LAYERED alone can leave a white fill).
-//! - Every manual `WS_EX_LAYERED` set is followed by
-//!   `SetLayeredWindowAttributes(alpha=255)`: per MSDN a layered window is in
-//!   an undefined ("not displayed") state until SLWA/ULW initializes it, and
-//!   neither Tao nor we ever called it — on some machines DWM then composes
-//!   the redirection surface as opaque, so HTML-transparent pixels render the
-//!   white backdrop instead of the desktop. Alpha 255 is identity; per-pixel
-//!   alpha still comes from the DWM blur-behind trick.
+//! - **Never** `SetLayeredWindowAttributes`: it switches the HWND into the GDI
+//!   constant-alpha layered path and **breaks WebView2 per-pixel alpha**
+//!   (transparent HTML then composites over an opaque white redirection
+//!   surface — pale corner crescents / "white bar"). Confirmed by Wails
+//!   #5812 (`IgnoreMouseEvents` → SLWA(255) → white sheet). Per-pixel alpha
+//!   comes only from the DWM blur-behind trick + `DefaultBackgroundColor=0`.
+//! - `WM_ERASEBKGND` → no-op, and never `InvalidateRect`/`RedrawWindow` with
+//!   erase: the class brush is white; erasing the transparent crescents
+//!   permanently paints them into the redirection surface (first paint OK,
+//!   white corners after the first focus/`on_surface_changed` invalidate).
+//! - Soft-mode `SetWindowRgn(None)` only when a hard clip was actually active
+//!   — calling it every refresh forces a redraw that reintroduces the erase.
 //! - `DWMWA_NCRENDERING_POLICY = DISABLED` — DWM never draws caption/frame
 //!   visuals even while a Tao stomp briefly restores `WS_CAPTION`.
 //! - Per-pixel alpha lives on DWM's blur-behind trick, which Tao applies only
@@ -57,7 +62,7 @@ use std::sync::Mutex;
 use tauri::utils::config::Color;
 use tauri::{Emitter, Manager, WebviewWindow};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{GetLastError, COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMNCRENDERINGPOLICY, DWMNCRP_DISABLED,
     DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
@@ -66,8 +71,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EnumDisplaySettingsW,
     InvalidateRect, RedrawWindow, SetWindowRgn, DEVMODEW, ENUM_CURRENT_SETTINGS, HGDIOBJ, HRGN,
-    RDW_ALLCHILDREN, RDW_ERASE, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RGN_DIFF, RGN_ERROR,
-    RGN_OR,
+    RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW, RGN_DIFF, RGN_ERROR, RGN_OR,
 };
 use windows::Win32::UI::HiDpi::{
     GetAwarenessFromDpiAwarenessContext, GetDpiForWindow, GetWindowDpiAwarenessContext,
@@ -75,13 +79,12 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, GW_CHILD, GWL_EXSTYLE,
-    GWL_STYLE, LWA_ALPHA, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_DPICHANGED, WM_NCCALCSIZE,
-    WM_NCPAINT, WM_SHOWWINDOW, WM_SIZE, WM_STYLECHANGED, WM_WINDOWPOSCHANGED, WS_CAPTION,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU,
-    WS_VISIBLE,
+    GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongPtrW, SetWindowLongPtrW,
+    SetWindowPos, GW_CHILD, GWL_EXSTYLE, GWL_STYLE, SM_CXSCREEN, SM_CYSCREEN, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_ACTIVATE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_NCCALCSIZE, WM_NCPAINT, WM_SHOWWINDOW, WM_SIZE, WM_STYLECHANGED,
+    WM_WINDOWPOSCHANGED, WS_CAPTION, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED,
+    WS_EX_TRANSPARENT, WS_POPUP, WS_SYSMENU, WS_VISIBLE,
 };
 
 use super::diag_file;
@@ -162,10 +165,6 @@ pub struct WindowsBackdropSnapshot {
     pub chrome_repair_count: u64,
     pub layered_restore_count: u64,
     pub caption_creep_count: u64,
-    /// `SetLayeredWindowAttributes(alpha=255)` calls after manual
-    /// `WS_EX_LAYERED` restores — 0 with healthy `is_layered=true` means the
-    /// layered surface may be composing in the undefined (opaque) state.
-    pub layered_attr_inits: u64,
     /// Successful `DwmEnableBlurBehindWindow` re-assertions (per-pixel alpha).
     pub dwm_alpha_reasserts: u64,
     /// `DwmEnableBlurBehindWindow` currently failing — hard-clip fallback is
@@ -285,9 +284,6 @@ static DWM_ALPHA_BROKEN: AtomicBool = AtomicBool::new(false);
 static CHROME_REPAIR_COUNT: AtomicU64 = AtomicU64::new(0);
 static LAYERED_RESTORE_COUNT: AtomicU64 = AtomicU64::new(0);
 static CAPTION_CREEP_COUNT: AtomicU64 = AtomicU64::new(0);
-/// `SetLayeredWindowAttributes(alpha=255)` initializations after manual
-/// `WS_EX_LAYERED` sets — see `init_layered_attributes`.
-static LAYERED_ATTR_INITS: AtomicU64 = AtomicU64::new(0);
 static LAST_CHILD_CLASS: Mutex<Option<String>> = Mutex::new(None);
 static DIAG_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
 /// When true, HWND region is cleared so magnify / tooltip / pending menu
@@ -310,33 +306,6 @@ static DOCK_CHROME_REPAIRING: AtomicBool = AtomicBool::new(false);
 
 fn last_win32_error() -> u32 {
     unsafe { GetLastError().0 }
-}
-
-/// Initialize the layered-window state right after `WS_EX_LAYERED` was set
-/// through `SetWindowLongPtrW`.
-///
-/// Per MSDN the window "will not be displayed" until
-/// `SetLayeredWindowAttributes`/`UpdateLayeredWindow` runs — in practice the
-/// WebView2 D3D child still renders, but the *top-level* redirection surface
-/// is left in an undefined composition state, and on some machines DWM then
-/// treats it as opaque: every HTML-transparent pixel (corner crescents at
-/// rest, hover margins) shows the white backdrop instead of the desktop —
-/// the pale strip above the RGB pill. Neither Tao nor this module ever
-/// initialized it (Tao only ORs the bit for ignore-cursor-events).
-///
-/// Constant alpha 255 is identity; per-pixel alpha still comes from the DWM
-/// blur-behind trick (`reassert_dwm_alpha`), which SLWA does not disturb.
-fn init_layered_attributes(hwnd: HWND) {
-    match unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) } {
-        Ok(()) => {
-            let n = LAYERED_ATTR_INITS.fetch_add(1, Ordering::Relaxed) + 1;
-            log::debug!("[win-backdrop] SetLayeredWindowAttributes(255) initialized (#{n})");
-        }
-        Err(err) => log::warn!(
-            "[win-backdrop] SetLayeredWindowAttributes(255) failed: {err} gle={}",
-            last_win32_error()
-        ),
-    }
 }
 
 /// DWM must never render NC frame visuals for the dock. Even the few
@@ -378,14 +347,18 @@ fn flush_frame_changed(hwnd: HWND) {
 
 /// Force a paint after LAYERED/chrome repair so DWM does not keep an opaque
 /// white strip from the previous compositing mode.
+///
+/// Never erase: the window class brush is white, and erasing the transparent
+/// CSS crescents permanently burns them into the redirection surface (first
+/// paint OK → pale corners after the first focus/`on_surface_changed` pass).
 fn invalidate_dock_hwnd(hwnd: HWND) {
-    let _ = unsafe { InvalidateRect(Some(hwnd), None, true) };
+    let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
     let _ = unsafe {
         RedrawWindow(
             Some(hwnd),
             None,
             None,
-            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW,
         )
     };
 }
@@ -599,7 +572,9 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
         LAYERED_RESTORE_COUNT.fetch_add(1, Ordering::Relaxed);
         let desired = exstyle | WS_EX_LAYERED.0;
         unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize) };
-        init_layered_attributes(hwnd);
+        // Do NOT call SetLayeredWindowAttributes — see module docs (breaks
+        // WebView2 per-pixel alpha). DWM blur-behind + DefaultBackgroundColor
+        // own the transparency path.
         repaired = true;
         // Subclass has no WebviewWindow — flag the next refresh to force
         // DefaultBackgroundColor(alpha=0) + invalidate (pale white strip).
@@ -706,6 +681,9 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
         // even for the brief moments Tao has restored WS_CAPTION.
         WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
         WM_NCPAINT => return LRESULT(0),
+        // Class brush is white — never let DefWindowProc erase transparent
+        // crescents (that is the pale corner fill after focus/invalidate).
+        WM_ERASEBKGND => return LRESULT(1),
         WM_STYLECHANGED => {
             // Always repair inline, never via a posted message: this message
             // is delivered from *inside* the SetWindowLong call that stomped
@@ -947,8 +925,7 @@ fn ensure_layered_exstyle(window: &WebviewWindow) -> Result<bool, String> {
             ));
         }
     }
-    // Define the layered state before FRAMECHANGED recomposes the window.
-    init_layered_attributes(hwnd);
+    // No SetLayeredWindowAttributes — see module docs.
     flush_frame_changed(hwnd);
     log::warn!(
         "[win-backdrop] WS_EX_LAYERED missing — restored EXSTYLE=0x{desired:08x} (was 0x{exstyle:08x}) \
@@ -983,9 +960,6 @@ fn set_dock_click_through_impl(window: &WebviewWindow, ignore: bool) -> Result<(
                  was=0x{exstyle:08x} desired=0x{desired:08x}"
             ));
         }
-    }
-    if !had_layered {
-        init_layered_attributes(hwnd);
     }
     flush_frame_changed(hwnd);
     // Every hover enter/leave lands here with a FRAMECHANGED — the highest
@@ -1309,7 +1283,6 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         chrome_repair_count: CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
         layered_restore_count: LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
         caption_creep_count: CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
-        layered_attr_inits: LAYERED_ATTR_INITS.load(Ordering::Relaxed),
         dwm_alpha_reasserts: DWM_ALPHA_REASSERTS.load(Ordering::Relaxed),
         dwm_alpha_broken: DWM_ALPHA_BROKEN.load(Ordering::SeqCst),
         health_issues,
@@ -1448,7 +1421,7 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?} \
                          scale={:?} dpr_js={:?} viewport_css={:?} inner={:?} dpi_mismatch={:?} \
                          dpi={:?} awareness={:?} screen_phys={:?} screen_virt={:?} \
-                         dwm_alpha_reasserts={} layered_attr_inits={}",
+                         dwm_alpha_reasserts={}",
                         snap.outer_size_px,
                         snap.stored_pill_dip,
                         snap.scale_factor,
@@ -1461,7 +1434,6 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         snap.physical_screen_px,
                         snap.virtual_screen_px,
                         snap.dwm_alpha_reasserts,
-                        snap.layered_attr_inits,
                     );
                 }
             }
@@ -2190,31 +2162,36 @@ fn stored_pill_size(window: &WebviewWindow) -> Result<(f64, f64), String> {
 }
 
 /// Removes the GDI clip from the dock HWND and the WebView2 child (soft
-/// mode, `windows_hard_clip = false`). Idempotent — `SetWindowRgn(None)` on
-/// every sync is cheap; the transition is logged once via
-/// `HARD_CLIP_REGION_ACTIVE`. DWM corner preference / Mica-off are kept
-/// identical to the hard-clip path so the two modes differ only in the clip.
+/// mode, `windows_hard_clip = false`).
+///
+/// Only touches HWND when a hard clip was actually applied — calling
+/// `SetWindowRgn(None, true)` on every soft-mode refresh forces a redraw that
+/// can erase transparent crescents to the white class brush (pale corners
+/// after the first focus/`on_surface_changed`). DWM corner preference /
+/// Mica-off stay identical to the hard-clip path.
 fn clear_dock_window_rgn(window: &WebviewWindow) -> Result<(), String> {
     set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
     if let Err(err) = clear_dock_mica(window) {
         log::warn!("[win-backdrop] clear_mica before region clear: {err}");
     }
-    let was_active = HARD_CLIP_REGION_ACTIVE.swap(false, Ordering::SeqCst);
+    if !HARD_CLIP_REGION_ACTIVE.swap(false, Ordering::SeqCst) {
+        return Ok(());
+    }
     with_dock_main_thread(window, move |window| {
         let hwnd = window.hwnd().map_err(|e| e.to_string())?;
         let clip = webview_clip_hwnd(hwnd);
-        let parent_ok = unsafe { SetWindowRgn(hwnd, None, true) };
+        // bRedraw=false — we invalidate without erase ourselves.
+        let parent_ok = unsafe { SetWindowRgn(hwnd, None, false) };
         let mut child_ok = 1;
         if clip != hwnd {
-            child_ok = unsafe { SetWindowRgn(clip, None, true) };
+            child_ok = unsafe { SetWindowRgn(clip, None, false) };
         }
-        if was_active {
-            log::info!(
-                "[win-backdrop] SetWindowRgn cleared (hard clip off) parent_ok={} child_ok={}",
-                parent_ok != 0,
-                child_ok != 0
-            );
-        }
+        log::info!(
+            "[win-backdrop] SetWindowRgn cleared (hard clip off) parent_ok={} child_ok={}",
+            parent_ok != 0,
+            child_ok != 0
+        );
+        invalidate_dock_hwnd(hwnd);
         Ok(())
     })
 }
