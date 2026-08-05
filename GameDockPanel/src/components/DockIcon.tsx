@@ -36,7 +36,8 @@ import {
 } from "../lib/dockPlacement";
 import { DockContextMenuRow } from "./DockContextMenuRow";
 import { DockOverlayAnchor } from "./DockOverlayAnchor";
-import { setDockRegionRelaxed } from "../lib/windowsDock";
+import { IS_WINDOWS, setDockRegionRelaxed } from "../lib/windowsDock";
+import { useCloseMenuOnWindowBlur } from "../hooks/useCloseMenuOnWindowBlur";
 interface WindowLogicalPoint {
   x: number;
   y: number;
@@ -294,6 +295,10 @@ export function DockIcon({
       unlisten?.();
     };
   }, [menuOpen, optionsSubmenuOpen]);
+
+  // Windows has no `dock-global-mousedown` equivalent (see hook doc) — close
+  // on focus loss instead. No-op on macOS.
+  useCloseMenuOnWindowBlur(menuOpen, () => setMenuOpen(false));
 
   // Reports the open menu's real footprint to the Rust side so the native
   // click-through hit-test can grow to cover it — see
@@ -603,9 +608,7 @@ export function DockIcon({
             onRowMouseEnter={closeOptionsSubmenu}
           >
             <FolderOpen className="h-3.5 w-3.5" />
-            {navigator.platform.toLowerCase().includes("win")
-              ? "Показать в проводнике"
-              : "Показать в Finder"}
+            {IS_WINDOWS ? "Показать в проводнике" : "Показать в Finder"}
           </DockContextMenuRow>
 
           <div ref={optionsRowRef} className="relative">

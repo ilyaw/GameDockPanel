@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { DockOverlayAnchor } from "./DockOverlayAnchor";
 import { TOOLTIP_GAP_PX } from "../lib/constants";
 import { resolveOverlaySide, type OverlaySide } from "../lib/dockPlacement";
+import { useCloseMenuOnWindowBlur } from "../hooks/useCloseMenuOnWindowBlur";
 
 interface WindowLogicalPoint {
   x: number;
@@ -83,6 +84,10 @@ export function DockPillContextMenu({
       unlisten?.();
     };
   }, [open, onClose]);
+
+  // Windows has no `dock-global-mousedown` equivalent (see hook doc) — close
+  // on focus loss instead. No-op on macOS.
+  useCloseMenuOnWindowBlur(open, onClose);
 
   useLayoutEffect(() => {
     const reportMenuOverlay = (

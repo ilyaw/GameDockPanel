@@ -1042,12 +1042,14 @@ function HydratedDockPanel({
 
   const activePanelEffect = getPanelEffectPreset(settings.panelEffect);
   const panelEffectClasses = PANEL_EFFECT_CLASSES[activePanelEffect.id];
-  /** HUD overlays stay macOS-only — on Windows they fight CSS tint readability. */
+  // Previously macOS-only ("fight CSS tint readability" against the old
+  // bg-black/40 fill) — the deeper Windows idle tint (bg-black/70, see the
+  // fill layer above) restored contrast, and WebView2/Chromium renders these
+  // same CSS effects (mix-blend-mode, animated gradients) fine, so the
+  // gate came off. Settings' "Эффект панели" section controls this on both
+  // platforms now — keep this condition in parity with what it enables.
   const showPanelEffect =
-    !IS_WINDOWS &&
-    settings.panelEffectEnabled &&
-    !!panelEffectClasses &&
-    !fileDragOver;
+    settings.panelEffectEnabled && !!panelEffectClasses && !fileDragOver;
 
   useEffect(() => {
     console.info(
@@ -1212,7 +1214,16 @@ function HydratedDockPanel({
           <div
             aria-hidden
             className={`pointer-events-none absolute inset-0 ${
-              fileDragOver ? "bg-zinc-900/90" : "bg-black/40"
+              fileDragOver
+                ? "bg-zinc-900/90"
+                : // Windows has no native vibrancy behind the pill (see
+                  // platform/windows/window.rs — Mica is disabled, GDI
+                  // SetWindowRgn ignores its blur view); a deeper tint here
+                  // stands in for the frosted-glass darkness macOS gets for
+                  // free, keeping idle brightness comparable across OSes.
+                  IS_WINDOWS
+                  ? "bg-black/70"
+                  : "bg-black/40"
             }`}
           />
         </div>

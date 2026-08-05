@@ -448,13 +448,15 @@ pub fn qa_set_border(
     apply_dock_settings(&app, &state, settings)
 }
 
-/// Watches `/tmp/gd-qa-border.json` for `{ "borderStyle", "borderWidthPx" }`
+/// Watches `<temp_dir>/gd-qa-border.json` for `{ "borderStyle", "borderWidthPx" }`
 /// and live-applies — dev QA only, not started in release builds.
+/// `std::env::temp_dir()` rather than a hardcoded `/tmp` — that path doesn't
+/// exist on Windows (would silently and permanently no-op the poller).
 #[cfg(debug_assertions)]
 pub fn start_border_qa_poller(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        let path = std::path::PathBuf::from("/tmp/gd-qa-border.json");
+        let path = std::env::temp_dir().join("gd-qa-border.json");
         // Seed `last` so a leftover QA file from a prior session is not
         // re-applied on every cold start and clobber real user settings.
         let mut last = std::fs::read_to_string(&path).unwrap_or_default();

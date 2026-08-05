@@ -1021,3 +1021,31 @@ img {
 .settings-range--compact {
   width: 6rem;
 }
+
+/*
+  WebView2/Chromium always renders classic, space-taking scrollbars; WKWebView
+  on macOS defaults to translucent overlay scrollbars that only appear while
+  scrolling and never take layout space — leaving `.settings-window` unstyled
+  there keeps that native behavior. Custom `::-webkit-scrollbar-thumb` rules
+  force WebKit into classic mode too, so this stays Windows-scoped rather
+  than applying to `.settings-window` directly.
+*/
+.settings-window--windows ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.settings-window--windows ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-window--windows ::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-color: var(--settings-track-deep);
+  background-clip: padding-box;
+}
+
+.settings-window--windows ::-webkit-scrollbar-thumb:hover {
+  background-color: var(--settings-track);
+}

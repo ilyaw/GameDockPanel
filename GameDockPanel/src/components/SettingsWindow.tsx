@@ -901,7 +901,11 @@ export function SettingsWindow() {
       <SettingsRow
         title="Запуск при входе в систему"
         descriptionClassName="max-w-sm"
-        description="Добавляет приложение в Login Items — док запустится автоматически при входе в macOS."
+        description={
+          IS_WINDOWS
+            ? "Добавляет приложение в автозагрузку — док запустится автоматически при входе в Windows."
+            : "Добавляет приложение в Login Items — док запустится автоматически при входе в macOS."
+        }
       >
         <div className="flex flex-col items-end gap-1.5">
           <ToggleSwitch
@@ -991,7 +995,11 @@ export function SettingsWindow() {
   };
 
   return (
-    <div className="settings-window flex h-screen w-full flex-col">
+    <div
+      className={`settings-window flex h-screen w-full flex-col${
+        IS_WINDOWS ? " settings-window--windows" : ""
+      }`}
+    >
       <header className="settings-window__header shrink-0 px-6 py-4">
         <h1 className="settings-window__title text-lg font-semibold">Настройки</h1>
         <p className="mt-0.5 text-xs tracking-wide text-violet-300/70 uppercase">

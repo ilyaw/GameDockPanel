@@ -16,6 +16,7 @@ import {
   type OverlaySide,
 } from "../lib/dockPlacement";
 import { setDockRegionRelaxed } from "../lib/windowsDock";
+import { useCloseMenuOnWindowBlur } from "../hooks/useCloseMenuOnWindowBlur";
 interface WindowLogicalPoint {
   x: number;
   y: number;
@@ -97,6 +98,10 @@ export function DockSeparator({
       unlisten?.();
     };
   }, [menuOpen]);
+
+  // Windows has no `dock-global-mousedown` equivalent (see hook doc) — close
+  // on focus loss instead. No-op on macOS.
+  useCloseMenuOnWindowBlur(menuOpen, () => setMenuOpen(false));
 
   useLayoutEffect(() => {
     const reportMenuOverlay = (
