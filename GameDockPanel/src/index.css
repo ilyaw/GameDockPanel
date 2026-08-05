@@ -276,17 +276,13 @@ img {
 }
 
 /*
-  Windows paint clip. Default ("soft") mode: no GDI region on the HWND —
-  per-pixel alpha rounds the corners exactly like macOS, so the paint inset
-  is 0 and no edge masks are needed. DockPanel omits Tailwind `inset-0` on
-  these layers on Windows so these rules win cleanly.
-
-  Legacy hard-clip mode (`windowsHardClip` setting → `.dock-win-hardclip` on
-  the pill): SetWindowRgn round-rects have no AA, so paint flush to the HWND
-  edge gets stair-stepped. Pull BOTH the dark fill and the RGB ring inside
-  the hard clip by the same inset (never border-only — that left a dark
-  fringe outside the rainbow) and fade the edge masks ~1.5px so residual GDI
-  knife edges hit low-alpha pixels.
+  Windows paint clip. GDI SetWindowRgn RoundRect is always on (soft CSS-only
+  mode removed after white-corner regressions). `.dock-win-hardclip` pulls
+  BOTH the dark fill and the RGB ring inside the RoundRect by the same
+  `--dock-win-edge-inset` (Rust region uses the same 2 DIP inset) and fades
+  edge masks ~1.5px so residual GDI knife edges hit low-alpha pixels.
+  DockPanel omits Tailwind `inset-0` on these layers on Windows so these
+  rules win cleanly.
 */
 .dock-root--windows {
   --dock-win-edge-inset: 0px;

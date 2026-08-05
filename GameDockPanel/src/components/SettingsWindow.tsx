@@ -984,20 +984,6 @@ export function SettingsWindow() {
         </SettingsRow>
       )}
 
-      {IS_WINDOWS && (
-        <SettingsRow
-          title="Жёсткая обрезка окна (совместимость)"
-          descriptionClassName="max-w-sm"
-          description="Углы дока вырезаются системной GDI-маской (чуть грубее край RGB, зато прячет белую подложку после клика/фокуса). По умолчанию включено. Выключите для мягких CSS-углов, если на вашей машине прозрачность стабильна."
-        >
-          <ToggleSwitch
-            checked={Boolean(settings.windowsHardClip)}
-            onChange={(value) => {
-              update({ windowsHardClip: value });
-            }}
-          />
-        </SettingsRow>
-      )}
     </SettingsSectionCard>
   );
 

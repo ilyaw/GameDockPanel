@@ -65,7 +65,7 @@ pub fn log_frontend_error(message: String, source: Option<String>, line: Option<
     );
 }
 
-/// Windows-only `windows_hard_clip` live-toggle hook — no-op elsewhere.
+/// Windows-only region refresh hook — no-op on macOS.
 #[cfg(target_os = "macos")]
 pub fn refresh_dock_backdrop_clip(_window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())

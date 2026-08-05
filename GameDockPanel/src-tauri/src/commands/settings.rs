@@ -161,12 +161,9 @@ pub struct DockSettings {
     /// Harmless on macOS (ignored by UI). `#[serde(default)]` for old configs.
     #[serde(default)]
     pub windows_debug_overlay: bool,
-    /// Windows-only: GDI `SetWindowRgn` pill clip (+ frontend 2px paint inset /
-    /// soft edge masks). Default `true` — confines pale WebView2 crescents
-    /// after focus/click even if per-pixel alpha flickers. Set `false` for
-    /// soft CSS-only corners (crisper RGB AA on machines where alpha is stable).
-    /// `#[serde(default = "default_windows_hard_clip")]` for old configs that
-    /// omit the field (missing → on). Explicit `false` in JSON is respected.
+    /// Windows-only legacy field: GDI RoundRect is always on now (soft
+    /// CSS-only mode removed after white-corner regressions). Kept for
+    /// serde compat with old `dock-settings.json`; load/update force `true`.
     #[serde(default = "default_windows_hard_clip")]
     pub windows_hard_clip: bool,
 }
@@ -290,6 +287,19 @@ fn load_or_default_settings(app: &AppHandle) -> Result<DockSettings, String> {
                     settings.icon_size_px = icon_size_px_from_preset(&settings.icon_size_preset);
                 }
                 settings.icon_size_px = clamp_icon_size_px(settings.icon_size_px);
+                // Soft CSS-only mode removed — migrate persisted false → true.
+                if !settings.windows_hard_clip {
+                    settings.windows_hard_clip = true;
+                    if let Err(err) = crate::persistence::write_json_atomic(&path, &settings) {
+                        log::warn!(
+                            "windows_hard_clip migrate-on-load persist failed: {err}"
+                        );
+                    } else {
+                        log::info!(
+                            "[settings] migrated windows_hard_clip false → true (soft mode removed)"
+                        );
+                    }
+                }
                 return Ok(settings);
             }
             eprintln!(
@@ -377,17 +387,11 @@ fn apply_dock_settings(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.dock_window_layer
     };
-    let previous_windows_hard_clip = {
-        let guard = state
-            .settings
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.windows_hard_clip
-    };
     let icon_size_changed =
         (previous_icon_size_px - settings.icon_size_px).abs() >= 0.5;
     let dock_window_layer_changed = previous_dock_window_layer != settings.dock_window_layer;
-    let windows_hard_clip_changed = previous_windows_hard_clip != settings.windows_hard_clip;
+    // Soft CSS-only clip mode is gone — always persist hard clip on.
+    settings.windows_hard_clip = true;
 
     let path = config_file_path(app)?;
     crate::persistence::write_json_atomic(&path, &settings)?;
@@ -430,16 +434,6 @@ fn apply_dock_settings(
     if dock_window_layer_changed {
         if let Some(window) = app.get_webview_window("main") {
             crate::platform::apply_dock_window_layer(&window, settings.dock_window_layer)?;
-        }
-    }
-
-    // Live-apply the GDI clip mode without restart: re-sync (or clear) the
-    // pill region on the dock HWND. No-op on macOS.
-    if windows_hard_clip_changed {
-        if let Some(window) = app.get_webview_window("main") {
-            if let Err(err) = crate::platform::refresh_dock_backdrop_clip(&window) {
-                log::warn!("windows_hard_clip toggle: backdrop clip refresh failed: {err}");
-            }
         }
     }
 

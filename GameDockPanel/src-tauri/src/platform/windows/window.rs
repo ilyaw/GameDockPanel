@@ -17,14 +17,18 @@
 //!    outside the rainbow) and soft-masks the paint edge so stair-steps hit
 //!    low-alpha pixels. Skip `filter: drop-shadow` on Windows borders.
 //!
-//! Durable approach:
+//! Durable approach (log-proven — do not reintroduce soft unclipped HWND):
 //! - Subclass: `WM_NCCALCSIZE`/`WM_NCPAINT` kill NC chrome; Tao style stomps
 //!   are repaired **inline from `WM_STYLECHANGED`** — a posted repair let DWM
 //!   compose frames with `WS_CAPTION` / without `WS_EX_LAYERED` at `show()`,
 //!   and the white backdrop of those frames outlived every later style fix
-//!   (the pale strip / corner crescents above the CSS pill). Repairs re-assert
-//!   popup + `WS_EX_LAYERED` with `SWP_FRAMECHANGED`, then force transparent
-//!   WebView2 bg + invalidate (LAYERED alone can leave a white fill).
+//!   (the pale strip / corner crescents above the CSS pill).
+//! - **Never invalidate from subclass chrome repair.** `DefaultBackgroundColor=0`
+//!   needs a `WebviewWindow`; invalidate-before-bg burned white into the
+//!   RoundRect annulus after `set_always_on_top` dropped LAYERED (log:
+//!   `LAYERED EXSTYLE 0x00040010` → `INVALIDATE chrome_repair`). Heal order is
+//!   LAYERED → DWM alpha → bg=0 → `SetWindowRgn` → then invalidate (layer path
+//!   under `surface_own_op_guard`, or deferred `SURFACE_RUN`).
 //! - **Never** `SetLayeredWindowAttributes`: it switches the HWND into the GDI
 //!   constant-alpha layered path and **breaks WebView2 per-pixel alpha**
 //!   (transparent HTML then composites over an opaque white redirection
@@ -35,8 +39,8 @@
 //!   erase: the class brush is white; erasing the transparent crescents
 //!   permanently paints them into the redirection surface (first paint OK,
 //!   white corners after the first focus/`on_surface_changed` invalidate).
-//! - Soft-mode `SetWindowRgn(None)` only when a hard clip was actually active
-//!   — calling it every refresh forces a redraw that reintroduces the erase.
+//! - **Never** `SetWindowRgn(None)` on the dock HWND — soft CSS-only mode was
+//!   removed after repeated regressions. GDI RoundRect is always on.
 //! - `DWMWA_NCRENDERING_POLICY = DISABLED` — DWM never draws caption/frame
 //!   visuals even while a Tao stomp briefly restores `WS_CAPTION`.
 //! - Per-pixel alpha lives on DWM's blur-behind trick, which Tao applies only
@@ -44,20 +48,27 @@
 //!   chrome repair / FRAMECHANGED, otherwise transparent HTML composites over
 //!   an opaque white redirection surface (the "white pill backdrop").
 //! - Never Mica (`DONOTROUND` only).
-//! - `SetWindowRgn` (when `windowsHardClip` is on — **default on** so pale
-//!   crescents cannot outlive a per-pixel-alpha flicker after focus/click):
-//!   RoundRect-only when HWND == pill (rest); at hover/menu
-//!   `RoundRect(pill) OR (client DIFF pill AABB)` on both top-level and
-//!   WebView2 child. Soft mode (setting off) leaves clipping to CSS alpha.
-//!   In hard-clip mode never fully clear the region — that re-opens pale
-//!   corners when transparency itself is broken.
+//! - `SetWindowRgn` **always**: RoundRect-only when HWND == pill (rest); at
+//!   hover/menu `RoundRect(paint-inset pill) OR (client DIFF pill AABB)` on
+//!   both top-level and WebView2 child. RoundRect is inset by the same
+//!   `--dock-win-edge-inset` (2 DIP) as the CSS fill so alpha flicker cannot
+//!   show a white annulus outside the paint.
+//! - Hover/`WM_SIZE`: apply region **before** invalidate (log: `INVALIDATE
+//!   surface_event` landed before `SetWindowRgn` on expand → white flash).
+//!   Own hover resize under `surface_own_op_guard`.
 //! - Healthy `WM_ACTIVATE`: re-pin DWM alpha only — do **not** invalidate or
 //!   run full `on_surface_changed` (that was the post-click white-strip path).
+//! - `NEED_TRANSPARENT_BG_REASSERT` bypasses the 400ms SURFACE debounce so a
+//!   LAYERED restore heals `DefaultBackgroundColor=0` on the next poll tick.
 //! - Diag poller self-heals paperclip (`OUTER_TOO_NARROW` / axis flip) by
 //!   re-applying the formula rest frame once per unhealthy streak.
 //! - **No `WM_WINDOWPOSCHANGED` → `on_surface_changed` feedback loop:** our own
 //!   `SetWindowRgn`/`SWP_FRAMECHANGED` must not re-arm full surface reassert;
 //!   debounce must not re-arm when chrome is already healthy (was a 20 Hz storm).
+
+/// Matches frontend `--dock-win-edge-inset` under `.dock-win-hardclip` (DIP).
+/// Shared with the click-through hit-test so OS region and poller agree.
+pub(crate) const WIN_PAINT_INSET_DIP: f64 = 2.0;
 
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -180,8 +191,7 @@ pub struct WindowsBackdropSnapshot {
     pub caption_creep_count: u64,
     /// Successful `DwmEnableBlurBehindWindow` re-assertions (per-pixel alpha).
     pub dwm_alpha_reasserts: u64,
-    /// `DwmEnableBlurBehindWindow` currently failing — hard-clip fallback is
-    /// active regardless of the `windowsHardClip` setting.
+    /// `DwmEnableBlurBehindWindow` currently failing (alpha unavailable).
     pub dwm_alpha_broken: bool,
     /// Empty when healthy; otherwise human-readable chrome issue tags.
     /// Advisory DPI signals live in `dpi_mismatch` — never here (would flood
@@ -203,9 +213,9 @@ pub struct WindowsBackdropSnapshot {
     /// Primary screen size as this process sees it (`GetSystemMetrics`) —
     /// smaller than `physical_screen_px` when the process is DPI-virtualized.
     pub virtual_screen_px: Option<(i32, i32)>,
-    /// User setting `windowsHardClip` (default on).
+    /// Always true — soft CSS-only mode removed.
     pub hard_clip_enabled: bool,
-    /// Effective GDI clip (setting on, or DWM alpha broken fallback).
+    /// Always true — GDI RoundRect always applied.
     pub hard_clip_active: bool,
     /// Last pale-triage path (`FOCUS/skip=healthy`, `HITTEST/clear`, …).
     pub last_pale_path: Option<String>,
@@ -319,8 +329,7 @@ static MENU_REGION_HOLD: AtomicBool = AtomicBool::new(false);
 static TRANSPARENT_BG_APPLIED: AtomicBool = AtomicBool::new(false);
 /// Dock HWND subclass installed (WM_NCCALCSIZE / chrome repair).
 static DOCK_SUBCLASS_INSTALLED: AtomicBool = AtomicBool::new(false);
-/// A GDI pill region is currently applied (only in `windows_hard_clip` mode) —
-/// lets the soft path clear it exactly once instead of logging every sync.
+/// A GDI pill region is currently applied on the dock HWND.
 static HARD_CLIP_REGION_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Guard against re-entrant style repair from WM_STYLECHANGED.
 static DOCK_CHROME_REPAIRING: AtomicBool = AtomicBool::new(false);
@@ -540,7 +549,7 @@ fn reassert_dwm_alpha(hwnd: HWND) {
             if first_failure {
                 log::warn!(
                     "[win-backdrop] DwmEnableBlurBehindWindow failed: {err} gle={} — \
-                     falling back to GDI pill clip (as if windowsHardClip were on)",
+                     GDI pill clip remains required (always on)",
                     last_win32_error()
                 );
                 log_pale(
@@ -725,13 +734,20 @@ fn repair_dock_hwnd_chrome(hwnd: HWND) -> bool {
         CHROME_REPAIR_COUNT.fetch_add(1, Ordering::Relaxed);
         flush_frame_changed(hwnd);
         // FRAMECHANGED after a style stomp is exactly when DWM can drop the
-        // blur-behind alpha trick — restore it before repainting.
+        // blur-behind alpha trick — restore it before any later paint.
         reassert_dwm_alpha(hwnd);
-        invalidate_dock_hwnd(hwnd, "chrome_repair");
+        // Do NOT invalidate here. Subclass has no WebviewWindow for
+        // DefaultBackgroundColor=0; invalidate-before-bg burned white into
+        // RoundRect corners after Tao dropped LAYERED on layer change (log:
+        // chrome_repair right after EXSTYLE 0x00040010). Defer to
+        // SURFACE_RUN / apply_dock_window_layer heal (bg → rgn → invalidate).
+        if !surface_reassert_suppressed() {
+            NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
+        }
         log_pale(
             "REPAIR",
             format!(
-                "hwnd={hwnd:?} repairs={} layered_restore={} caption_creep={} {}",
+                "hwnd={hwnd:?} repairs={} layered_restore={} caption_creep={} no_invalidate {}",
                 CHROME_REPAIR_COUNT.load(Ordering::Relaxed),
                 LAYERED_RESTORE_COUNT.load(Ordering::Relaxed),
                 CAPTION_CREEP_COUNT.load(Ordering::Relaxed),
@@ -901,15 +917,16 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
                 }
             };
             if want_full {
-                invalidate_dock_hwnd(hwnd, "surface_event");
+                // Do NOT invalidate here — hover expand logged INVALIDATE
+                // surface_event before SetWindowRgn for the new client, which
+                // flashed white corners. SURFACE_RUN applies rgn then paints.
                 NEED_SURFACE_REASSERT.store(true, Ordering::SeqCst);
                 if msg != WM_WINDOWPOSCHANGED {
                     let ctx = if msg == WM_SHOWWINDOW { "SHOW" } else { "SIZE" };
                     diag_file::status(ctx, "EVENT", format!("msg=0x{msg:04X} hwnd={hwnd:?}"));
                 }
-            } else if repaired {
-                invalidate_dock_hwnd(hwnd, "surface_repaired");
             }
+            // `repaired` already armed NEED_SURFACE_REASSERT inside repair.
         }
         _ => {}
     }
@@ -1443,7 +1460,7 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
     let (window_dpi, dpi_awareness, physical_screen_px, virtual_screen_px) =
         dpi_ground_truth(window);
     let hard_clip_enabled = windows_hard_clip_enabled(window);
-    let hard_clip_active_flag = hard_clip_enabled || DWM_ALPHA_BROKEN.load(Ordering::SeqCst);
+    let hard_clip_active_flag = hard_clip_active(window);
     let last_pale_path = LAST_PALE_PATH
         .lock()
         .ok()
@@ -1503,25 +1520,15 @@ fn windows_debug_overlay_enabled(window: &WebviewWindow) -> bool {
     guard.windows_debug_overlay
 }
 
-/// `windowsHardClip` setting: `true` (default) applies GDI RoundRect clip so
-/// pale crescents cannot outlive a per-pixel-alpha flicker. `false` leaves
-/// both HWNDs unclipped (CSS alpha only — crisper RGB, but corners can burn
-/// white after focus on some machines).
-fn windows_hard_clip_enabled(window: &WebviewWindow) -> bool {
-    let state = window.state::<crate::commands::settings::SettingsState>();
-    let guard = state
-        .settings
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.windows_hard_clip
+/// GDI RoundRect is always on (soft CSS-only mode removed after log-proven
+/// white-corner regressions). Kept as a function for HUD / call-site clarity.
+fn windows_hard_clip_enabled(_window: &WebviewWindow) -> bool {
+    true
 }
 
-/// Effective clip mode: the user setting, plus an automatic fallback while
-/// `DwmEnableBlurBehindWindow` is failing (per-pixel alpha unavailable —
-/// without a region the whole HWND rect would flood white, which is strictly
-/// worse than the legacy stair-stepped clip).
-fn hard_clip_active(window: &WebviewWindow) -> bool {
-    windows_hard_clip_enabled(window) || DWM_ALPHA_BROKEN.load(Ordering::SeqCst)
+/// Effective clip mode — always true. Soft `SetWindowRgn(None)` path is gone.
+fn hard_clip_active(_window: &WebviewWindow) -> bool {
+    true
 }
 
 /// Force one snapshot into the log + `dock-win-diag` event (settings button).
@@ -1743,6 +1750,10 @@ pub fn set_dock_region_relaxed(
 
     let prev = REGION_RELAXED.swap(relaxed, Ordering::SeqCst);
     set_expand_for_hover(relaxed || menu_blocks_pill_clip(window));
+
+    // Own resize + region so WM_SIZE subclass does not invalidate before
+    // SetWindowRgn (log: surface_event invalidate → white flash on expand).
+    let _own = surface_own_op_guard();
 
     if prev == relaxed {
         // Still re-apply: a concurrent sync may have restored a stale clip
@@ -2081,20 +2092,24 @@ fn menu_overlay_active(window: &WebviewWindow) -> bool {
 
 /// Builds the dock clip region in physical pixels.
 ///
-/// - **Rest** (pill AABB covers the client within 2px): `RoundRect(pill)` only.
-///   Avoids the failure mode where a stale/small LAST_PILL RoundRect is OR'd
-///   with `client DIFF AABB` and leaves opaque pale WebView margins visible.
-/// - **Expanded** (hover/menu HWND larger than pill): `RoundRect(pill) OR
-///   (client DIFF pill AABB)` so magnify/tooltip/menu margins stay visible
-///   while corner crescents inside the pill box stay clipped.
+/// - **Rest** (`round_only`): `RoundRect(round_*)` only — paint-inset pill.
+/// - **Expanded**: `RoundRect(round_*) OR (client DIFF aabb_*)` so magnify /
+///   tooltip/menu margins stay visible while pill crescents stay clipped.
+///   `aabb_*` is the pre-inset pill box; `round_*` is paint-inset so the 2px
+///   annulus is not part of the HWND (no white ring when alpha flickers).
 unsafe fn create_dock_clip_hrgn(
-    pill_left: i32,
-    pill_top: i32,
-    pill_right: i32,
-    pill_bottom: i32,
+    round_left: i32,
+    round_top: i32,
+    round_right: i32,
+    round_bottom: i32,
     diameter: i32,
+    aabb_left: i32,
+    aabb_top: i32,
+    aabb_right: i32,
+    aabb_bottom: i32,
     client_w: i32,
     client_h: i32,
+    round_only: bool,
 ) -> Result<HRGN, String> {
     unsafe fn delete_hrgn(hrgn: HRGN) {
         if !hrgn.is_invalid() {
@@ -2102,8 +2117,16 @@ unsafe fn create_dock_clip_hrgn(
         }
     }
 
-    let pill_round =
-        unsafe { CreateRoundRectRgn(pill_left, pill_top, pill_right, pill_bottom, diameter, diameter) };
+    let pill_round = unsafe {
+        CreateRoundRectRgn(
+            round_left,
+            round_top,
+            round_right,
+            round_bottom,
+            diameter,
+            diameter,
+        )
+    };
     if pill_round.is_invalid() {
         return Err(format!(
             "CreateRoundRectRgn failed gle={}",
@@ -2111,18 +2134,12 @@ unsafe fn create_dock_clip_hrgn(
         ));
     }
 
-    // Resting HWND == pill: skip DIFF entirely (epsilon covers AA inflate).
-    const CLIENT_COVER_EPS: i32 = 2;
-    let covers_client = pill_left <= CLIENT_COVER_EPS
-        && pill_top <= CLIENT_COVER_EPS
-        && pill_right >= client_w - CLIENT_COVER_EPS
-        && pill_bottom >= client_h - CLIENT_COVER_EPS;
-    if covers_client {
+    if round_only {
         return Ok(pill_round);
     }
 
     let win = unsafe { CreateRectRgn(0, 0, client_w, client_h) };
-    let aabb = unsafe { CreateRectRgn(pill_left, pill_top, pill_right, pill_bottom) };
+    let aabb = unsafe { CreateRectRgn(aabb_left, aabb_top, aabb_right, aabb_bottom) };
     let outside = unsafe { CreateRectRgn(0, 0, 0, 0) };
     let result = unsafe { CreateRectRgn(0, 0, 0, 0) };
 
@@ -2195,23 +2212,13 @@ fn set_window_rgn_to_pill(
     height_dip: f64,
 ) -> Result<(), String> {
     let scale = window.scale_factor().map_err(|e| e.to_string())?;
-    // Do not inflate past the client with negative region coords — Windows
-    // clamps them, so the hard GDI edge still sits on the HWND silhouette.
-    // Soft AA room comes from the frontend `--dock-win-edge-inset` paint
-    // inset + soft mask inside this RoundRect (see index.css).
-    const RGN_AA_INFLATE_PX: i32 = 0;
-    let left = (x_dip * scale).round() as i32 - RGN_AA_INFLATE_PX;
-    let top = (y_dip * scale).round() as i32 - RGN_AA_INFLATE_PX;
-    // CreateRoundRectRgn right/bottom are exclusive.
-    let right = ((x_dip + width_dip) * scale).round() as i32 + RGN_AA_INFLATE_PX;
-    let bottom = ((y_dip + height_dip) * scale).round() as i32 + RGN_AA_INFLATE_PX;
-    // Match CSS radius exactly — a +N squaring bias made corners stair-step more.
-    // Clamp so diameter never exceeds the shorter pill axis (exclusive rect).
-    let diameter = {
-        let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
-        let max_fit = (right - left).min(bottom - top).max(2);
-        nominal.min(max_fit)
-    };
+    // Pill AABB in physical px (pre-inset). CreateRoundRectRgn right/bottom
+    // are exclusive. Paint inset matches CSS `--dock-win-edge-inset`.
+    let left = (x_dip * scale).round() as i32;
+    let top = (y_dip * scale).round() as i32;
+    let right = ((x_dip + width_dip) * scale).round() as i32;
+    let bottom = ((y_dip + height_dip) * scale).round() as i32;
+    let paint_inset_px = (WIN_PAINT_INSET_DIP * scale).round().max(0.0) as i32;
 
     if right <= left || bottom <= top {
         log::warn!(
@@ -2255,33 +2262,59 @@ fn set_window_rgn_to_pill(
             && ((client_w >= client_h && pill_w * 2 < client_w)
                 || (client_h > client_w && pill_h * 2 < client_h));
 
-        let (clip_left, clip_top, clip_right, clip_bottom, clip_diameter) =
+        let (aabb_left, aabb_top, aabb_right, aabb_bottom, round_only) =
             if rest && !covers_client && stub_in_client {
                 log::warn!(
                     "[win-backdrop] rest clip: stub pill inside larger client — \
                      using full-client RoundRect (avoid pale stub∪margins) \
                      pill=({left},{top})-({right},{bottom}) client={client_w}x{client_h}"
                 );
-                let l = -RGN_AA_INFLATE_PX;
-                let t = -RGN_AA_INFLATE_PX;
-                let r = client_w + RGN_AA_INFLATE_PX;
-                let b = client_h + RGN_AA_INFLATE_PX;
-                let nominal = ((PILL_CORNER_RADIUS_DIP * 2.0) * scale).round().max(2.0) as i32;
-                let max_fit = (r - l).min(b - t).max(2);
-                (l, t, r, b, nominal.min(max_fit))
+                (0, 0, client_w, client_h, true)
+            } else if covers_client || rest {
+                (left, top, right, bottom, true)
             } else {
-                (left, top, right, bottom, diameter)
+                (left, top, right, bottom, false)
             };
+
+        // Shrink RoundRect to the CSS paint footprint; keep AABB pre-inset so
+        // hover margins OR'd via DIFF do not re-open the white annulus.
+        let inset = paint_inset_px.min((aabb_right - aabb_left).max(0) / 2)
+            .min((aabb_bottom - aabb_top).max(0) / 2);
+        let round_left = aabb_left + inset;
+        let round_top = aabb_top + inset;
+        let round_right = aabb_right - inset;
+        let round_bottom = aabb_bottom - inset;
+        let paint_radius_dip = (PILL_CORNER_RADIUS_DIP - WIN_PAINT_INSET_DIP).max(1.0);
+        let clip_diameter = {
+            let nominal = ((paint_radius_dip * 2.0) * scale).round().max(2.0) as i32;
+            let max_fit = (round_right - round_left)
+                .min(round_bottom - round_top)
+                .max(2);
+            nominal.min(max_fit)
+        };
+
+        if round_right <= round_left || round_bottom <= round_top {
+            log::warn!(
+                "[win-backdrop] SetWindowRgn skipped empty paint-inset rect \
+                 aabb=({aabb_left},{aabb_top})-({aabb_right},{aabb_bottom}) inset={inset}"
+            );
+            return Ok(());
+        }
 
         let hrgn_parent = unsafe {
             create_dock_clip_hrgn(
-                clip_left,
-                clip_top,
-                clip_right,
-                clip_bottom,
+                round_left,
+                round_top,
+                round_right,
+                round_bottom,
                 clip_diameter,
+                aabb_left,
+                aabb_top,
+                aabb_right,
+                aabb_bottom,
                 client_w,
                 client_h,
+                round_only,
             )
         }?;
         // Parent first — DirectComposition respects the top-level region.
@@ -2290,13 +2323,18 @@ fn set_window_rgn_to_pill(
         if clip != hwnd {
             let hrgn_child = unsafe {
                 create_dock_clip_hrgn(
-                    clip_left,
-                    clip_top,
-                    clip_right,
-                    clip_bottom,
+                    round_left,
+                    round_top,
+                    round_right,
+                    round_bottom,
                     clip_diameter,
+                    aabb_left,
+                    aabb_top,
+                    aabb_right,
+                    aabb_bottom,
                     client_w,
                     client_h,
+                    round_only,
                 )
             }?;
             apply_hrgn_to_hwnd(clip, hrgn_child, "webview child")?;
@@ -2312,15 +2350,16 @@ fn set_window_rgn_to_pill(
             .unwrap_or_else(|| "?".into());
         log::info!(
             "[win-backdrop] SetWindowRgn(pill∪margins) ok dip=({x_dip:.1},{y_dip:.1} {width_dip:.1}x{height_dip:.1}) \
-             px=({clip_left},{clip_top})-({clip_right},{clip_bottom}) diameter={clip_diameter} \
-             client={client_w}x{client_h} scale={scale:.2} STYLE={style} chrome_delta={delta} ok#={}",
+             px=({round_left},{round_top})-({round_right},{round_bottom}) inset={inset} \
+             diameter={clip_diameter} client={client_w}x{client_h} scale={scale:.2} \
+             STYLE={style} chrome_delta={delta} ok#={}",
             SET_RGN_OK.load(Ordering::Relaxed)
         );
         log_pale(
             "RGN",
             format!(
-                "apply pill∪margins px=({clip_left},{clip_top})-({clip_right},{clip_bottom}) \
-                 diameter={clip_diameter} client={client_w}x{client_h} ok#={} {}",
+                "apply pill∪margins px=({round_left},{round_top})-({round_right},{round_bottom}) \
+                 inset={inset} diameter={clip_diameter} client={client_w}x{client_h} ok#={} {}",
                 SET_RGN_OK.load(Ordering::Relaxed),
                 hwnd_style_snap(hwnd)
             ),
@@ -2391,57 +2430,10 @@ fn stored_pill_size(window: &WebviewWindow) -> Result<(f64, f64), String> {
     Ok((width, height))
 }
 
-/// Removes the GDI clip from the dock HWND and the WebView2 child (soft
-/// mode, `windows_hard_clip = false`).
-///
-/// Only touches HWND when a hard clip was actually applied — calling
-/// `SetWindowRgn(None)` on every soft-mode refresh forces a redraw that
-/// can reintroduce pale crescents after focus. DWM corner preference /
-/// Mica-off stay identical to the hard-clip path.
-fn clear_dock_window_rgn(window: &WebviewWindow) -> Result<(), String> {
-    set_dwm_corner_preference(window, DWMWCP_DONOTROUND)?;
-    if let Err(err) = clear_dock_mica(window) {
-        log::warn!("[win-backdrop] clear_mica before region clear: {err}");
-    }
-    if !HARD_CLIP_REGION_ACTIVE.swap(false, Ordering::SeqCst) {
-        return Ok(());
-    }
-    with_dock_main_thread(window, move |window| {
-        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
-        let clip = webview_clip_hwnd(hwnd);
-        // bRedraw=false — we invalidate without erase ourselves.
-        let parent_ok = unsafe { SetWindowRgn(hwnd, None, false) };
-        let mut child_ok = 1;
-        if clip != hwnd {
-            child_ok = unsafe { SetWindowRgn(clip, None, false) };
-        }
-        log::info!(
-            "[win-backdrop] SetWindowRgn cleared (hard clip off) parent_ok={} child_ok={}",
-            parent_ok != 0,
-            child_ok != 0
-        );
-        log_pale(
-            "RGN",
-            format!(
-                "cleared hard_clip_off parent_ok={} child_ok={} {}",
-                parent_ok != 0,
-                child_ok != 0,
-                hwnd_style_snap(hwnd)
-            ),
-            false,
-        );
-        invalidate_dock_hwnd(hwnd, "rgn_clear");
-        Ok(())
-    })
-}
-
 /// Re-applies the combined pill∪margins clip from the latest measured pill.
-/// With `windows_hard_clip` on (default) applies RoundRect; with it off and
-/// DWM alpha healthy, removes the clip (CSS + per-pixel alpha only).
+/// Always RoundRect (soft `SetWindowRgn(None)` path removed — it re-opened
+/// pale corners after focus/layer stomps).
 fn sync_pill_window_rgn(window: &WebviewWindow) -> Result<(), String> {
-    if !hard_clip_active(window) {
-        return clear_dock_window_rgn(window);
-    }
     let rect = match resolve_pill_client_rect(window) {
         Ok(rect) => rect,
         Err(err) => {
@@ -2469,15 +2461,35 @@ pub fn apply_dock_window_layer(
 ) -> Result<(), String> {
     let on_top = matches!(layer, DockWindowLayer::AboveWindows);
     log::info!("[win-backdrop] set_always_on_top={on_top} layer={layer:?}");
+    // Own the Tao style stomp: subclass repairs LAYERED/caption inline under
+    // this guard without arming SURFACE_RUN, then we heal bg→rgn→paint in
+    // order so a frame without LAYERED cannot burn white into RoundRect
+    // corners (log: BelowWindows → EXSTYLE 0x00040010 → chrome_repair).
+    let _own = surface_own_op_guard();
     window
         .set_always_on_top(on_top)
         .map_err(|e| e.to_string())?;
 
-    // Tao `apply_diff` rewrites GWL_STYLE/EXSTYLE from WindowFlags and can
-    // restore WS_CAPTION + drop TRANSPARENT|LAYERED — same ghost titlebar /
-    // broken click-through as hover resize. Repair after every layer change
-    // (setup and Settings → «Слой отображения»).
     reassert_frameless_chrome_keep_size(window);
+    reassert_dwm_alpha_for_window(window);
+    assert_transparent_webview_bg(window, true);
+    NEED_TRANSPARENT_BG_REASSERT.store(false, Ordering::SeqCst);
+    if let Err(err) = sync_pill_window_rgn(window) {
+        log::warn!("[win-backdrop] region sync after layer change failed: {err}");
+    }
+    invalidate_dock_window(window, "after_layer");
+    log_pale(
+        "LAYER",
+        format!(
+            "healed after set_always_on_top={on_top} {}",
+            window
+                .hwnd()
+                .map(hwnd_style_snap)
+                .unwrap_or_else(|_| "hwnd=?".into())
+        ),
+        false,
+    );
+
     let accept_hits = REGION_RELAXED.load(Ordering::SeqCst)
         || MENU_REGION_HOLD.load(Ordering::SeqCst)
         || menu_overlay_active(window);
@@ -2543,7 +2555,11 @@ pub(crate) fn consume_surface_reassert_if_needed(window: &WebviewWindow) {
 pub(crate) fn on_surface_changed(window: &WebviewWindow) {
     let t = now_ms();
     let last = LAST_SURFACE_REASSERT_MS.load(Ordering::Relaxed);
-    if t.saturating_sub(last) < SURFACE_REASSERT_DEBOUNCE_MS {
+    // LAYERED restore needs DefaultBackgroundColor=0 on the next tick — do not
+    // sit behind the 400ms debounce (white corners otherwise linger after Tao
+    // stomps that the layer-settings path does not own).
+    let urgent_transparent = NEED_TRANSPARENT_BG_REASSERT.load(Ordering::SeqCst);
+    if !urgent_transparent && t.saturating_sub(last) < SURFACE_REASSERT_DEBOUNCE_MS {
         // Do not re-arm when chrome is healthy — that locked a 20 Hz loop with
         // WM_WINDOWPOSCHANGED from SetWindowRgn echoing forever.
         if surface_chrome_needs_reassert(window) {
@@ -2556,6 +2572,9 @@ pub(crate) fn on_surface_changed(window: &WebviewWindow) {
             log_pale("SURFACE", "debounce+healthy skip", true);
         }
         return;
+    }
+    if urgent_transparent {
+        log_pale("SURFACE", "bypass debounce (pending transparent bg)", false);
     }
     LAST_SURFACE_REASSERT_MS.store(t, Ordering::Relaxed);
     NEED_SURFACE_REASSERT.store(false, Ordering::SeqCst);
