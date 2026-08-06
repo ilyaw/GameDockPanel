@@ -117,7 +117,8 @@ pub fn get_diagnostics(app: AppHandle) -> Result<DiagnosticsPayload, String> {
         "Send: (1) this JSON from «Скопировать диагностику» (2) the latest gamedockpanel*.log \
          from logDir (3) tauri_windows_diagnostic.log from the same logDir \
          (4) screenshot with Windows debug overlay ON if possible. \
-         Look for [SHOW]/[CHROME]/[LAUNCH]/[PAPERCLIP] lines and [win-backdrop]. \
+         Look for [display] scale/dpr/screen/export_px, [icon-export] upscale, \
+         [win-diag] DPI_MISMATCH, and [SHOW]/[CHROME] lines. \
          Toggle overlay in Settings → System."
     );
 
@@ -188,7 +189,8 @@ pub fn log_frontend_error(
 }
 
 /// WebView reports `devicePixelRatio` + CSS viewport so logs can catch DPI
-/// mismatch (blurry / "low HD" stretch). No-op on non-Windows.
+/// mismatch (blurry / "low HD" stretch). Windows stores metrics for `[win-diag]`;
+/// other platforms no-op (macOS Retina path does not need this triage).
 #[tauri::command]
 pub fn report_webview_render_metrics(
     device_pixel_ratio: f64,

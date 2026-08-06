@@ -26,11 +26,22 @@ function App() {
   // Windows: report DPR vs Tauri scale so blurry/"low HD" triage shows in logs.
   useLayoutEffect(() => {
     if (!IS_WINDOWS || label !== "main") return;
+    let lastKey = "";
     const report = () => {
+      const devicePixelRatio = window.devicePixelRatio;
+      const viewportCssW = window.innerWidth;
+      const viewportCssH = window.innerHeight;
+      const key = `${devicePixelRatio}|${viewportCssW}|${viewportCssH}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        console.info(
+          `[display] dpr_js=${devicePixelRatio} viewport_css=${viewportCssW}x${viewportCssH} screen=${window.screen.width}x${window.screen.height}`,
+        );
+      }
       void invoke("report_webview_render_metrics", {
-        devicePixelRatio: window.devicePixelRatio,
-        viewportCssW: window.innerWidth,
-        viewportCssH: window.innerHeight,
+        devicePixelRatio,
+        viewportCssW,
+        viewportCssH,
       }).catch((error: unknown) => {
         console.warn("[dock] report_webview_render_metrics failed:", error);
       });

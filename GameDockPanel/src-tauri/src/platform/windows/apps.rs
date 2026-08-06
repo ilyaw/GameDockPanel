@@ -11,6 +11,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW,
     SetForegroundWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE,
@@ -742,8 +743,27 @@ fn current_icon_size_dip_from_app(app: &AppHandle) -> f64 {
     guard.icon_size_px
 }
 
+/// Prefer Tauri window scale; fall back to HWND DPI / primary monitor.
+/// Never default to `1.0` — that under-exports icons on HiDPI (macOS uses 2.0).
 fn dock_window_scale_factor(app: &AppHandle) -> f64 {
-    app.get_webview_window("main")
-        .and_then(|window| window.scale_factor().ok())
-        .unwrap_or(1.0)
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(scale) = window.scale_factor() {
+            if scale.is_finite() && scale > 0.0 {
+                return scale;
+            }
+        }
+        if let Ok(hwnd) = window.hwnd() {
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            if dpi > 0 {
+                return dpi as f64 / 96.0;
+            }
+        }
+    }
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        if scale.is_finite() && scale > 0.0 {
+            return scale;
+        }
+    }
+    2.0
 }

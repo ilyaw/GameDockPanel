@@ -133,6 +133,8 @@ static NEED_TRANSPARENT_BG_REASSERT: AtomicBool = AtomicBool::new(false);
 static PAPERCLIP_SELF_HEAL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// Subclass sets this on focus/size/DPI/repair; input poller consumes with full reassert.
 static NEED_SURFACE_REASSERT: AtomicBool = AtomicBool::new(false);
+/// Set by `WM_DPICHANGED` subclass; consumed by the diag poller to re-export icons.
+static NEED_ICON_DPI_REFRESH: AtomicBool = AtomicBool::new(false);
 /// Coalesce fire-and-forget `run_on_main_thread` posts from the input poller.
 static SURFACE_REASSERT_SCHEDULED: AtomicBool = AtomicBool::new(false);
 /// Rate-limit surface reassert (ms since UNIX_EPOCH).
@@ -231,6 +233,10 @@ pub struct WindowsBackdropSnapshot {
     /// Primary screen size as this process sees it (`GetSystemMetrics`) —
     /// smaller than `physical_screen_px` when the process is DPI-virtualized.
     pub virtual_screen_px: Option<(i32, i32)>,
+    /// Current dock icon size in DIP (settings / live preview).
+    pub icon_size_dip: Option<f64>,
+    /// PNG export edge length: `ceil(icon_dip × 1.4 × scale)`, clamped 128–512.
+    pub icon_export_px: Option<u32>,
     /// Always true — soft CSS-only mode removed.
     pub hard_clip_enabled: bool,
     /// Always true — GDI RoundRect always applied.
@@ -986,6 +992,9 @@ unsafe extern "system" fn dock_chrome_subclass_proc(
             // Cheap HWND repair always. Full ChromeGuard path only for real
             // external events — not for our own SetWindowRgn/FRAMECHANGED echo
             // (that feedback loop ran SURFACE_RUN at ~20 Hz forever).
+            if msg == WM_DPICHANGED {
+                NEED_ICON_DPI_REFRESH.store(true, Ordering::SeqCst);
+            }
             let suppress = surface_reassert_suppressed();
             let repaired = repair_dock_hwnd_chrome(hwnd);
             let want_full = match msg {
@@ -1548,6 +1557,13 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         .lock()
         .ok()
         .and_then(|g| g.clone());
+    let icon_size_dip = Some(current_icon_size_dip(window));
+    let icon_export_px = match (icon_size_dip, scale) {
+        (Some(dip), Some(sf)) => {
+            Some(crate::platform::icon_accent::icon_export_px(dip, sf))
+        }
+        _ => None,
+    };
 
     WindowsBackdropSnapshot {
         last_pill_client: last_pill,
@@ -1587,11 +1603,36 @@ pub fn windows_backdrop_snapshot(window: &WebviewWindow) -> WindowsBackdropSnaps
         dpi_awareness,
         physical_screen_px,
         virtual_screen_px,
+        icon_size_dip,
+        icon_export_px,
         hard_clip_enabled,
         hard_clip_active: hard_clip_active_flag,
         last_pale_path,
         focus_surface_skipped: FOCUS_SURFACE_SKIPPED.load(Ordering::Relaxed),
     }
+}
+
+/// One-shot `[display]` line for support triage (scale / DPI / screen / icon export).
+pub fn log_display_snapshot(window: &WebviewWindow) {
+    let snap = windows_backdrop_snapshot(window);
+    log::info!(
+        "[display] scale={:?} dpr_js={:?} viewport_css={:?} dpi={:?} awareness={:?} \
+         screen_phys={:?} screen_virt={:?} inner={:?} outer={:?} pos={:?} \
+         icon_dip={:?} export_px={:?} dpi_mismatch={:?}",
+        snap.scale_factor,
+        snap.frontend_device_pixel_ratio,
+        snap.frontend_viewport_css,
+        snap.window_dpi,
+        snap.dpi_awareness,
+        snap.physical_screen_px,
+        snap.virtual_screen_px,
+        snap.inner_size_px,
+        snap.outer_size_px,
+        snap.outer_position_px,
+        snap.icon_size_dip,
+        snap.icon_export_px,
+        snap.dpi_mismatch,
+    );
 }
 
 fn windows_debug_overlay_enabled(window: &WebviewWindow) -> bool {
@@ -1638,6 +1679,12 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
             // on the next hover/refresh.
             consume_pending_transparent_reassert(&window);
             consume_surface_reassert_if_needed(&window);
+            if NEED_ICON_DPI_REFRESH.swap(false, Ordering::SeqCst) {
+                let state = window.state::<AppsState>();
+                crate::platform::refresh_dock_icons(window.app_handle(), &state);
+                log::info!("[icon-export] refreshed after WM_DPICHANGED");
+                log_display_snapshot(&window);
+            }
             let snap = windows_backdrop_snapshot(&window);
             let overlay = windows_debug_overlay_enabled(&window);
             let issues_changed = snap.health_issues != last_issues;
@@ -1710,7 +1757,7 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         "[win-diag] heartbeat tick={tick} healthy outer={:?} pill={:?} \
                          scale={:?} dpr_js={:?} viewport_css={:?} inner={:?} dpi_mismatch={:?} \
                          dpi={:?} awareness={:?} screen_phys={:?} screen_virt={:?} \
-                         dwm_alpha_reasserts={}",
+                         icon_dip={:?} export_px={:?} dwm_alpha_reasserts={}",
                         snap.outer_size_px,
                         snap.stored_pill_dip,
                         snap.scale_factor,
@@ -1722,6 +1769,8 @@ pub(crate) fn start_windows_diag_poller(window: WebviewWindow) {
                         snap.dpi_awareness,
                         snap.physical_screen_px,
                         snap.virtual_screen_px,
+                        snap.icon_size_dip,
+                        snap.icon_export_px,
                         snap.dwm_alpha_reasserts,
                     );
                 }

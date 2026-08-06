@@ -40,6 +40,12 @@ export type WindowsDiagSnapshot = {
   healthy: boolean;
   /** Advisory — Tauri scale vs JS DPR; does not mean chrome is broken. */
   dpiMismatch: string | null;
+  windowDpi: number | null;
+  dpiAwareness: string | null;
+  physicalScreenPx: [number, number] | null;
+  virtualScreenPx: [number, number] | null;
+  iconSizeDip: number | null;
+  iconExportPx: number | null;
   hardClipEnabled: boolean;
   hardClipActive: boolean;
   lastPalePath: string | null;
@@ -144,6 +150,11 @@ export function WindowsDebugHud({ enabled }: { enabled: boolean }) {
               }{" "}
               stored={pair(snap.storedPillDip, 0)} scale={snap.scaleFactor?.toFixed(2) ?? "?"}{" "}
               dpr={snap.frontendDevicePixelRatio?.toFixed(2) ?? "?"}
+            </p>
+            <p>
+              dpi={snap.windowDpi ?? "?"} awareness={snap.dpiAwareness ?? "?"} screen_phys=
+              {pair(snap.physicalScreenPx)} screen_virt={pair(snap.virtualScreenPx)} icon=
+              {snap.iconSizeDip?.toFixed(0) ?? "?"}/{snap.iconExportPx ?? "?"}px
             </p>
             <p>
               CAPTION={snap.hasCaption ? "1" : "0"} POPUP={snap.isPopup ? "1" : "0"} LAYERED=

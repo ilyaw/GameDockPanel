@@ -16,9 +16,9 @@ use super::diag_file;
 use super::input::start_dock_input;
 use super::region;
 use super::window::{
-    apply_dock_window_layer, fallback_pill_for_setup, reassert_dwm_alpha_for_window,
-    set_dock_click_through, start_windows_diag_poller, store_pill_client_rect_for_setup,
-    windows_backdrop_snapshot,
+    apply_dock_window_layer, fallback_pill_for_setup, log_display_snapshot,
+    reassert_dwm_alpha_for_window, set_dock_click_through, start_windows_diag_poller,
+    store_pill_client_rect_for_setup, windows_backdrop_snapshot,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -239,6 +239,16 @@ fn perform_show(app: &AppHandle) -> Result<(), String> {
         log::warn!("[win-backdrop] pill region after show failed: {err}");
     }
     ChromeGuard::on_surface_changed(&window);
+
+    // Icons may have been resolved while the window was still hidden / scale
+    // unknown — re-rasterize at the live DPI once the HWND is mapped.
+    {
+        let state = app.state::<AppsState>();
+        crate::platform::refresh_dock_icons(app, &state);
+        log::info!("[icon-export] refreshed after show_main_window");
+    }
+
+    log_display_snapshot(&window);
 
     diag_file::ok(
         "SHOW",

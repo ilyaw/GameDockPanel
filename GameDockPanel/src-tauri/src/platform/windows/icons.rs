@@ -39,7 +39,14 @@ pub fn resolve_app_icon(
 
     let export_px = icon_export_px(icon_size_dip, scale_factor);
     match icon_to_png_and_accent(path, export_px) {
-        Ok(result) => result,
+        Ok(result) => {
+            log::debug!(
+                "[icon-export] path={} dip={icon_size_dip:.0} scale={scale_factor:.2} \
+                 export_px={export_px}",
+                path.display()
+            );
+            result
+        }
         Err(err) => {
             log::warn!("resolve_app_icon failed for {app_id}: {err}");
             IconResolveResult::default()
@@ -72,7 +79,8 @@ fn icon_to_png_and_accent(path: &Path, export_px: u32) -> Result<IconResolveResu
         Ok(result) => Ok(result),
         Err(err) => {
             log::warn!(
-                "IShellItemImageFactory failed ({err}), falling back to SHGFI_LARGEICON"
+                "[icon-export] IShellItemImageFactory failed ({err}), \
+                 falling back to SHGFI_LARGEICON (soft on HiDPI)"
             );
             shgfi_large_icon(path, export_px)
         }
@@ -90,6 +98,9 @@ fn shell_item_image(path: &Path, export_px: u32) -> Result<IconResolveResult, St
         cx: export_px as i32,
         cy: export_px as i32,
     };
+    // BIGGERSIZEOK lets Shell return a larger native asset; we always enforce
+    // exact `export_px` below (Shell's RESIZETOFIT alone is not trustworthy —
+    // it often returns 32/48/64 and leaves the browser to bilinear-upscale).
     let flags = SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | SIIGBF_RESIZETOFIT;
     let hbmp = unsafe {
         factory
@@ -97,7 +108,7 @@ fn shell_item_image(path: &Path, export_px: u32) -> Result<IconResolveResult, St
             .map_err(|e| format!("GetImage: {e}"))?
     };
 
-    let result = hbitmap_to_icon_result(hbmp);
+    let result = hbitmap_to_icon_result(hbmp, export_px, path);
     unsafe {
         let _ = DeleteObject(HGDIOBJ(hbmp.0));
     }
@@ -133,7 +144,11 @@ fn shgfi_large_icon(path: &Path, export_px: u32) -> Result<IconResolveResult, St
     result
 }
 
-fn hbitmap_to_icon_result(hbmp: HBITMAP) -> Result<IconResolveResult, String> {
+fn hbitmap_to_icon_result(
+    hbmp: HBITMAP,
+    export_px: u32,
+    path: &Path,
+) -> Result<IconResolveResult, String> {
     let mut bm = BITMAP::default();
     let got = unsafe {
         GetObjectW(
@@ -203,13 +218,53 @@ fn hbitmap_to_icon_result(hbmp: HBITMAP) -> Result<IconResolveResult, String> {
         }
         unpremultiply_rgba(&mut rgba);
 
-        rgba_to_icon_result(width, height, rgba)
+        let (out_w, out_h, out_rgba) =
+            ensure_export_size(width, height, rgba, export_px, path)?;
+        rgba_to_icon_result(out_w, out_h, out_rgba)
     })();
 
     unsafe {
         let _ = ReleaseDC(None, hdc_screen);
     }
     result
+}
+
+/// Shell often returns a bitmap smaller than the requested size. Encode that
+/// as-is and the WebView bilinear-upscales under CSS magnify → soft icons.
+/// Always land on exactly `export_px × export_px` before PNG encode.
+fn ensure_export_size(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    export_px: u32,
+    path: &Path,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    if width == export_px && height == export_px {
+        return Ok((width, height, rgba));
+    }
+
+    let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(width, height, rgba).ok_or("invalid image buffer")?;
+    let resized = image::imageops::resize(
+        &img,
+        export_px,
+        export_px,
+        image::imageops::FilterType::CatmullRom,
+    );
+
+    if width < export_px || height < export_px {
+        log::info!(
+            "[icon-export] upscale path={} got={width}x{height} → export={export_px}",
+            path.display()
+        );
+    } else {
+        log::debug!(
+            "[icon-export] downscale path={} got={width}x{height} → export={export_px}",
+            path.display()
+        );
+    }
+
+    Ok((export_px, export_px, resized.into_raw()))
 }
 
 fn unpremultiply_rgba(rgba: &mut [u8]) {

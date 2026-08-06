@@ -9,7 +9,7 @@ pub struct IconResolveResult {
     pub accent_color: Option<String>,
 }
 
-mod icon_accent;
+pub(crate) mod icon_accent;
 
 #[cfg(target_os = "macos")]
 mod macos;
