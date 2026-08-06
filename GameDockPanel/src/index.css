@@ -314,23 +314,25 @@ img {
 
 /*
   Soft-mask the RGB ring only: stair-steps from GDI RoundRect land on
-  low-alpha rainbow pixels. Fill stays unmasked so the fade composites over
-  the sealed dark underlay, not over a white redirection surface.
+  low-alpha rainbow pixels. 4px sits between the old 3px (staircase still
+  visible on Top @ 100% DPI) and a full 5px inset fade (washed-out ring on
+  a ~71px-tall pill). Fill stays unmasked so the fade composites over the
+  sealed dark underlay, not over a white redirection surface.
 */
 .dock-root--windows .dock-win-hardclip .dock-border-clip {
   -webkit-mask-image:
     linear-gradient(
       to top,
       transparent 0,
-      #000 3px,
-      #000 calc(100% - 3px),
+      #000 4px,
+      #000 calc(100% - 4px),
       transparent
     ),
     linear-gradient(
       to left,
       transparent 0,
-      #000 3px,
-      #000 calc(100% - 3px),
+      #000 4px,
+      #000 calc(100% - 4px),
       transparent
     );
   -webkit-mask-composite: source-in;
@@ -338,15 +340,15 @@ img {
     linear-gradient(
       to top,
       transparent 0,
-      #000 3px,
-      #000 calc(100% - 3px),
+      #000 4px,
+      #000 calc(100% - 4px),
       transparent
     ),
     linear-gradient(
       to left,
       transparent 0,
-      #000 3px,
-      #000 calc(100% - 3px),
+      #000 4px,
+      #000 calc(100% - 4px),
       transparent
     );
   mask-composite: intersect;

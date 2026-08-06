@@ -134,7 +134,11 @@ fn hue_to_rgb_channel(p: f64, q: f64, mut t: f64) -> f64 {
 
 pub fn icon_export_px(icon_size_dip: f64, scale_factor: f64) -> u32 {
     const ICON_EXPORT_MAX_PX: f64 = 512.0;
-    const ICON_EXPORT_MIN_PX: f64 = 128.0;
+    // 256 (was 128): Windows-only consumer (`platform/windows/icons.rs`).
+    // At 100% DPI, 44–72 CSS px slots look soft from a 128px Shell asset
+    // after WebView downscale + magnify — request jumbo-class bitmaps.
+    // macOS keeps its own `icon_export_px` in `platform/macos.rs`.
+    const ICON_EXPORT_MIN_PX: f64 = 256.0;
     const MAGNIFY_MAX_SCALE: f64 = 1.4;
     (icon_size_dip * MAGNIFY_MAX_SCALE * scale_factor)
         .ceil()

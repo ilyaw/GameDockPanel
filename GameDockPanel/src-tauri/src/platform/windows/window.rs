@@ -55,7 +55,7 @@
 //!   outside paint cannot show pale; expanded margins notch out corner tabs
 //!   beside the RoundRect (pale vertical sticks on Top dock). Hit-test stays
 //!   on the **full** CSS pill — shrinking it oscillated with DOM mouseleave.
-//! - Frontend soft-mask (~3px) is **border-only** under `.dock-win-hardclip`.
+//! - Frontend soft-mask (~4px) is **border-only** under `.dock-win-hardclip`.
 //!   Masking the dark fill faded its top edge onto the WebView redirection
 //!   surface → thin white strip under the RGB ring (Top dock, healthy STYLE).
 //! - Hover/`WM_SIZE`: apply region **before** invalidate (log: `INVALIDATE
@@ -75,7 +75,7 @@
 
 /// Matches frontend `--dock-win-edge-inset` under `.dock-win-hardclip` (DIP).
 /// Applied to GDI RoundRect only — click-through hit-test uses the full pill.
-/// 5 DIP: room for the ~3px CSS border soft-mask so GDI knife-edge stair-steps
+/// 5 DIP: room for the ~4px CSS border soft-mask so GDI knife-edge stair-steps
 /// land on low-alpha rainbow pixels (fill stays unmasked / sealed).
 pub(crate) const WIN_PAINT_INSET_DIP: f64 = 5.0;
 

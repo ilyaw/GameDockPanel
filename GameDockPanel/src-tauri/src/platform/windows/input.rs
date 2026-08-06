@@ -33,6 +33,17 @@ use crate::platform::geometry::{
 use super::window::{consume_surface_reassert_if_needed, set_dock_click_through};
 
 const CLICK_POLL_MS: u64 = 50;
+/// While LBUTTON is down (Explorer file drag), poll faster — the rest dock is
+/// only ~70 DIP tall, so a 50 ms tick routinely misses the entire pass and
+/// never clears `WS_EX_TRANSPARENT` for OLE `DragEnter`.
+const DRAG_POLL_MS: u64 = 8;
+/// Expand the geometric hit box while LBUTTON is held so we arm the drop
+/// target *before* the cursor reaches the pill (OLE samples WindowFromPoint
+/// continuously; TRANSPARENT must already be off on entry).
+const DRAG_PROXIMITY_PX: i32 = 160;
+/// Keep click-through off briefly after the cursor leaves during a drag so
+/// a fast drop on the trailing edge still reaches WebView2.
+const DRAG_ARM_HOLD_TICKS: u32 = 8;
 /// Hover leave must survive the expand resize (log: in_pill true→false in
 /// ~64ms while the cursor never left the visual pill). ~150ms = 3 ticks.
 const HOVER_LEAVE_DEBOUNCE_TICKS: u32 = 3;
@@ -53,6 +64,8 @@ fn start_click_through_poller(window: WebviewWindow) {
         let mut dock_hovered = false;
         let mut leave_debounce_ticks: u32 = 0;
         let mut last_cursor: Option<DockCursorPayload> = None;
+        let mut drag_armed = false;
+        let mut drag_arm_hold_ticks: u32 = 0;
 
         // Force initial TRANSPARENT|LAYERED on the UI thread — setup may have
         // raced with Tao `show`/`always_on_top`, and `ignoring=true` alone
@@ -62,7 +75,18 @@ fn start_click_through_poller(window: WebviewWindow) {
         }
 
         loop {
-            std::thread::sleep(Duration::from_millis(CLICK_POLL_MS));
+            // Peek before sleep only to pick poll rate; button+cursor are
+            // resampled together after sleep so arming is not one tick stale.
+            let lbutton_peek = unsafe {
+                use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+                GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
+            };
+            let poll_ms = if lbutton_peek || drag_armed {
+                DRAG_POLL_MS
+            } else {
+                CLICK_POLL_MS
+            };
+            std::thread::sleep(Duration::from_millis(poll_ms));
 
             // Faster than the 2s diag poller — repair LAYERED/region after
             // focus/size stomps from launch or DWM within one poll tick.
@@ -73,20 +97,41 @@ fn start_click_through_poller(window: WebviewWindow) {
             };
             let cursor_x = cursor.x.round() as i32;
             let cursor_y = cursor.y.round() as i32;
-
-            let pill_cursor =
-                pill_cursor_at_screen(&window, cursor_x, cursor_y, dock_hovered);
-            let in_pill = pill_cursor.is_some();
-            let in_window = cursor_in_window_bounds(&window, cursor_x, cursor_y);
-            // Explorer drag-drop needs the WebView to receive OLE events — while
-            // click-through (`WS_EX_TRANSPARENT`) is on, drops never reach
-            // `onDragDropEvent`. Briefly accept hits over the whole window while
-            // the left button is held (typical external file drag).
             let lbutton_down = unsafe {
                 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
                 GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0
             };
-            let drag_over_window = lbutton_down && in_window;
+
+            let pill_cursor =
+                pill_cursor_at_screen(&window, cursor_x, cursor_y, dock_hovered);
+            let in_pill = pill_cursor.is_some();
+            // Explorer drag-drop needs the WebView to receive OLE events — while
+            // click-through (`WS_EX_TRANSPARENT`) is on, drops never reach
+            // `onDragDropEvent`. Arm early (proximity + fast poll) so TRANSPARENT
+            // is already cleared when OLE's WindowFromPoint samples the pill.
+            //
+            // Intentionally does NOT drive `want_hovered` / region_relaxed:
+            // expanding the HWND on any nearby LBUTTON (text select, window
+            // move) stole input from apps under Top/Left docks.
+            let near_for_drag =
+                cursor_near_window_bounds(&window, cursor_x, cursor_y, DRAG_PROXIMITY_PX);
+            let drag_candidate = lbutton_down && near_for_drag;
+            if drag_candidate {
+                drag_arm_hold_ticks = DRAG_ARM_HOLD_TICKS;
+            } else if drag_arm_hold_ticks > 0 {
+                drag_arm_hold_ticks -= 1;
+            }
+            let want_drag_arm = drag_candidate || drag_arm_hold_ticks > 0;
+            if want_drag_arm != drag_armed {
+                drag_armed = want_drag_arm;
+                log::info!(
+                    "[win-drag] arm={drag_armed} lbutton={} near={} in_pill={} \
+                     hold_ticks={drag_arm_hold_ticks} cursor=({cursor_x},{cursor_y})",
+                    u8::from(lbutton_down),
+                    u8::from(near_for_drag),
+                    u8::from(in_pill),
+                );
+            }
 
             // Enter immediately; leave only after debounce so HWND expand
             // resize does not flash region_relaxed false (pale margin tabs).
@@ -127,10 +172,21 @@ fn start_click_through_poller(window: WebviewWindow) {
                 }
             }
 
-            let should_ignore = !in_pill && !drag_over_window;
+            // Drag arm only clears TRANSPARENT — hit area stays the rest
+            // RoundRect until a real pill hover expands the frame.
+            let should_ignore = !in_pill && !drag_armed;
             if should_ignore != ignoring {
                 match set_dock_click_through(&window, should_ignore) {
-                    Ok(()) => ignoring = should_ignore,
+                    Ok(()) => {
+                        ignoring = should_ignore;
+                        if drag_armed || !should_ignore {
+                            log::info!(
+                                "[win-drag] click_through={} (drag_armed={drag_armed} in_pill={})",
+                                u8::from(should_ignore),
+                                u8::from(in_pill),
+                            );
+                        }
+                    }
                     Err(err) => {
                         log::warn!("[win-backdrop] click-through toggle failed: {err}")
                     }
@@ -140,17 +196,22 @@ fn start_click_through_poller(window: WebviewWindow) {
     });
 }
 
-fn cursor_in_window_bounds(window: &WebviewWindow, screen_x: i32, screen_y: i32) -> bool {
+fn cursor_near_window_bounds(
+    window: &WebviewWindow,
+    screen_x: i32,
+    screen_y: i32,
+    margin: i32,
+) -> bool {
     let Ok(outer_pos) = window.outer_position() else {
         return false;
     };
     let Ok(outer_size) = window.outer_size() else {
         return false;
     };
-    let left = outer_pos.x;
-    let top = outer_pos.y;
-    let right = left + outer_size.width as i32;
-    let bottom = top + outer_size.height as i32;
+    let left = outer_pos.x - margin;
+    let top = outer_pos.y - margin;
+    let right = outer_pos.x + outer_size.width as i32 + margin;
+    let bottom = outer_pos.y + outer_size.height as i32 + margin;
     screen_x >= left && screen_x <= right && screen_y >= top && screen_y <= bottom
 }
 

@@ -31,10 +31,50 @@ function mergeIconUpdates(
   });
 }
 
+/** Normalize OS / WebView drop paths (`file://`, `%20`, mixed slashes). */
+function normalizeDroppedPath(path: string): string {
+  let next = path.trim();
+  if (!next.toLowerCase().startsWith("file:")) {
+    return next;
+  }
+  try {
+    const url = new URL(next);
+    if (url.protocol === "file:") {
+      // Chromium-style: `file:///C:/foo` → pathname `/C:/foo`;
+      // UNC: `file://server/share/foo` → host `server`, pathname `/share/foo`.
+      if (url.host) {
+        next = `\\\\${url.host}${decodeURIComponent(url.pathname)}`.replace(
+          /\//g,
+          "\\",
+        );
+      } else {
+        next = decodeURIComponent(url.pathname);
+        if (/^\/[A-Za-z]:/.test(next)) {
+          next = next.slice(1);
+        }
+      }
+      return next;
+    }
+  } catch {
+    // Fall through to manual strip for odd non-URL file: strings.
+  }
+  next = next.replace(/^file:\/\//i, "");
+  try {
+    next = decodeURIComponent(next);
+  } catch {
+    /* keep raw */
+  }
+  if (/^\/[A-Za-z]:/.test(next)) {
+    next = next.slice(1);
+  }
+  return next;
+}
+
 function isAppBundlePath(path: string): boolean {
-  const lower = path.toLowerCase();
+  const lower = normalizeDroppedPath(path).toLowerCase().replace(/\//g, "\\");
   return (
     lower.endsWith(".app") ||
+    lower.includes(".app\\") ||
     lower.includes(".app/") ||
     lower.endsWith(".exe") ||
     lower.endsWith(".lnk")
@@ -276,12 +316,19 @@ export function useDockApps() {
             return;
           }
 
-          const appPath = event.payload.paths.find(isAppBundlePath);
+          const appPath = event.payload.paths
+            .map(normalizeDroppedPath)
+            .find(isAppBundlePath);
           if (!appPath) {
+            console.error(
+              "drop rejected: no .exe/.lnk/.app in",
+              event.payload.paths,
+            );
             reportReject();
             return;
           }
 
+          console.info(`[dock] drop add path=${appPath} insert=${insertIndex}`);
           addAppPath(appPath, insertIndex).catch((error: unknown) => {
             console.error("Failed to add app from drop:", error);
           });
